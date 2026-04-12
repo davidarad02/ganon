@@ -33,7 +33,7 @@ l_cleanup:
     return rc;
 }
 
-err_t main(void) {
+int main(void) {
     err_t rc = E__SUCCESS;
     int result = 0;
 
@@ -51,5 +51,5 @@ err_t main(void) {
     LOG_INFO("loop_demo sum: %d", sum);
 
 l_cleanup:
-    return rc;
+    return (int)rc;
 }
