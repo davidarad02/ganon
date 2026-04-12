@@ -1,8 +1,8 @@
 VERSION := $(shell cat VERSION)
 
-.PHONY: all clean x64 x64d x64r armv5 armv5d armv5r mips32be mips32bed mips32ber
+.PHONY: all clean x64 x64d x64r arm armd armr mips32be mips32bed mips32ber
 
-all: x64r x64d armv5r armv5d mips32ber mips32bed
+all: x64r x64d armr armd mips32ber mips32bed
 
 x64r:
 	@mkdir -p bin
@@ -18,19 +18,19 @@ x64d:
 
 x64: x64r x64d
 
-armv5r:
+armr:
 	@mkdir -p bin
-	cmake -B build-armv5 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/armv5-toolchain.cmake -DTARGET_NAME=ganon_$(VERSION)_armv5_release
-	cmake --build build-armv5
-	@rm -rf build-armv5
+	cmake -B build-arm -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/armv5-toolchain.cmake -DTARGET_NAME=ganon_$(VERSION)_arm_release
+	cmake --build build-arm
+	@rm -rf build-arm
 
-armv5d:
+armd:
 	@mkdir -p bin
-	cmake -B build-armv5d -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=cmake/armv5-toolchain.cmake -DTARGET_NAME=ganon_$(VERSION)_armv5_debug
-	cmake --build build-armv5d
-	@rm -rf build-armv5d
+	cmake -B build-armd -DCMAKE_BUILD_TYPE=Debug -DCMAKE_TOOLCHAIN_FILE=cmake/armv5-toolchain.cmake -DTARGET_NAME=ganon_$(VERSION)_arm_debug
+	cmake --build build-armd
+	@rm -rf build-armd
 
-armv5: armv5r armv5d
+arm: armr armd
 
 mips32ber:
 	@mkdir -p bin
@@ -47,4 +47,4 @@ mips32bed:
 mips32be: mips32ber mips32bed
 
 clean:
-	rm -rf build-x64 build-x64d build-armv5 build-armv5d build-mips32be build-mips32bed bin
+	rm -rf build-x64 build-x64d build-arm build-armd build-mips32be build-mips32bed bin
