@@ -5,6 +5,7 @@ This is the Ganon project - a C application built with CMake.
 ## Project Structure
 
 - `main.c` - Entry point
+- `VERSION` - Version file (e.g., "1.0.0")
 - `CMakeLists.txt` - Build configuration
 - `Makefile` - Build orchestration
 - `cmake/` - Toolchain files for cross-compilation
@@ -15,7 +16,7 @@ This is the Ganon project - a C application built with CMake.
 - Build x64: `make x64`
 - Build armv5: `make armv5`
 - Build mips32be: `make mips32be`
-- Run: `./bin/ganon_x64`
+- Run: `./bin/ganon_1.0.0_x64`
 - Clean: `make clean`
 
 ## Cross-Compilation
