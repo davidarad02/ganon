@@ -15,7 +15,8 @@ l_cleanup:
     return rc;
 }
 
-int loop_demo(const int *arr, int count) {
+int loop_demo(const int *arr, int count, int *sum_out) {
+    int rc = 0;
     int sum = 0;
 
     for (int i = 0; i < count; i++) {
@@ -24,18 +25,31 @@ int loop_demo(const int *arr, int count) {
         sum += arr[i];
     }
 
-    return sum;
+    if (sum_out != NULL) {
+        *sum_out = sum;
+    }
+
+l_cleanup:
+    return rc;
 }
 
 int main(void) {
+    int rc = 0;
     int result = 0;
 
-    (void)rc_demo(1, 2, &result);
+    FAIL_IF(rc_demo(1, 2, &result) != 0,
+            E__MAIN__FAILURE);
+
     LOG_INFO("rc_demo returned %d", result);
 
     const int arr[] = {10, 20, -5, 30, 40};
-    int sum = loop_demo(arr, (int)(sizeof(arr) / sizeof(arr[0])));
+    int sum = 0;
+
+    FAIL_IF(loop_demo(arr, (int)(sizeof(arr) / sizeof(arr[0])), &sum) != 0,
+            E__MAIN__FAILURE);
+
     LOG_INFO("loop_demo sum: %d", sum);
 
-    return 0;
+l_cleanup:
+    return rc;
 }
