@@ -4,7 +4,8 @@
 int rc_demo(int a, int b, int *result_out) {
     int rc = 0;
 
-    FAIL_IF(a == b, E__MAIN__RC_DEMO__SOME_ERROR);
+    FAIL_IF(a == b,
+            E__MAIN__RC_DEMO__SOME_ERROR);
 
     if (result_out != NULL) {
         *result_out = a + b;
