@@ -30,8 +30,8 @@ This is the Ganon project - a C application built with CMake.
 
 ## Build Types
 
-- **Release**: `-O3 -s` (stripped), outputs: `ganon_<ver>_<arch>`
-- **Debug**: `-g -O0 -D__DEBUG__` (with symbols), outputs: `ganon_<ver>_<arch>_debug`
+- **Release**: `-O3 -s` (stripped), outputs: `ganon_<ver>_<arch>`. No logging code compiled in.
+- **Debug**: `-g -O0 -D__DEBUG__` (with symbols), outputs: `ganon_<ver>_<arch>_debug`. All logging enabled.
 
 ## Cross-Compilation
 
