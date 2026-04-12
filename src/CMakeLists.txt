@@ -2,7 +2,13 @@ if(NOT TARGET_NAME)
     set(TARGET_NAME "ganon")
 endif()
 
-add_executable(${TARGET_NAME} main.c logging.c)
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(LOGGING_SOURCES main.c logging.c)
+else()
+    set(LOGGING_SOURCES main.c)
+endif()
+
+add_executable(${TARGET_NAME} ${LOGGING_SOURCES})
 
 target_include_directories(${TARGET_NAME} PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
