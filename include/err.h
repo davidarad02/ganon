@@ -5,11 +5,11 @@ typedef enum {
     /* Success */
     E__SUCCESS = 0,
 
-    /* Main module */
+    /* main.c */
     /* Demo error for function conventions */
     E__MAIN__RC_DEMO__SOME_ERROR,
 
-    /* Args module */
+    /* args.c */
     E__ARGS__INVALID_ARGUMENTS,
     E__ARGS__CONFLICTING_ARGUMENTS,
     E__ARGS__MISSING_VALUE,
