@@ -1,8 +1,8 @@
 #include "common.h"
 #include "logging.h"
 
-int rc_demo(int a, int b, int *result_out) {
-    int rc = E__SUCCESS;
+err_t rc_demo(int a, int b, int *result_out) {
+    err_t rc = E__SUCCESS;
 
     FAIL_IF(a == b,
             E__MAIN__RC_DEMO__SOME_ERROR);
@@ -15,8 +15,8 @@ l_cleanup:
     return rc;
 }
 
-int loop_demo(const int *arr, int count, int *sum_out) {
-    int rc = E__SUCCESS;
+err_t loop_demo(const int *arr, int count, int *sum_out) {
+    err_t rc = E__SUCCESS;
     int sum = 0;
 
     for (int i = 0; i < count; i++) {
@@ -33,8 +33,8 @@ l_cleanup:
     return rc;
 }
 
-int main(void) {
-    int rc = E__SUCCESS;
+err_t main(void) {
+    err_t rc = E__SUCCESS;
     int result = 0;
 
     FAIL_IF(E__SUCCESS != rc_demo(1, 2, &result),
