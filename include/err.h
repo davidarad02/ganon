@@ -6,7 +6,6 @@ typedef enum {
     E__SUCCESS = 0,
 
     /* main.c */
-    /* Demo error for function conventions */
     E__MAIN__RC_DEMO__SOME_ERROR,
 
     /* args.c */
