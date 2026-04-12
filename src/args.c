@@ -200,7 +200,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
     }
 
     if (NULL == listen_ip) {
-        LOG_ERROR("Missing required IP address (positional argument or LISTEN_IP env var)");
+        args_print_usage(argv[0]);
         FAIL(E__ARGS__MISSING_VALUE);
     }
 
