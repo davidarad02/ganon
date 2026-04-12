@@ -1,8 +1,12 @@
 VERSION := $(shell cat VERSION)
 
-.PHONY: all clean x64 x64d x64r arm armd armr mips32be mips32bed mips32ber
+.PHONY: all clean x64 x64d x64r arm armd armr mips32be mips32bed mips32ber release debug
 
 all: x64r x64d armr armd mips32ber mips32bed
+
+release: x64r armr mips32ber
+
+debug: x64d armd mips32bed
 
 x64r:
 	@mkdir -p bin
