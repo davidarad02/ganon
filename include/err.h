@@ -2,10 +2,14 @@
 #define GANON_ERR_H
 
 typedef enum {
+    /* Success */
     E__SUCCESS = 0,
-    E__GANON_FAILURE,
+
+    /* Main module */
+    /* Demo error for function conventions */
     E__MAIN__RC_DEMO__SOME_ERROR,
-    E__MAIN__FAILURE,
+
+    /* Args module */
     E__ARGS__INVALID_ARGUMENTS,
     E__ARGS__CONFLICTING_ARGUMENTS,
     E__ARGS__MISSING_VALUE,
