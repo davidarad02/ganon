@@ -38,8 +38,8 @@ int main(int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
     args_t args;
 
-    FAIL_IF(E__SUCCESS != args_parse(&args, argc, argv),
-            E__ARGS__INVALID_ARGUMENTS);
+    rc = args_parse(&args, argc, argv);
+    FAIL_IF(E__SUCCESS != rc, rc);
 
     LOG_INFO("Listen IP: %s", args.listen_ip);
     LOG_INFO("Listen Port: %d", args.listen_port);

@@ -84,20 +84,24 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
         if (is_positional(arg)) {
             LOG_INFO("Using listen IP from positional argument: %s", arg);
             if (NULL != listen_ip) {
-                LOG_INFO("IP already set from environment, cannot override with positional");
+                LOG_INFO("IP already set, cannot specify multiple IPs");
                 FAIL_IF(1, E__ARGS__CONFLICTING_ARGUMENTS);
             }
-            FAIL_IF(ip_set,
-                    E__ARGS__CONFLICTING_ARGUMENTS);
+            if (ip_set) {
+                LOG_INFO("IP already set, cannot specify multiple IPs");
+                FAIL_IF(1, E__ARGS__CONFLICTING_ARGUMENTS);
+            }
             listen_ip = (char *)arg;
             ip_set = 1;
         } else if (is_flag_short(arg) || is_flag_long(arg)) {
             if (strcmp(arg, ARGS_FLAG_PORT_SHORT) == 0 || strcmp(arg, ARGS_FLAG_PORT_LONG) == 0) {
                 LOG_INFO("Port flag detected: %s", arg);
-                FAIL_IF(i > argc - 1,
+                FAIL_IF(i >= argc - 1,
                         E__ARGS__MISSING_VALUE);
-                FAIL_IF(port_set,
-                        E__ARGS__CONFLICTING_ARGUMENTS);
+                if (port_set) {
+                    LOG_INFO("Port already set via LISTEN_PORT env, cannot override with CLI -p/--port");
+                    FAIL_IF(1, E__ARGS__CONFLICTING_ARGUMENTS);
+                }
                 i++;
                 int port = parse_port(argv[i]);
                 FAIL_IF(0 == port && '0' != argv[i][0],
