@@ -33,6 +33,9 @@ static const char *get_level_pad(const char *level) {
     if ('I' == level[0]) {
         return " ";
     }
+    if ('W' == level[0]) {
+        return " ";
+    }
     return "";
 }
 

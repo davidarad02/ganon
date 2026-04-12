@@ -43,7 +43,7 @@ static int parse_port(const char *value) {
     if (NULL != endptr && '\0' != endptr[0]) {
         return 0;
     }
-    if (0 > port || 65535 < port) {
+    if (1 > port || 65535 < port) {
         return 0;
     }
     return (int)port;
@@ -54,29 +54,33 @@ static int validate_ip(const char *ip) {
         return 0;
     }
     int dots = 0;
-    int parts[4] = {0, 0, 0, 0};
     int part_idx = 0;
+    int part_value = 0;
     const char *p = ip;
-    while ('\0' != *p && part_idx < 4) {
+    while ('\0' != *p && 4 > part_idx) {
         if ('.' == *p) {
+            if (255 < part_value) {
+                return 0;
+            }
             dots++;
             part_idx++;
-            if (part_idx > 3) {
+            part_value = 0;
+            if (3 < part_idx) {
                 return 0;
             }
             p++;
             continue;
         }
-        if (*p < '0' || *p > '9') {
+        if ('0' > *p || '9' < *p) {
             return 0;
         }
-        parts[part_idx] = parts[part_idx] * 10 + (*p - '0');
-        if (parts[part_idx] > 255) {
+        part_value = part_value * 10 + (*p - '0');
+        if (255 < part_value) {
             return 0;
         }
         p++;
     }
-    if (3 != dots || part_idx != 3) {
+    if (3 != dots || 3 != part_idx) {
         return 0;
     }
     if ('\0' != *p) {
@@ -109,7 +113,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     if (NULL != env_port) {
         LOG_TRACE("Using LISTEN_PORT from environment: %s", env_port);
         int port = parse_port(env_port);
-        FAIL_IF(0 == port && '0' != env_port[0],
+        FAIL_IF(0 == port,
                 E__ARGS__INVALID_VALUE);
         listen_port = port;
         port_set = 1;
@@ -140,7 +144,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 }
                 i++;
                 int port = parse_port(argv[i]);
-                FAIL_IF(0 == port && '0' != argv[i][0],
+                FAIL_IF(0 == port,
                         E__ARGS__INVALID_VALUE);
                 LOG_TRACE("Using port from CLI argument: %d", port);
                 listen_port = port;
