@@ -4,7 +4,7 @@
 int rc_demo(int a, int b, int *result_out) {
     int rc = E__SUCCESS;
 
-    FAIL_IF(b == a,
+    FAIL_IF(a == b,
             E__MAIN__RC_DEMO__SOME_ERROR);
 
     if (NULL != result_out) {
