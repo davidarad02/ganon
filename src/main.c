@@ -1,6 +1,9 @@
-#include <stdio.h>
+#include "logging.h"
 
 int main() {
-    printf("Hello, World!\n");
+    LOG_INFO("Application started");
+    LOG_DEBUG("Debug message");
+    LOG_TRACE("Trace message");
+    LOG_INFO("Application exiting");
     return 0;
 }
