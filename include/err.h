@@ -5,10 +5,10 @@ typedef enum {
     /* Success */
     E__SUCCESS = 0,
 
-    /* main.c (0x100) */
+    /* main.c */
     E__MAIN__RC_DEMO__SOME_ERROR = 0x100,
 
-    /* args.c (0x200) */
+    /* args.c */
     E__ARGS__INVALID_ARGUMENTS = 0x200,
     E__ARGS__CONFLICTING_ARGUMENTS,
     E__ARGS__MISSING_VALUE,
