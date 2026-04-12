@@ -1,3 +1,0 @@
-/home/arad/projects/ganon/build-mips32be/CMakeFiles/ganon_mips32be.dir
-/home/arad/projects/ganon/build-mips32be/CMakeFiles/edit_cache.dir
-/home/arad/projects/ganon/build-mips32be/CMakeFiles/rebuild_cache.dir

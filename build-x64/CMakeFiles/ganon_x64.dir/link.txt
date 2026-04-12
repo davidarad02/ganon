@@ -1,1 +1,0 @@
-/usr/bin/cc  -static -static CMakeFiles/ganon_x64.dir/main.c.o -o ../bin/ganon_x64 
