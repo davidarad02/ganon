@@ -4,10 +4,10 @@
 int rc_demo(int a, int b, int *result_out) {
     int rc = E__SUCCESS;
 
-    FAIL_IF(a == b,
+    FAIL_IF(b == a,
             E__MAIN__RC_DEMO__SOME_ERROR);
 
-    if (result_out != NULL) {
+    if (NULL != result_out) {
         *result_out = a + b;
     }
 
@@ -20,12 +20,12 @@ int loop_demo(const int *arr, int count, int *sum_out) {
     int sum = 0;
 
     for (int i = 0; i < count; i++) {
-        CONTINUE_IF(arr[i] < 0);
-        BREAK_IF(sum > 100);
+        CONTINUE_IF(0 > arr[i]);
+        BREAK_IF(100 < sum);
         sum += arr[i];
     }
 
-    if (sum_out != NULL) {
+    if (NULL != sum_out) {
         *sum_out = sum;
     }
 
@@ -37,7 +37,7 @@ int main(void) {
     int rc = E__SUCCESS;
     int result = 0;
 
-    FAIL_IF(rc_demo(1, 2, &result) != E__SUCCESS,
+    FAIL_IF(E__SUCCESS != rc_demo(1, 2, &result),
             E__MAIN__FAILURE);
 
     LOG_INFO("rc_demo returned %d", result);
@@ -45,7 +45,7 @@ int main(void) {
     const int arr[] = {10, 20, -5, 30, 40};
     int sum = 0;
 
-    FAIL_IF(loop_demo(arr, (int)(sizeof(arr) / sizeof(arr[0])), &sum) != E__SUCCESS,
+    FAIL_IF(E__SUCCESS != loop_demo(arr, (int)(sizeof(arr) / sizeof(arr[0])), &sum),
             E__MAIN__FAILURE);
 
     LOG_INFO("loop_demo sum: %d", sum);
