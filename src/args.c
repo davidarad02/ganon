@@ -17,15 +17,15 @@ void args_print_help(const char *prog_name) {
     printf("       %s [OPTIONS]\n", prog_name);
     printf("\n");
     printf("Arguments:\n");
-    printf("  IP              IP address (IPv4 format: 0-255.0-255.0-255.0-255)\n");
+    printf("  IP              Listen IP address (IPv4 format: 0-255.0-255.0-255.0-255)\n");
     printf("\n");
     printf("Options:\n");
-    printf("  -p, --port N    Port number (1-65535)\n");
+    printf("  -p, --port N    Listen port number (1-65535)\n");
     printf("  -h, --help      Show this help message\n");
     printf("\n");
     printf("Environment variables:\n");
-    printf("  LISTEN_IP       IP address (alternative to positional argument)\n");
-    printf("  LISTEN_PORT     Port number (alternative to -p/--port)\n");
+    printf("  LISTEN_IP       Listen IP address (alternative to positional argument)\n");
+    printf("  LISTEN_PORT     Listen port number (alternative to -p/--port)\n");
 }
 
 static int is_help_flag(const char *arg) {
