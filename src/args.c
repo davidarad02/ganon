@@ -113,8 +113,10 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     if (NULL != env_port) {
         LOG_TRACE("Using LISTEN_PORT from environment: %s", env_port);
         int port = parse_port(env_port);
-        FAIL_IF(0 == port,
-                E__ARGS__INVALID_VALUE);
+        if (0 == port) {
+            LOG_ERROR("Invalid LISTEN_PORT value: %s (must be 1-65535)", env_port);
+            FAIL(E__ARGS__INVALID_VALUE);
+        }
         listen_port = port;
         port_set = 1;
     }
@@ -144,8 +146,10 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 }
                 i++;
                 int port = parse_port(argv[i]);
-                FAIL_IF(0 == port,
-                        E__ARGS__INVALID_VALUE);
+                if (0 == port) {
+                    LOG_ERROR("Invalid port value: %s (must be 1-65535)", argv[i]);
+                    FAIL(E__ARGS__INVALID_VALUE);
+                }
                 LOG_TRACE("Using port from CLI argument: %d", port);
                 listen_port = port;
                 port_set = 1;
