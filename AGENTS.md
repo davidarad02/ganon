@@ -9,9 +9,18 @@ This is the Ganon project - a C application built with CMake.
 
 ## Commands
 
-- Build: `cmake -B build && cmake --build build`
-- Run: `./build/ganon`
-- Clean: `rm -rf build`
+- Build x64: `cmake -B build-x64 && cmake --build build-x64`
+- Build armv5: `cmake -B build-armv5 -DCMAKE_TOOLCHAIN_FILE=cmake/armv5-toolchain.cmake && cmake --build build-armv5`
+- Build mips32be: `cmake -B build-mips32be -DCMAKE_TOOLCHAIN_FILE=cmake/mips32be-toolchain.cmake && cmake --build build-mips32be`
+- Run: `./build-x64/ganon`
+- Clean: `rm -rf build-x64 build-armv5 build-mips32be`
+
+## Cross-Compilation
+
+- All targets use static linking (`-static` flag)
+- x64: Native GCC
+- armv5: arm-linux-gnueabihf-gcc (ARMv7 hard-float)
+- mips32be: mips-linux-gnu-gcc (MIPS big-endian, o32 ABI)
 
 ## Code Style
 
