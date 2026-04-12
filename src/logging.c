@@ -9,28 +9,38 @@
 #define COLOR_BOLD    "\033[1m"
 
 static const char *get_level_color(const char *level) {
-    if (level[0] == 'I') return COLOR_CYAN;
-    if (level[0] == 'D') return COLOR_YELLOW;
-    if (level[0] == 'T') return COLOR_RESET;
+    if (level[0] == 'I') {
+        return COLOR_CYAN;
+    }
+    if (level[0] == 'D') {
+        return COLOR_YELLOW;
+    }
+    if (level[0] == 'T') {
+        return COLOR_RESET;
+    }
     return COLOR_RESET;
 }
 
 static const char *get_level_pad(const char *level) {
-    if (level[0] == 'I') return " ";
+    if (level[0] == 'I') {
+        return " ";
+    }
     return "";
 }
 
 void log_message(const char *level, const char *file, int line, const char *msg, ...) {
     struct timeval tv;
-    gettimeofday(&tv, NULL);
+    (void)gettimeofday(&tv, NULL);
 
     struct tm *tm_info = localtime(&tv.tv_sec);
     char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+    (void)strftime(timestamp, sizeof(timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
 
     const char *filename = file;
-    for (const char *p = file; *p; p++) {
-        if (*p == '/') filename = p + 1;
+    for (const char *p = file; *p != '\0'; p++) {
+        if (*p == '/') {
+            filename = p + 1;
+        }
     }
 
     const char *color = get_level_color(level);

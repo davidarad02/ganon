@@ -1,6 +1,8 @@
 #ifndef GANON_COMMON_H
 #define GANON_COMMON_H
 
+#include <stddef.h>
+
 #include "err.h"
 
 #define FAIL_IF(condition, error) \
