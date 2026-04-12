@@ -1,4 +1,4 @@
 .idea/
 bin/
-build/
+build-*/
 cmake-build-debug/
