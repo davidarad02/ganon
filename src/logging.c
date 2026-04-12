@@ -4,6 +4,7 @@
 #include <sys/time.h>
 
 #define COLOR_RESET   "\033[0m"
+#define COLOR_RED     "\033[31m"
 #define COLOR_YELLOW  "\033[33m"
 #define COLOR_CYAN    "\033[36m"
 #define COLOR_BOLD    "\033[1m"
@@ -17,6 +18,9 @@ static const char *get_level_color(const char *level) {
     }
     if (level[0] == 'T') {
         return COLOR_RESET;
+    }
+    if (level[0] == 'E') {
+        return COLOR_RED;
     }
     return COLOR_RESET;
 }

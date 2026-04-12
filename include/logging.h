@@ -11,6 +11,8 @@
 #define LOG_TRACE(msg, ...) ((void)0)
 #endif
 
+#define LOG_ERROR(msg, ...) log_message("ERROR", __FILE__, __LINE__, msg, ##__VA_ARGS__)
+
 void log_message(const char *level, const char *file, int line, const char *msg, ...);
 
 #endif
