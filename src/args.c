@@ -144,7 +144,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     int port_set = 0;
 
     if (NULL == args_out) {
-        FAIL(E__ARGS__INVALID_ARGUMENTS);
+        FAIL(E__ARGS__NULL_POINTER);
     }
 
 #ifdef __DEBUG__
@@ -170,7 +170,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
         int port = parse_port(env_port);
         if (0 == port) {
             LOG_ERROR("Invalid LISTEN_PORT value: %s (must be 1-65535)", env_port);
-            FAIL(E__ARGS__INVALID_VALUE);
+            FAIL(E__ARGS__INVALID_FORMAT);
         }
         listen_port = port;
         port_set = 1;
@@ -197,7 +197,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
 #ifdef __DEBUG__
                     args_print_usage(argv[0]);
 #endif
-                    FAIL(E__ARGS__MISSING_VALUE);
+                    FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
                 }
                 if (port_set) {
                     LOG_ERROR("Port already set via LISTEN_PORT env, cannot override with CLI -p/--port");
@@ -207,14 +207,14 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 int port = parse_port(argv[i]);
                 if (0 == port) {
                     LOG_ERROR("Invalid port value: %s (must be 1-65535)", argv[i]);
-                    FAIL(E__ARGS__INVALID_VALUE);
+                    FAIL(E__ARGS__INVALID_FORMAT);
                 }
                 LOG_TRACE("Using port from CLI argument: %d", port);
                 listen_port = port;
                 port_set = 1;
             } else {
                 LOG_ERROR("Unknown argument: %s", arg);
-                FAIL(E__ARGS__INVALID_ARGUMENT);
+                FAIL(E__ARGS__UNKNOWN_FLAG);
             }
         }
     }
@@ -223,12 +223,12 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
 #ifdef __DEBUG__
         args_print_usage(argv[0]);
 #endif
-        FAIL(E__ARGS__MISSING_VALUE);
+        FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
     }
 
     if (!validate_ip(listen_ip)) {
         LOG_ERROR("Invalid IP address format: %s (expected IPv4: 0-255.0-255.0-255.0-255)", listen_ip);
-        FAIL(E__ARGS__INVALID_VALUE);
+        FAIL(E__ARGS__INVALID_FORMAT);
     }
 
     args_out->listen_ip = listen_ip;
