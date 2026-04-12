@@ -1,6 +1,6 @@
-.PHONY: all clean x64 armv5 mips32be ppc
+.PHONY: all clean x64 armv5 mips32be
 
-all: x64 armv5 mips32be ppc
+all: x64 armv5 mips32be
 
 x64:
 	@mkdir -p bin
@@ -20,11 +20,5 @@ mips32be:
 	cmake --build build-mips32be
 	@rm -rf build-mips32be
 
-ppc:
-	@mkdir -p bin
-	cmake -B build-ppc -DCMAKE_TOOLCHAIN_FILE=cmake/ppc-toolchain.cmake -DTARGET_NAME=ganon_ppc
-	cmake --build build-ppc
-	@rm -rf build-ppc
-
 clean:
-	rm -rf build-x64 build-armv5 build-mips32be build-ppc bin
+	rm -rf build-x64 build-armv5 build-mips32be bin

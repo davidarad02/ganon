@@ -15,7 +15,6 @@ This is the Ganon project - a C application built with CMake.
 - Build x64: `make x64`
 - Build armv5: `make armv5`
 - Build mips32be: `make mips32be`
-- Build ppc: `make ppc`
 - Run: `./bin/ganon_x64`
 - Clean: `make clean`
 
@@ -29,7 +28,6 @@ All targets use static linking (`-static` flag):
 - x64: Native GCC
 - armv5: arm-linux-gnueabihf-gcc (ARMv7 hard-float)
 - mips32be: mips-linux-gnu-gcc (MIPS big-endian, o32 ABI)
-- ppc: powerpc-linux-gnu-gcc-11 (PowerPC big-endian)
 
 ## Code Style
 
