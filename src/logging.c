@@ -11,26 +11,26 @@
 #define COLOR_BOLD    "\033[1m"
 
 static const char *get_level_color(const char *level) {
-    if (level[0] == 'I') {
+    if ('I' == level[0]) {
         return COLOR_CYAN;
     }
-    if (level[0] == 'D') {
+    if ('D' == level[0]) {
         return COLOR_WHITE;
     }
-    if (level[0] == 'T') {
+    if ('T' == level[0]) {
         return COLOR_RESET;
     }
-    if (level[0] == 'E') {
+    if ('E' == level[0]) {
         return COLOR_RED;
     }
-    if (level[0] == 'W') {
+    if ('W' == level[0]) {
         return COLOR_YELLOW;
     }
     return COLOR_RESET;
 }
 
 static const char *get_level_pad(const char *level) {
-    if (level[0] == 'I') {
+    if ('I' == level[0]) {
         return " ";
     }
     return "";
@@ -46,7 +46,7 @@ void log_message(const char *level, const char *file, int line, const char *msg,
 
     const char *filename = file;
     for (const char *p = file; *p != '\0'; p++) {
-        if (*p == '/') {
+        if ('/' == *p) {
             filename = p + 1;
         }
     }

@@ -5,7 +5,7 @@
 err_t rc_demo(int a, int b, int *result_out) {
     err_t rc = E__SUCCESS;
 
-    FAIL_IF(a == b,
+    FAIL_IF(b == a,
             E__MAIN__RC_DEMO__SOME_ERROR);
 
     if (NULL != result_out) {
