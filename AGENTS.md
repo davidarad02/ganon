@@ -47,3 +47,9 @@ All targets use static linking (`-static` flag):
 ## Testing
 
 - Run the built executable to verify basic functionality
+
+## Error Handling
+
+- Errors defined in `include/err.h` as enum `err_t`
+- Naming convention: `E__<MODULE>_<FUNCTION>_<ERROR>`
+- Add new errors as needed throughout development
