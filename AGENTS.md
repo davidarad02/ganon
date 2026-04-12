@@ -14,11 +14,18 @@ This is the Ganon project - a C application built with CMake.
 ## Commands
 
 - Build all: `make`
-- Build x64: `make x64`
+- Build x64 (both): `make x64`
+- Build x64 release: `make x64r`
+- Build x64 debug: `make x64d`
 - Build armv5: `make armv5`
 - Build mips32be: `make mips32be`
 - Run: `./bin/ganon_1.0.0_x64`
 - Clean: `make clean`
+
+## Build Types
+
+- **Release**: `-O3 -s` (stripped), outputs: `ganon_<ver>_<arch>`
+- **Debug**: `-g -O0 -D__DEBUG__` (with symbols), outputs: `ganon_<ver>_<arch>_debug`
 
 ## Cross-Compilation
 
