@@ -7,6 +7,7 @@
 #define COLOR_RED     "\033[31m"
 #define COLOR_YELLOW  "\033[33m"
 #define COLOR_CYAN    "\033[36m"
+#define COLOR_WHITE   "\033[37m"
 #define COLOR_BOLD    "\033[1m"
 
 static const char *get_level_color(const char *level) {
@@ -14,13 +15,16 @@ static const char *get_level_color(const char *level) {
         return COLOR_CYAN;
     }
     if (level[0] == 'D') {
-        return COLOR_YELLOW;
+        return COLOR_WHITE;
     }
     if (level[0] == 'T') {
         return COLOR_RESET;
     }
     if (level[0] == 'E') {
         return COLOR_RED;
+    }
+    if (level[0] == 'W') {
+        return COLOR_YELLOW;
     }
     return COLOR_RESET;
 }
