@@ -4,7 +4,6 @@
 #include <sys/time.h>
 
 #define COLOR_RESET   "\033[0m"
-#define COLOR_RED     "\033[31m"
 #define COLOR_YELLOW  "\033[33m"
 #define COLOR_CYAN    "\033[36m"
 #define COLOR_BOLD    "\033[1m"
@@ -34,9 +33,15 @@ void log_message(const char *level, const char *file, int line, const char *msg,
     va_list args;
     va_start(args, msg);
 
-    printf(COLOR_BOLD "%s.%06ld " COLOR_RESET "[" COLOR_BOLD "%s%s%s" COLOR_RESET "] ",
-           timestamp, tv.tv_usec, color, level, COLOR_RESET);
+    printf(COLOR_BOLD);
+    printf("%s.%06ld ", timestamp, tv.tv_usec);
+    printf(COLOR_RESET "[");
+    printf(COLOR_BOLD "%s", color);
+    printf("%s", level);
+    printf(COLOR_RESET "] ");
     vprintf(msg, args);
-    printf(" [" COLOR_BOLD "%s:%d" COLOR_RESET "]\n" COLOR_RESET, filename, line);
+    printf(" [");
+    printf(COLOR_BOLD "%s:%d", filename, line);
+    printf(COLOR_RESET "]\n");
     va_end(args);
 }
