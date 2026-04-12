@@ -51,6 +51,7 @@ static int parse_port(const char *value) {
 
 err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
+
     char *listen_ip = NULL;
     int listen_port = ARGS_PORT_DEFAULT;
     int ip_set = 0;

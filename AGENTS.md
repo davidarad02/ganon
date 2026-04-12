@@ -56,6 +56,7 @@ All targets use static linking (`-static` flag):
 Every function (except `main`) must:
 - Return `err_t` (not `int`)
 - Start with `err_t rc = E__SUCCESS;`
+- Have an empty line after `err_t rc = E__SUCCESS;`
 - Have an `l_cleanup:` label before return
 - Return `rc` at the end
 - Use output parameters via pointers for returning data

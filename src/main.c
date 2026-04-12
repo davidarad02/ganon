@@ -18,6 +18,7 @@ l_cleanup:
 
 err_t loop_demo(const int *arr, int count, int *sum_out) {
     err_t rc = E__SUCCESS;
+
     int sum = 0;
 
     for (int i = 0; i < count; i++) {
