@@ -11,6 +11,12 @@ This is the Ganon project - a C application built with CMake.
 - `Makefile` - Build orchestration
 - `cmake/` - Toolchain files for cross-compilation
 
+### Headers
+
+- `include/err.h` - Error codes enum
+- `include/common.h` - Common macros (FAIL_IF, BREAK_IF, CONTINUE_IF)
+- `include/logging.h` - Logging macros (LOG_INFO, LOG_DEBUG, LOG_TRACE)
+
 ## Commands
 
 - Build all: `make`
@@ -44,12 +50,22 @@ All targets use static linking (`-static` flag):
 - Use meaningful function and variable names
 - Maximum line length: 100 characters
 
-## Testing
+## Function Conventions
 
-- Run the built executable to verify basic functionality
+Every function (except `main`) must:
+- Return `err_t` (not `int`)
+- Start with `err_t rc = E__SUCCESS;`
+- Have an `l_cleanup:` label before return
+- Return `rc` at the end
+- Use output parameters via pointers for returning data
+- Use `FAIL_IF(condition, error_code)` to check and fail
+- Use `BREAK_IF(condition)` and `CONTINUE_IF(condition)` in loops
+
+Comparison convention: static values first (e.g., `NULL != ptr`, `E__SUCCESS != rc`, `0 > value`)
 
 ## Error Handling
 
 - Errors defined in `include/err.h` as enum `err_t`
+- First error must be `E__SUCCESS = 0`
 - Naming convention: `E__<MODULE>_<FUNCTION>_<ERROR>`
 - Add new errors as needed throughout development
