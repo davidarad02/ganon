@@ -6,11 +6,13 @@
 #define LOG_DEBUG(msg, ...) log_message("DEBUG", __FILE__, __LINE__, msg, ##__VA_ARGS__)
 #define LOG_TRACE(msg, ...) log_message("TRACE", __FILE__, __LINE__, msg, ##__VA_ARGS__)
 #define LOG_WARNING(msg, ...) log_message("WARN", __FILE__, __LINE__, msg, ##__VA_ARGS__)
+#define LOG_WARN(msg, ...) log_message("WARN", __FILE__, __LINE__, msg, ##__VA_ARGS__)
 #else
 #define LOG_INFO(msg, ...)  ((void)0)
 #define LOG_DEBUG(msg, ...) ((void)0)
 #define LOG_TRACE(msg, ...) ((void)0)
 #define LOG_WARNING(msg, ...) log_message("WARN", __FILE__, __LINE__, msg, ##__VA_ARGS__)
+#define LOG_WARN(msg, ...) log_message("WARN", __FILE__, __LINE__, msg, ##__VA_ARGS__)
 #endif
 
 #define LOG_ERROR(msg, ...) log_message("ERROR", __FILE__, __LINE__, msg, ##__VA_ARGS__)

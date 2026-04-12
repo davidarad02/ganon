@@ -99,7 +99,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
                 FAIL_IF(i >= argc - 1,
                         E__ARGS__MISSING_VALUE);
                 if (port_set) {
-                    LOG_WARNING("Port already set via LISTEN_PORT env, cannot override with CLI -p/--port");
+                    LOG_ERROR("Port already set via LISTEN_PORT env, cannot override with CLI -p/--port");
                     FAIL_IF(1, E__ARGS__CONFLICTING_ARGUMENTS);
                 }
                 i++;
@@ -110,7 +110,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
                 listen_port = port;
                 port_set = 1;
             } else {
-                LOG_WARNING("Unknown argument: %s", arg);
+                LOG_ERROR("Unknown argument: %s", arg);
                 FAIL_IF(1, E__ARGS__INVALID_ARGUMENT);
             }
         }
