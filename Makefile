@@ -6,7 +6,7 @@ all: x64r x64d armv5r armv5d mips32ber mips32bed
 
 x64r:
 	@mkdir -p bin
-	cmake -B build-x64 -DCMAKE_BUILD_TYPE=Release -DTARGET_NAME=ganon_$(VERSION)_x64
+	cmake -B build-x64 -DCMAKE_BUILD_TYPE=Release -DTARGET_NAME=ganon_$(VERSION)_x64_release
 	cmake --build build-x64
 	@rm -rf build-x64
 
@@ -20,7 +20,7 @@ x64: x64r x64d
 
 armv5r:
 	@mkdir -p bin
-	cmake -B build-armv5 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/armv5-toolchain.cmake -DTARGET_NAME=ganon_$(VERSION)_armv5
+	cmake -B build-armv5 -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/armv5-toolchain.cmake -DTARGET_NAME=ganon_$(VERSION)_armv5_release
 	cmake --build build-armv5
 	@rm -rf build-armv5
 
@@ -34,7 +34,7 @@ armv5: armv5r armv5d
 
 mips32ber:
 	@mkdir -p bin
-	cmake -B build-mips32be -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/mips32be-toolchain.cmake -DTARGET_NAME=ganon_$(VERSION)_mips32be
+	cmake -B build-mips32be -DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=cmake/mips32be-toolchain.cmake -DTARGET_NAME=ganon_$(VERSION)_mips32be_release
 	cmake --build build-mips32be
 	@rm -rf build-mips32be
 
