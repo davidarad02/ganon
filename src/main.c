@@ -1,5 +1,6 @@
 #include "common.h"
 #include "logging.h"
+#include "args.h"
 
 err_t rc_demo(int a, int b, int *result_out) {
     err_t rc = E__SUCCESS;
@@ -33,22 +34,15 @@ l_cleanup:
     return rc;
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
-    int result = 0;
+    args_t args;
 
-    FAIL_IF(E__SUCCESS != rc_demo(1, 2, &result),
-            E__MAIN__FAILURE);
+    FAIL_IF(E__SUCCESS != args_parse(&args, argc, argv),
+            E__ARGS__INVALID_ARGUMENTS);
 
-    LOG_INFO("rc_demo returned %d", result);
-
-    const int arr[] = {10, 20, -5, 30, 40};
-    int sum = 0;
-
-    FAIL_IF(E__SUCCESS != loop_demo(arr, (int)(sizeof(arr) / sizeof(arr[0])), &sum),
-            E__MAIN__FAILURE);
-
-    LOG_INFO("loop_demo sum: %d", sum);
+    LOG_INFO("Listen IP: %s", args.listen_ip);
+    LOG_INFO("Listen Port: %d", args.listen_port);
 
 l_cleanup:
     return (int)rc;
