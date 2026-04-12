@@ -60,6 +60,7 @@ Every function (except `main`) must:
 - Return `rc` at the end
 - Use output parameters via pointers for returning data
 - Use `FAIL_IF(condition, error_code)` to check and fail
+- Use `FAIL(error_code)` when failure is unconditional
 - Use `BREAK_IF(condition)` and `CONTINUE_IF(condition)` in loops
 
 Comparison convention: static values first (e.g., `NULL != ptr`, `E__SUCCESS != rc`, `0 > value`)

@@ -8,6 +8,9 @@
 #define FAIL_IF(condition, error) \
     if (condition) { rc = error; goto l_cleanup; }
 
+#define FAIL(error) \
+    { rc = error; goto l_cleanup; }
+
 #define BREAK_IF(condition) \
     if (condition) { break; }
 

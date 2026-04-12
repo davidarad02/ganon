@@ -57,7 +57,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     int port_set = 0;
 
     if (NULL == args_out) {
-        FAIL_IF(1, E__ARGS__INVALID_ARGUMENTS);
+        FAIL(E__ARGS__INVALID_ARGUMENTS);
     }
 
     char *env_ip = get_env(ARGS_ENV_LISTEN_IP);
@@ -85,11 +85,10 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
             LOG_TRACE("Using listen IP from positional argument: %s", arg);
             if (NULL != listen_ip) {
                 LOG_WARNING("IP already set, cannot specify multiple IPs");
-                FAIL_IF(1, E__ARGS__CONFLICTING_ARGUMENTS);
+FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
             }
             if (ip_set) {
-                LOG_WARNING("IP already set, cannot specify multiple IPs");
-                FAIL_IF(1, E__ARGS__CONFLICTING_ARGUMENTS);
+                FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
             }
             listen_ip = (char *)arg;
             ip_set = 1;
@@ -100,7 +99,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
                         E__ARGS__MISSING_VALUE);
                 if (port_set) {
                     LOG_ERROR("Port already set via LISTEN_PORT env, cannot override with CLI -p/--port");
-                    FAIL_IF(1, E__ARGS__CONFLICTING_ARGUMENTS);
+                    FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 }
                 i++;
                 int port = parse_port(argv[i]);
@@ -111,7 +110,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
                 port_set = 1;
             } else {
                 LOG_ERROR("Unknown argument: %s", arg);
-                FAIL_IF(1, E__ARGS__INVALID_ARGUMENT);
+                FAIL(E__ARGS__INVALID_ARGUMENT);
             }
         }
     }
