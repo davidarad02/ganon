@@ -51,4 +51,5 @@ mips32bed:
 mips32be: mips32ber mips32bed
 
 clean:
-	rm -rf build-x64 build-x64d build-arm build-armd build-mips32be build-mips32bed bin
+	rm -rf build-x64 build-x64d build-arm build-armd build-mips32be build-mips32bed
+	rm -rf bin/*
