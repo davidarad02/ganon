@@ -6,6 +6,7 @@
 #include "common.h"
 #include "logging.h"
 
+#ifdef __DEBUG__
 void args_print_usage(const char *prog_name) {
     printf("Usage: %s <LISTEN IP> [OPTIONS]\n", prog_name);
     printf("       %s [OPTIONS]\n", prog_name);
@@ -37,6 +38,7 @@ static int is_help_flag(const char *arg) {
     }
     return 0;
 }
+#endif
 
 static int is_flag_short(const char *arg) {
     if (NULL == arg) {
@@ -133,12 +135,14 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
         FAIL(E__ARGS__INVALID_ARGUMENTS);
     }
 
+#ifdef __DEBUG__
     for (int i = 1; i < argc; i++) {
         if (is_help_flag(argv[i])) {
             args_print_help(argv[0]);
             exit(0);
         }
     }
+#endif
 
     char *env_ip = get_env(ARGS_ENV_LISTEN_IP);
     char *env_port = get_env(ARGS_ENV_LISTEN_PORT);
@@ -178,7 +182,9 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
             if (strcmp(arg, ARGS_FLAG_PORT_SHORT) == 0 || strcmp(arg, ARGS_FLAG_PORT_LONG) == 0) {
                 LOG_TRACE("Port flag detected: %s", arg);
                 if (i >= argc - 1) {
+#ifdef __DEBUG__
                     args_print_usage(argv[0]);
+#endif
                     FAIL(E__ARGS__MISSING_VALUE);
                 }
                 if (port_set) {
@@ -202,7 +208,9 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
     }
 
     if (NULL == listen_ip) {
+#ifdef __DEBUG__
         args_print_usage(argv[0]);
+#endif
         FAIL(E__ARGS__MISSING_VALUE);
     }
 

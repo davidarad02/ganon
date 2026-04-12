@@ -5,7 +5,7 @@ endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(LOGGING_SOURCES main.c logging.c args.c)
 else()
-    set(LOGGING_SOURCES main.c args.c)
+    set(LOGGING_SOURCES main.c logging.c args.c)
 endif()
 
 add_executable(${TARGET_NAME} ${LOGGING_SOURCES})
