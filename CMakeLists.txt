@@ -2,10 +2,28 @@ cmake_minimum_required(VERSION 3.16)
 project(ganon C)
 
 set(CMAKE_C_STANDARD 11)
-
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -static")
 set(CMAKE_EXE_LINKER_FLAGS "-static")
 
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/bin)
+if(NOT TARGET_NAME)
+    set(TARGET_NAME "ganon")
+endif()
 
-add_executable(ganon main.c)
+if(NOT TOOLCHAIN_FILE)
+    set(TOOLCHAIN_FILE "")
+endif()
+
+if(TOOLCHAIN_FILE)
+    include(${TOOLCHAIN_FILE})
+endif()
+
+if(NOT OUTPUT_DIR)
+    set(OUTPUT_DIR ${CMAKE_SOURCE_DIR}/bin)
+endif()
+
+file(MAKE_DIRECTORY ${OUTPUT_DIR})
+
+add_executable(${TARGET_NAME} main.c)
+set_target_properties(${TARGET_NAME} PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${OUTPUT_DIR}
+    OUTPUT_NAME "${TARGET_NAME}")

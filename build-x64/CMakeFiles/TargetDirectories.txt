@@ -1,0 +1,3 @@
+/home/arad/projects/ganon/build-x64/CMakeFiles/ganon_x64.dir
+/home/arad/projects/ganon/build-x64/CMakeFiles/edit_cache.dir
+/home/arad/projects/ganon/build-x64/CMakeFiles/rebuild_cache.dir

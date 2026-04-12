@@ -1,0 +1,1 @@
+/usr/bin/arm-linux-gnueabihf-gcc  -static -static -static -static CMakeFiles/ganon_armv5.dir/main.c.o -o ../bin/ganon_armv5 
