@@ -135,11 +135,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
 
     for (int i = 1; i < argc; i++) {
         if (is_help_flag(argv[i])) {
-            if (NULL != argv[0]) {
-                args_print_help(argv[0]);
-            } else {
-                args_print_help("ganon");
-            }
+            args_print_help(argv[0]);
             exit(0);
         }
     }
