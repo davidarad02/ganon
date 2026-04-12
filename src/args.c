@@ -7,17 +7,17 @@
 #include "logging.h"
 
 void args_print_usage(const char *prog_name) {
-    printf("Usage: %s <IP> [OPTIONS]\n", prog_name);
+    printf("Usage: %s <LISTEN IP> [OPTIONS]\n", prog_name);
     printf("       %s [OPTIONS]\n", prog_name);
     printf("Try '%s --help' for more information.\n", prog_name);
 }
 
 void args_print_help(const char *prog_name) {
-    printf("Usage: %s <IP> [OPTIONS]\n", prog_name);
+    printf("Usage: %s <LISTEN IP> [OPTIONS]\n", prog_name);
     printf("       %s [OPTIONS]\n", prog_name);
     printf("\n");
     printf("Arguments:\n");
-    printf("  IP              Listen IP address (IPv4 format: 0-255.0-255.0-255.0-255)\n");
+    printf("  LISTEN IP       Listen IP address (IPv4 format: 0-255.0-255.0-255.0-255)\n");
     printf("\n");
     printf("Options:\n");
     printf("  -p, --port N    Listen port number (1-65535)\n");
