@@ -49,6 +49,7 @@ All targets use static linking (`-static` flag):
 - Use C11 standard (already set in CMakeLists.txt)
 - Use meaningful function and variable names
 - Maximum line length: 100 characters
+- Global variables always start with `g_` (e.g., `g_verbose`, `g_num_connections`)
 
 ## Function Conventions
 
