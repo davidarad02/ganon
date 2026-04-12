@@ -1,1 +1,0 @@
-/usr/bin/mips-linux-gnu-gcc  -static -EB -static -EB -static -static CMakeFiles/ganon.dir/main.c.o -o ganon 

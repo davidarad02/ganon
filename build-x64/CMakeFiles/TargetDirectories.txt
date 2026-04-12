@@ -1,6 +1,0 @@
-/home/arad/projects/ganon/build-x64/CMakeFiles/ganon.dir
-/home/arad/projects/ganon/build-x64/CMakeFiles/x64.dir
-/home/arad/projects/ganon/build-x64/CMakeFiles/armv5.dir
-/home/arad/projects/ganon/build-x64/CMakeFiles/mips32be.dir
-/home/arad/projects/ganon/build-x64/CMakeFiles/edit_cache.dir
-/home/arad/projects/ganon/build-x64/CMakeFiles/rebuild_cache.dir
