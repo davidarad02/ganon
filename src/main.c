@@ -1,8 +1,8 @@
-#include "logging.h"
 #include "common.h"
+#include "logging.h"
 
 int rc_demo(int a, int b, int *result_out) {
-    int rc = 0;
+    int rc = E__SUCCESS;
 
     FAIL_IF(a == b,
             E__MAIN__RC_DEMO__SOME_ERROR);
@@ -16,7 +16,7 @@ l_cleanup:
 }
 
 int loop_demo(const int *arr, int count, int *sum_out) {
-    int rc = 0;
+    int rc = E__SUCCESS;
     int sum = 0;
 
     for (int i = 0; i < count; i++) {
@@ -34,10 +34,10 @@ l_cleanup:
 }
 
 int main(void) {
-    int rc = 0;
+    int rc = E__SUCCESS;
     int result = 0;
 
-    FAIL_IF(rc_demo(1, 2, &result) != 0,
+    FAIL_IF(rc_demo(1, 2, &result) != E__SUCCESS,
             E__MAIN__FAILURE);
 
     LOG_INFO("rc_demo returned %d", result);
@@ -45,7 +45,7 @@ int main(void) {
     const int arr[] = {10, 20, -5, 30, 40};
     int sum = 0;
 
-    FAIL_IF(loop_demo(arr, (int)(sizeof(arr) / sizeof(arr[0])), &sum) != 0,
+    FAIL_IF(loop_demo(arr, (int)(sizeof(arr) / sizeof(arr[0])), &sum) != E__SUCCESS,
             E__MAIN__FAILURE);
 
     LOG_INFO("loop_demo sum: %d", sum);
