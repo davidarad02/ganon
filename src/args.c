@@ -9,6 +9,12 @@
 void args_print_usage(const char *prog_name) {
     printf("Usage: %s <IP> [OPTIONS]\n", prog_name);
     printf("       %s [OPTIONS]\n", prog_name);
+    printf("Try '%s --help' for more information.\n", prog_name);
+}
+
+void args_print_help(const char *prog_name) {
+    printf("Usage: %s <IP> [OPTIONS]\n", prog_name);
+    printf("       %s [OPTIONS]\n", prog_name);
     printf("\n");
     printf("Arguments:\n");
     printf("  IP              IP address (IPv4 format: 0-255.0-255.0-255.0-255)\n");
@@ -130,9 +136,9 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (is_help_flag(argv[i])) {
             if (NULL != argv[0]) {
-                args_print_usage(argv[0]);
+                args_print_help(argv[0]);
             } else {
-                args_print_usage("ganon");
+                args_print_help("ganon");
             }
             exit(0);
         }

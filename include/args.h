@@ -21,5 +21,6 @@ typedef struct {
 
 err_t args_parse(args_t *args_out, int argc, char *argv[]);
 void args_print_usage(const char *prog_name);
+void args_print_help(const char *prog_name);
 
 #endif
