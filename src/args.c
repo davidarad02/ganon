@@ -6,6 +6,32 @@
 #include "common.h"
 #include "logging.h"
 
+void args_print_usage(const char *prog_name) {
+    printf("Usage: %s <IP> [OPTIONS]\n", prog_name);
+    printf("       %s [OPTIONS]\n", prog_name);
+    printf("\n");
+    printf("Arguments:\n");
+    printf("  IP              IP address (IPv4 format: 0-255.0-255.0-255.0-255)\n");
+    printf("\n");
+    printf("Options:\n");
+    printf("  -p, --port N    Port number (1-65535)\n");
+    printf("  -h, --help      Show this help message\n");
+    printf("\n");
+    printf("Environment variables:\n");
+    printf("  LISTEN_IP       IP address (alternative to positional argument)\n");
+    printf("  LISTEN_PORT     Port number (alternative to -p/--port)\n");
+}
+
+static int is_help_flag(const char *arg) {
+    if (NULL == arg) {
+        return 0;
+    }
+    if (0 == strcmp(arg, ARGS_FLAG_HELP_SHORT) || 0 == strcmp(arg, ARGS_FLAG_HELP_LONG)) {
+        return 1;
+    }
+    return 0;
+}
+
 static int is_flag_short(const char *arg) {
     if (NULL == arg) {
         return 0;
@@ -101,6 +127,17 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
         FAIL(E__ARGS__INVALID_ARGUMENTS);
     }
 
+    for (int i = 1; i < argc; i++) {
+        if (is_help_flag(argv[i])) {
+            if (NULL != argv[0]) {
+                args_print_usage(argv[0]);
+            } else {
+                args_print_usage("ganon");
+            }
+            exit(0);
+        }
+    }
+
     char *env_ip = get_env(ARGS_ENV_LISTEN_IP);
     char *env_port = get_env(ARGS_ENV_LISTEN_PORT);
     if (NULL != env_ip) {
@@ -139,7 +176,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
             if (strcmp(arg, ARGS_FLAG_PORT_SHORT) == 0 || strcmp(arg, ARGS_FLAG_PORT_LONG) == 0) {
                 LOG_TRACE("Port flag detected: %s", arg);
                 if (i >= argc - 1) {
-                    LOG_ERROR("Port flag -p/--port requires a value but none provided");
+                    args_print_usage(argv[0]);
                     FAIL(E__ARGS__MISSING_VALUE);
                 }
                 if (port_set) {
