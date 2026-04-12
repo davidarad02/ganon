@@ -7,6 +7,7 @@
 #define COLOR_RED     "\033[31m"
 #define COLOR_YELLOW  "\033[33m"
 #define COLOR_CYAN    "\033[36m"
+#define COLOR_BOLD    "\033[1m"
 
 static const char *get_level_color(const char *level) {
     if (level[0] == 'I') return COLOR_CYAN;
@@ -33,8 +34,8 @@ void log_message(const char *level, const char *file, int line, const char *msg,
     va_list args;
     va_start(args, msg);
 
-    printf("%s.%06ld " COLOR_RESET "[%s%s%s] ", timestamp, tv.tv_usec, color, level, COLOR_RESET);
+    printf(COLOR_BOLD "%s.%06ld " COLOR_RESET "[%s%s%s] ", timestamp, tv.tv_usec, color, level, COLOR_RESET);
     vprintf(msg, args);
-    printf(" [%s:%d]\n", filename, line);
+    printf(" [%s:%d]\n" COLOR_RESET, filename, line);
     va_end(args);
 }
