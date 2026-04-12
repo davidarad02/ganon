@@ -49,6 +49,42 @@ static int parse_port(const char *value) {
     return (int)port;
 }
 
+static int validate_ip(const char *ip) {
+    if (NULL == ip) {
+        return 0;
+    }
+    int dots = 0;
+    int parts[4] = {0, 0, 0, 0};
+    int part_idx = 0;
+    const char *p = ip;
+    while ('\0' != *p && part_idx < 4) {
+        if ('.' == *p) {
+            dots++;
+            part_idx++;
+            if (part_idx > 3) {
+                return 0;
+            }
+            p++;
+            continue;
+        }
+        if (*p < '0' || *p > '9') {
+            return 0;
+        }
+        parts[part_idx] = parts[part_idx] * 10 + (*p - '0');
+        if (parts[part_idx] > 255) {
+            return 0;
+        }
+        p++;
+    }
+    if (3 != dots || part_idx != 3) {
+        return 0;
+    }
+    if ('\0' != *p) {
+        return 0;
+    }
+    return 1;
+}
+
 err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
 
@@ -118,6 +154,11 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
 
     FAIL_IF(NULL == listen_ip,
             E__ARGS__MISSING_VALUE);
+
+    if (!validate_ip(listen_ip)) {
+        LOG_ERROR("Invalid IP address format: %s (expected IPv4: 0-255.0-255.0-255.0-255)", listen_ip);
+        FAIL(E__ARGS__INVALID_VALUE);
+    }
 
     args_out->listen_ip = listen_ip;
     args_out->listen_port = listen_port;
