@@ -10,21 +10,21 @@ static int is_flag_short(const char *arg) {
     if (NULL == arg) {
         return 0;
     }
-    return (arg[0] == '-' && arg[1] != '-' && arg[1] != '\0');
+    return ('-' == arg[0] && '-' != arg[1] && '\0' != arg[1]);
 }
 
 static int is_flag_long(const char *arg) {
     if (NULL == arg) {
         return 0;
     }
-    return (arg[0] == '-' && arg[1] == '-' && arg[2] != '\0');
+    return ('-' == arg[0] && '-' == arg[1] && '\0' != arg[2]);
 }
 
 static int is_positional(const char *arg) {
     if (NULL == arg) {
         return 0;
     }
-    return (arg[0] != '-');
+    return ('-' != arg[0]);
 }
 
 static char *get_env(const char *key) {
@@ -40,10 +40,10 @@ static int parse_port(const char *value) {
     }
     char *endptr = NULL;
     long port = strtol(value, &endptr, 10);
-    if (NULL != endptr && endptr[0] != '\0') {
+    if (NULL != endptr && '\0' != endptr[0]) {
         return 0;
     }
-    if (port < 0 || port > 65535) {
+    if (0 > port || 65535 < port) {
         return 0;
     }
     return (int)port;
