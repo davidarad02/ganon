@@ -138,8 +138,10 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
         } else if (is_flag_short(arg) || is_flag_long(arg)) {
             if (strcmp(arg, ARGS_FLAG_PORT_SHORT) == 0 || strcmp(arg, ARGS_FLAG_PORT_LONG) == 0) {
                 LOG_TRACE("Port flag detected: %s", arg);
-                FAIL_IF(i >= argc - 1,
-                        E__ARGS__MISSING_VALUE);
+                if (i >= argc - 1) {
+                    LOG_ERROR("Port flag -p/--port requires a value but none provided");
+                    FAIL(E__ARGS__MISSING_VALUE);
+                }
                 if (port_set) {
                     LOG_ERROR("Port already set via LISTEN_PORT env, cannot override with CLI -p/--port");
                     FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
@@ -160,8 +162,10 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
         }
     }
 
-    FAIL_IF(NULL == listen_ip,
-            E__ARGS__MISSING_VALUE);
+    if (NULL == listen_ip) {
+        LOG_ERROR("Missing required IP address (positional argument or LISTEN_IP env var)");
+        FAIL(E__ARGS__MISSING_VALUE);
+    }
 
     if (!validate_ip(listen_ip)) {
         LOG_ERROR("Invalid IP address format: %s (expected IPv4: 0-255.0-255.0-255.0-255)", listen_ip);
