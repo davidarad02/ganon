@@ -1,14 +1,24 @@
 #include "logging.h"
+#include "common.h"
+
+int rc_demo(int a, int b, int *result_out) {
+    int rc = 0;
+
+    FAIL_IF(a == b, E__MAIN__RC_DEMO__SOME_ERROR);
+
+    if (result_out != NULL) {
+        *result_out = a + b;
+    }
+
+l_cleanup:
+    return rc;
+}
 
 int main() {
-    LOG_INFO("Application started");
-    LOG_DEBUG("Debug message");
-    LOG_TRACE("Trace message");
-    LOG_INFO("Application exiting");
+    int result = 0;
 
-    LOG_INFO("User %d logged in", 42);
-    LOG_DEBUG("Value is %d, pointer is %p", 100, (void*)0x1234);
-    LOG_TRACE("Processing item %s", "sword");
+    rc_demo(1, 2, &result);
+    LOG_INFO("rc_demo returned %d", result);
 
     return 0;
 }
