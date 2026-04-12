@@ -87,6 +87,12 @@ static int validate_ip(const char *ip) {
     if (NULL == ip) {
         return 0;
     }
+    if ('\0' == ip[0]) {
+        return 0;
+    }
+    if ('.' == ip[0]) {
+        return 0;
+    }
     int dots = 0;
     int part_idx = 0;
     int part_value = 0;
@@ -102,6 +108,9 @@ static int validate_ip(const char *ip) {
             if (3 < part_idx) {
                 return 0;
             }
+            if ('.' == *(p + 1) || '\0' == *(p + 1)) {
+                return 0;
+            }
             p++;
             continue;
         }
@@ -113,6 +122,9 @@ static int validate_ip(const char *ip) {
             return 0;
         }
         p++;
+    }
+    if (0 == part_value) {
+        return 0;
     }
     if (3 != dots || 3 != part_idx) {
         return 0;
