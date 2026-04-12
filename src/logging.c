@@ -3,6 +3,18 @@
 #include <time.h>
 #include <sys/time.h>
 
+#define COLOR_RESET   "\033[0m"
+#define COLOR_RED     "\033[31m"
+#define COLOR_YELLOW  "\033[33m"
+#define COLOR_CYAN    "\033[36m"
+
+static const char *get_level_color(const char *level) {
+    if (level[0] == 'I') return COLOR_CYAN;
+    if (level[0] == 'D') return COLOR_YELLOW;
+    if (level[0] == 'T') return COLOR_RESET;
+    return COLOR_RESET;
+}
+
 void log_message(const char *level, const char *file, int line, const char *msg, ...) {
     struct timeval tv;
     gettimeofday(&tv, NULL);
@@ -16,10 +28,12 @@ void log_message(const char *level, const char *file, int line, const char *msg,
         if (*p == '/') filename = p + 1;
     }
 
+    const char *color = get_level_color(level);
+
     va_list args;
     va_start(args, msg);
 
-    printf("%s.%06ld [%s] ", timestamp, tv.tv_usec, level);
+    printf("%s.%06ld " COLOR_RESET "[%s%s%s] ", timestamp, tv.tv_usec, color, level, COLOR_RESET);
     vprintf(msg, args);
     printf(" [%s:%d]\n", filename, line);
     va_end(args);
