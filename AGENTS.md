@@ -4,7 +4,8 @@ This is the Ganon project - a C application built with CMake.
 
 ## Project Structure
 
-- `main.c` - Entry point
+- `src/` - Source files
+- `include/` - Header files
 - `VERSION` - Version file (e.g., "1.0.0")
 - `CMakeLists.txt` - Build configuration
 - `Makefile` - Build orchestration
