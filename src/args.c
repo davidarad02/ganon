@@ -63,14 +63,14 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     char *env_ip = get_env(ARGS_ENV_LISTEN_IP);
     char *env_port = get_env(ARGS_ENV_LISTEN_PORT);
     if (NULL != env_ip) {
-        LOG_INFO("Using LISTEN_IP from environment: %s", env_ip);
+        LOG_TRACE("Using LISTEN_IP from environment: %s", env_ip);
         FAIL_IF(NULL != listen_ip,
                 E__ARGS__CONFLICTING_ARGUMENTS);
         listen_ip = env_ip;
         ip_set = 1;
     }
     if (NULL != env_port) {
-        LOG_INFO("Using LISTEN_PORT from environment: %s", env_port);
+        LOG_TRACE("Using LISTEN_PORT from environment: %s", env_port);
         int port = parse_port(env_port);
         FAIL_IF(0 == port && '0' != env_port[0],
                 E__ARGS__INVALID_VALUE);
@@ -82,35 +82,35 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
         const char *arg = argv[i];
 
         if (is_positional(arg)) {
-            LOG_INFO("Using listen IP from positional argument: %s", arg);
+            LOG_TRACE("Using listen IP from positional argument: %s", arg);
             if (NULL != listen_ip) {
-                LOG_ERROR("IP already set, cannot specify multiple IPs");
+                LOG_WARNING("IP already set, cannot specify multiple IPs");
                 FAIL_IF(1, E__ARGS__CONFLICTING_ARGUMENTS);
             }
             if (ip_set) {
-                LOG_ERROR("IP already set, cannot specify multiple IPs");
+                LOG_WARNING("IP already set, cannot specify multiple IPs");
                 FAIL_IF(1, E__ARGS__CONFLICTING_ARGUMENTS);
             }
             listen_ip = (char *)arg;
             ip_set = 1;
         } else if (is_flag_short(arg) || is_flag_long(arg)) {
             if (strcmp(arg, ARGS_FLAG_PORT_SHORT) == 0 || strcmp(arg, ARGS_FLAG_PORT_LONG) == 0) {
-                LOG_INFO("Port flag detected: %s", arg);
+                LOG_TRACE("Port flag detected: %s", arg);
                 FAIL_IF(i >= argc - 1,
                         E__ARGS__MISSING_VALUE);
                 if (port_set) {
-                    LOG_ERROR("Port already set via LISTEN_PORT env, cannot override with CLI -p/--port");
+                    LOG_WARNING("Port already set via LISTEN_PORT env, cannot override with CLI -p/--port");
                     FAIL_IF(1, E__ARGS__CONFLICTING_ARGUMENTS);
                 }
                 i++;
                 int port = parse_port(argv[i]);
                 FAIL_IF(0 == port && '0' != argv[i][0],
                         E__ARGS__INVALID_VALUE);
-                LOG_INFO("Using port from CLI argument: %d", port);
+                LOG_TRACE("Using port from CLI argument: %d", port);
                 listen_port = port;
                 port_set = 1;
             } else {
-                LOG_ERROR("Unknown argument: %s", arg);
+                LOG_WARNING("Unknown argument: %s", arg);
                 FAIL_IF(1, E__ARGS__INVALID_ARGUMENT);
             }
         }

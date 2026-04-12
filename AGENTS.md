@@ -15,7 +15,7 @@ This is the Ganon project - a C application built with CMake.
 
 - `include/err.h` - Error codes enum
 - `include/common.h` - Common macros (FAIL_IF, BREAK_IF, CONTINUE_IF)
-- `include/logging.h` - Logging macros (LOG_INFO, LOG_DEBUG, LOG_TRACE)
+- `include/logging.h` - Logging macros (LOG_ERROR, LOG_WARNING, LOG_INFO, LOG_DEBUG, LOG_TRACE)
 
 ## Commands
 
@@ -64,7 +64,21 @@ Every function (except `main`) must:
 
 Comparison convention: static values first (e.g., `NULL != ptr`, `E__SUCCESS != rc`, `0 > value`)
 
-## Error Handling
+## Logging Conventions
+
+Log levels (in order of severity):
+
+- **ERROR** - Catastrophic errors that prevent the program from continuing
+- **WARN** - Issues that can be dealt with but indicate potential problems
+- **INFO** - Major events in the program (e.g., application startup, shutdown, significant state changes)
+- **DEBUG** - Smaller events or more detail about other events
+- **TRACE** - Detailed tracing data (argument parsing details, etc.)
+
+Use appropriate log levels for each message:
+- Most internal processing (like argument parsing in normal flow) should use TRACE
+- User-facing messages or significant milestones should use INFO
+- Recoverable issues should use WARN
+- Fatal errors should use ERROR
 
 - Errors defined in `include/err.h` as enum `err_t`
 - First error must be `E__SUCCESS = 0`
