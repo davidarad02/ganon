@@ -1,0 +1,1 @@
+/usr/bin/cc  -static -static CMakeFiles/ganon.dir/main.c.o -o ganon 
