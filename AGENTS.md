@@ -41,8 +41,8 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `include/args.h` - Argument parsing, addr_t struct, args_t config
 - `include/network.h` - Network types, socket_entry_t, g_node_id global
 - `include/protocol.h` - Protocol message structs (protocol_msg_t, msg_type_t, GANON_PROTOCOL_MAGIC)
-- `include/session.h` - Session protocol handling (SESSION__process)
-- `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_all, TRANSPORT__send_all)
+- `include/session.h` - Session protocol handling (SESSION__process, SESSION__send_packet)
+- `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_all, TRANSPORT__send_all, TRANSPORT__send_one)
 - `include/routing.h` - Routing table (routing_table_t, route_entry_t, route_type_t)
 
 ### Python Client Library
@@ -353,18 +353,24 @@ The architecture is separated into three layers for future extensibility:
 1. **Transport Layer** (`transport.c/h`): Low-level socket I/O
    - `transport_t` struct with function pointers for `recv` and `send`
    - `TRANSPORT__recv_all()` / `TRANSPORT__send_all()` for guaranteed complete I/O
+   - `TRANSPORT__send_one()` for sending a complete message in one go
+   - **This is the ONLY layer that calls `send()` and `recv()` syscalls**
    - Can be extended for encrypted/compressed channels
 
 2. **Session Layer** (`session.c/h`): Protocol message handling
    - `SESSION__process()` reads and validates protocol messages
+   - `SESSION__send_packet()` - **the ONE function to send a protocol message to a peer**
    - Validates magic, parses header, reads data
    - Dispatches to message handlers based on `msg_type_t`
    - Handles routing table updates on NODE_INIT
+   - All sent packets are logged at TRACE level via `log_sent_packet()`
    - Can be extended for additional message types
 
 3. **Application Layer**: Message handlers
    - `SESSION__handle_node_init()` - handles NODE_INIT messages, adds to routing table
    - Future: encryption key exchange, compression, etc.
+
+**Key Design Principle**: The `send()` syscall is ONLY called from within `transport.c`. Any code that needs to send protocol messages must use `SESSION__send_packet()` (for messages originated by this node) or go through transport via `TRANSPORT__send_one()` (for forwarded messages).
 
 ### Routing Integration
 
