@@ -158,6 +158,18 @@ class GanonClient:
 
     def _handle_node_init(self, orig_src_node_id: int, src_node_id: int, message_id: int, ttl: int, data: bytes):
         self._debug("Received NODE_INIT from node %d (orig_src=%d, msg_id=%d, ttl=%d, data_len=%d)", src_node_id, orig_src_node_id, message_id, ttl, len(data))
+        self._peer_node_id = src_node_id
+        self._routing_table.add_direct(src_node_id, None)
+        self._debug("Set peer_node_id to %d (direct connection)", src_node_id)
+        self._debug("Routing table after NODE_INIT:")
+        self._routing_table.log_table()
+
+    def _handle_node_disconnect(self, orig_src_node_id: int, src_node_id: int, message_id: int, ttl: int, data: bytes):
+        self._debug("Received NODE_DISCONNECT from node %d (orig_src=%d, msg_id=%d, ttl=%d, data_len=%d)", src_node_id, orig_src_node_id, message_id, ttl, len(data))
+        self._routing_table.remove(src_node_id)
+        self._routing_table.remove_via_node(src_node_id)
+        self._debug("Routing table after NODE_DISCONNECT:")
+        self._routing_table.log_table()
 
     def _handle_peer_info(self, orig_src_node_id: int, src_node_id: int, message_id: int, ttl: int, data: bytes):
         self._debug("Received PEER_INFO from node %d (orig_src=%d, msg_id=%d, ttl=%d, data_len=%d)", src_node_id, orig_src_node_id, message_id, ttl, len(data))
@@ -191,6 +203,8 @@ class GanonClient:
             self._handle_node_init(orig_src_node_id, src_node_id, message_id, ttl, data)
         elif msg_type == MsgType.PEER_INFO:
             self._handle_peer_info(orig_src_node_id, src_node_id, message_id, ttl, data)
+        elif msg_type == MsgType.NODE_DISCONNECT:
+            self._handle_node_disconnect(orig_src_node_id, src_node_id, message_id, ttl, data)
         else:
             self._warning("Unknown message type: %d", header["type"])
 

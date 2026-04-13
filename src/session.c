@@ -152,7 +152,7 @@ err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *pe
     uint32_t message_id = PROTOCOL_FIELD_FROM_NETWORK(msg->message_id);
     uint32_t data_length = PROTOCOL_FIELD_FROM_NETWORK(msg->data_length);
     uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
-    msg_type_t type = msg->type;
+    msg_type_t type = (msg_type_t)PROTOCOL_FIELD_FROM_NETWORK(msg->type);
 
     LOG_DEBUG("Received packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u, fd=%d", orig_src_node_id, src_node_id, dst_node_id, message_id, type, ttl, data_length, fd);
 

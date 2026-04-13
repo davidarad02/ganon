@@ -21,7 +21,7 @@ typedef struct {
     uint32_t src_node_id;
     uint32_t dst_node_id;
     uint32_t message_id;
-    msg_type_t type;
+    uint32_t type;
     uint32_t data_length;
     uint32_t ttl;
 } protocol_msg_t;
