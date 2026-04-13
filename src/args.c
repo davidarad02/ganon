@@ -155,6 +155,38 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
             exit(0);
         }
     }
+
+    int v_count = 0;
+    for (int i = 1; i < argc; i++) {
+        if (0 == strcmp(argv[i], "-v")) {
+            v_count++;
+        } else if (0 == strcmp(argv[i], "-vv")) {
+            v_count += 2;
+        }
+    }
+
+    const char *log_level_env = getenv("LOG_LEVEL");
+    if (NULL != log_level_env && v_count > 0) {
+        LOG_ERROR("Cannot use both LOG_LEVEL env var and -v flag");
+        FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
+    }
+
+    if (v_count >= 2) {
+        log_set_level(LOG_LEVEL_TRACE);
+    } else if (v_count >= 1) {
+        log_set_level(LOG_LEVEL_DEBUG);
+    } else if (NULL != log_level_env) {
+        if (0 == strcmp(log_level_env, "info")) {
+            log_set_level(LOG_LEVEL_INFO);
+        } else if (0 == strcmp(log_level_env, "debug")) {
+            log_set_level(LOG_LEVEL_DEBUG);
+        } else if (0 == strcmp(log_level_env, "trace")) {
+            log_set_level(LOG_LEVEL_TRACE);
+        } else {
+            LOG_ERROR("Invalid LOG_LEVEL value: %s (must be info, debug, or trace)", log_level_env);
+            FAIL(E__ARGS__INVALID_FORMAT);
+        }
+    }
 #endif
 
     char *env_ip = get_env(ARGS_ENV_LISTEN_IP);
@@ -192,7 +224,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
             listen_ip = (char *)arg;
             ip_set = 1;
         } else if (is_flag_short(arg) || is_flag_long(arg)) {
-            if (strcmp(arg, ARGS_FLAG_PORT_SHORT) == 0 || strcmp(arg, ARGS_FLAG_PORT_LONG) == 0) {
+            if (0 == strcmp(arg, ARGS_FLAG_PORT_SHORT) || 0 == strcmp(arg, ARGS_FLAG_PORT_LONG)) {
                 LOG_TRACE("Port flag detected: %s", arg);
                 if (i >= argc - 1) {
 #ifdef __DEBUG__
@@ -213,7 +245,9 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 LOG_TRACE("Using port from CLI argument: %d", port);
                 listen_port = port;
                 port_set = 1;
-            } else {
+            } else if (0 == strcmp(arg, "-v") || 0 == strcmp(arg, "-vv")) {
+            continue;
+        } else {
                 LOG_ERROR("Unknown argument: %s", arg);
                 FAIL(E__ARGS__UNKNOWN_FLAG);
             }
