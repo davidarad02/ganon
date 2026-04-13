@@ -478,6 +478,7 @@ err_t network_shutdown(network_t *net) {
 
     while (NULL != iter) {
         socket_entry_t *next = iter->next;
+        shutdown(iter->fd, SHUT_RDWR);
         close(iter->fd);
         iter = next;
     }
@@ -492,7 +493,6 @@ err_t network_shutdown(network_t *net) {
         head = next;
     }
 
-    pthread_mutex_unlock(&net->clients_mutex);
     pthread_mutex_destroy(&net->clients_mutex);
 
     for (int i = 0; i < net->connect_thread_count; i++) {
