@@ -10,6 +10,15 @@ This is the Ganon project - a mesh-style network tunneler in C built with CMake.
 - `CMakeLists.txt` - Build configuration
 - `Makefile` - Build orchestration
 - `cmake/` - Toolchain files for cross-compilation
+- `ganon_client/` - Python client library
+
+### Python Client Library
+
+- `ganon_client/` - Python package
+- `ganon_client/ganon_client/__init__.py` - Package init
+- `ganon_client/ganon_client/client.py` - GanonClient class
+- `ganon_client/pyproject.toml` - Build configuration
+- `venv/` - Python virtual environment
 
 ### Headers
 
@@ -230,3 +239,16 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - `shutdown(SHUT_RDWR)` + `close()` on all client sockets wakes blocking threads
 - `pthread_detach` for connect threads (self-cleanup)
 - `pthread_join` for client threads
+
+## Python Client Development
+
+After any change to `ganon_client/`, reinstall it in the venv:
+```bash
+/home/arad/projects/ganon/venv/bin/pip install -e /home/arad/projects/ganon/ganon_client
+```
+
+Test the client:
+```bash
+/home/arad/projects/ganon/venv/bin/ipython
+from ganon_client import GanonClient
+```
