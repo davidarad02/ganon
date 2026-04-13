@@ -493,6 +493,7 @@ static void *socket_thread_func(void *arg) {
             protocol_msg_t *hdr = (protocol_msg_t *)header_buffer;
             msg_type_t msg_type = (msg_type_t)PROTOCOL_FIELD_FROM_NETWORK(hdr->type);
             uint32_t dst_node_id = PROTOCOL_FIELD_FROM_NETWORK(hdr->dst_node_id);
+            uint32_t src_node_id = PROTOCOL_FIELD_FROM_NETWORK(hdr->src_node_id);
 
             if (NULL != learned_peers && 0 != learned_count) {
                 if (msg_type == MSG__PEER_INFO) {
@@ -505,7 +506,8 @@ static void *socket_thread_func(void *arg) {
                 learned_peers = NULL;
             }
 
-            if (dst_node_id != 0 && (uint32_t)g_node_id != dst_node_id && msg_type != MSG__NODE_INIT && msg_type != MSG__PEER_INFO) {
+            if ((dst_node_id != 0 && (uint32_t)g_node_id != dst_node_id && msg_type != MSG__NODE_INIT && msg_type != MSG__PEER_INFO) ||
+                (dst_node_id == 0 && src_node_id != (uint32_t)g_node_id)) {
                 LOG_DEBUG("Forwarding message from node %u to node %u", entry->peer_node_id, dst_node_id);
                 forward_message(net, header_buffer, data, data_len);
             }
