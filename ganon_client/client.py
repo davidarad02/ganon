@@ -20,7 +20,6 @@ COLOR_BOLD = "\033[1m"
 LEVEL_COLORS = {
     "ERROR": COLOR_RED,
     "WARN": COLOR_YELLOW,
-    "WARNING": COLOR_YELLOW,
     "INFO": COLOR_CYAN,
     "DEBUG": COLOR_WHITE,
     "TRACE": COLOR_RESET,
@@ -32,6 +31,8 @@ LEVEL_WIDTH = 5
 class GanonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         level = record.levelname
+        if level == "WARNING":
+            level = "WARN"
         color = LEVEL_COLORS.get(level, COLOR_RESET)
 
         timestamp = datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S")
