@@ -379,13 +379,15 @@ The architecture is separated into three layers for future extensibility:
 - On NODE_INIT (direct connection, src == orig_src): `ROUTING__add_direct()` is called to add the peer to routing table
 - On NODE_INIT (relayed broadcast, src != orig_src): `ROUTING__add_via_hop()` is called with next_hop=src_node_id
 - When broadcasting NODE_INIT via `broadcast_to_others()`, src_node_id is set to g_node_id so recipients know the message is relayed
+- Server sends NODE_INIT back to newly connected client so it can add the server as a direct route
+- Duplicate connection check in `SESSION__handle_node_init`: only applies to direct connections (src == orig_src), not broadcasts
 - On PEER_INFO: learned peers are returned via `out_peer_list*` and `out_peer_count*`
-- On MSG__NODE_DISCONNECT: removes node from routing tables
+- On MSG__NODE_DISCONNECT: uses orig_src_node_id to identify disconnected node and removes it from routing tables
 - On MSG__CONNECTION_REJECTED: connection is abandoned (no reconnect)
 - `broadcast_to_others()` broadcasts NODE_INIT to all connected clients except the sender
 - `forward_message()` forwards non-protocol messages to the next hop when `dst_node_id` is not local
 - `broadcast_peer_info_to_others()` propagates PEER_INFO to all peers except sender
-- `broadcast_node_disconnect()` notifies all peers when a node disconnects
+- `broadcast_node_disconnect()` notifies all peers when a node disconnects (sets orig_src=disconnected_node, src=g_node_id)
 
 ## Data Structures
 
