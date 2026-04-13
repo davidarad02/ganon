@@ -387,7 +387,7 @@ The architecture is separated into three layers for future extensibility:
 - On MSG__NODE_DISCONNECT: uses orig_src_node_id to identify disconnected node and removes it from routing tables
 - On MSG__CONNECTION_REJECTED: connection is abandoned (no reconnect)
 - `broadcast_to_others()` broadcasts NODE_INIT to all connected clients except the sender
-- `forward_message()` forwards non-protocol messages to the next hop when `dst_node_id` is not local
+- `forward_message()` forwards messages to the next hop when `dst_node_id` is not local, and handles broadcast messages (dst=0) by forwarding to all direct peers except the sender
 - `broadcast_peer_info_to_others()` propagates PEER_INFO to all peers except sender
 - `broadcast_node_disconnect()` notifies all peers when a node disconnects (sets orig_src=disconnected_node, src=g_node_id)
 - Broadcast messages (dst=0) are forwarded to all directly connected peers except the original sender (src_node_id), ensuring NODE_DISCONNECT propagates through the network
@@ -678,9 +678,11 @@ client.set_on_reconnected(lambda: print("Reconnected!"))
 ## TODO
 
 - [x] Implement forwarding of non-direct messages via `ROUTING__send_to_node()`
-- [ ] Test multi-node mesh topology with various connection patterns
+- [x] Test multi-node mesh topology with various connection patterns
 - [ ] Update Python client with disconnect routing cleanup
-- [ ] Build and test with multiple nodes
+- [x] Fix NODE_DISCONNECT propagation through network
+- [x] Fix send_peer_info to send all peers from routing table
+- [x] Fix broadcast forwarding for dst=0 messages
 
 ## Message Forwarding
 
