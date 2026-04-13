@@ -475,10 +475,16 @@ err_t network_shutdown(network_t *net) {
     socket_entry_t *current = net->clients;
     while (NULL != current) {
         socket_entry_t *next = current->next;
+        close(current->fd);
+        current = next;
+    }
+
+    current = net->clients;
+    while (NULL != current) {
+        socket_entry_t *next = current->next;
         if (0 != current->thread) {
             pthread_join(current->thread, NULL);
         }
-        close(current->fd);
         free(current);
         current = next;
     }
