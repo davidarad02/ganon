@@ -310,6 +310,9 @@ static void send_connection_rejected(int fd, uint32_t node_id) {
     } else {
         LOG_DEBUG("Sent CONNECTION_REJECTED to fd %d (node_id=%u)", fd, node_id);
     }
+
+    struct timespec ts = {0, 100000};
+    nanosleep(&ts, NULL);
 }
 
 static int create_listen_socket(const char *ip, int port) {
