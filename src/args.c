@@ -435,12 +435,16 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
     if (NULL != env_reconnect_retries) {
         LOG_TRACE("Using RECONNECT_RETRIES from environment: %s", env_reconnect_retries);
         FAIL_IF(0 != reconnect_retries_set, E__ARGS__CONFLICTING_ARGUMENTS);
-        int r = parse_int(env_reconnect_retries);
-        if (0 > r) {
-            LOG_ERROR("Invalid RECONNECT_RETRIES value: %s (must be 0 or greater)", env_reconnect_retries);
-            FAIL(E__ARGS__INVALID_RECONNECT_RETRIES);
+        if (0 == strcmp(env_reconnect_retries, "max") || 0 == strcmp(env_reconnect_retries, "always")) {
+            reconnect_retries = -1;
+        } else {
+            int r = parse_int(env_reconnect_retries);
+            if (0 > r) {
+                LOG_ERROR("Invalid RECONNECT_RETRIES value: %s (must be 0, max, or always)", env_reconnect_retries);
+                FAIL(E__ARGS__INVALID_RECONNECT_RETRIES);
+            }
+            reconnect_retries = r;
         }
-        reconnect_retries = r;
         reconnect_retries_set = 1;
     }
     char *env_reconnect_delay = get_env(ARGS_ENV_RECONNECT_DELAY);
@@ -567,13 +571,17 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                     FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 }
                 i++;
-                int r = parse_int(argv[i]);
-                if (0 > r) {
-                    LOG_ERROR("Invalid reconnect retries value: %s (must be 0 or greater)", argv[i]);
-                    FAIL(E__ARGS__INVALID_RECONNECT_RETRIES);
+                if (0 == strcmp(argv[i], "max") || 0 == strcmp(argv[i], "always")) {
+                    reconnect_retries = -1;
+                } else {
+                    int r = parse_int(argv[i]);
+                    if (0 > r) {
+                        LOG_ERROR("Invalid reconnect retries value: %s (must be 0, max, or always)", argv[i]);
+                        FAIL(E__ARGS__INVALID_RECONNECT_RETRIES);
+                    }
+                    reconnect_retries = r;
                 }
-                LOG_TRACE("Using reconnect retries from CLI argument: %d", r);
-                reconnect_retries = r;
+                LOG_TRACE("Using reconnect retries from CLI argument: %d", reconnect_retries);
                 reconnect_retries_set = 1;
             } else if (0 == strcmp(arg, ARGS_FLAG_RECONNECT_DELAY_LONG)) {
                 LOG_TRACE("Reconnect delay flag detected: %s", arg);
