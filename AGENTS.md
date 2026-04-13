@@ -240,6 +240,8 @@ All multi-byte integers use network byte order (big-endian) for cross-architectu
 typedef enum {
     MSG__NODE_INIT = 0,
     MSG__PEER_INFO = 1,
+    MSG__NODE_DISCONNECT = 2,
+    MSG__CONNECTION_REJECTED = 3,
 } msg_type_t;
 ```
 
@@ -368,11 +370,15 @@ The architecture is separated into three layers for future extensibility:
 
 - `network_t` contains `routing_table_t` member
 - `SESSION__process()` takes `routing_table_t*`, `fd`, `peer_node_id*`, `out_header*`, `header_len`, `out_peer_list*`, `out_peer_count*`, `out_data*`, `out_data_len*` parameters
-- On NODE_INIT: `ROUTING__add_direct()` is called to add the peer to routing table, `peer_node_id` is returned
+- On NODE_INIT (direct connection): `ROUTING__add_direct()` is called to add the peer to routing table
+- On NODE_INIT (broadcast, src != orig_src): `ROUTING__add_via_hop()` is called with next_hop=src_node_id
 - On PEER_INFO: learned peers are returned via `out_peer_list*` and `out_peer_count*`
-- On disconnect: `ROUTING__remove()` and `ROUTING__remove_via_node()` are called with the peer's node_id
+- On MSG__NODE_DISCONNECT: removes node from routing tables
+- On MSG__CONNECTION_REJECTED: connection is abandoned (no reconnect)
 - `broadcast_to_others()` broadcasts NODE_INIT to all connected clients except the sender
 - `forward_message()` forwards non-protocol messages to the next hop when `dst_node_id` is not local
+- `broadcast_peer_info_to_others()` propagates PEER_INFO to all peers except sender
+- `broadcast_node_disconnect()` notifies all peers when a node disconnects
 
 ## Data Structures
 
@@ -458,6 +464,12 @@ Errors are defined in `include/err.h` as enum `err_t`:
   - session: 0x401-0x4FF
   - routing: 0x501-0x5FF
 
+### Session Error Codes
+
+- `E__SESSION__HANDLE_NODE_INIT_FAILED = 0x401`
+- `E__SESSION__HANDLE_MESSAGE_FAILED`
+- `E__SESSION__CONNECTION_REJECTED`
+
 ## Network Architecture
 
 ### Accept Loop
@@ -474,8 +486,14 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - Logs connection as "from" for incoming, "to" for outgoing
 - Logs disconnection at WARN level
 - Removes itself from clients list on disconnect
-- On disconnect: calls `ROUTING__remove()` and `ROUTING__remove_via_node()` with the peer's node_id
+- On disconnect: calls `broadcast_node_disconnect()`, then `ROUTING__remove()` and `ROUTING__remove_via_node()` with the peer's node_id
 - On NODE_INIT: calls `broadcast_to_others()` to announce new node to network
+
+### Duplicate Node ID Detection
+- When a node connects and sends NODE_INIT, server checks if that node_id is already connected via `ROUTING__is_direct()`
+- If duplicate: server sends `MSG__CONNECTION_REJECTED` and closes socket
+- Client receives `MSG__CONNECTION_REJECTED` and abandons connection (no reconnect)
+- The rejected socket's `peer_node_id` stays 0, so no disconnect broadcast or routing cleanup is triggered
 
 ### Outgoing Connections
 - `connect_thread_func` handles each connection target
@@ -563,7 +581,7 @@ client = GanonClient(
 | `connect_timeout` | int | 5 | Socket connection timeout (seconds) |
 | `reconnect_retries` | int | 5 | Reconnect attempts (-1 = unlimited, 0 = disabled) |
 | `reconnect_delay` | int | 5 | Seconds between reconnect attempts |
-| `log_level` | int | LOG_LEVEL_INFO | Minimum log level to output |
+| `log_level` | int | LOG_LEVEL_DEBUG | Minimum log level to output |
 
 #### Log Levels
 
@@ -583,6 +601,7 @@ LOG_LEVEL_INFO = 2   # Informational messages
 | `is_connected() -> bool` | Check if connected. |
 | `send(data: bytes) -> int` | Send raw bytes to server. |
 | `recv(bufsize: int = 4096) -> bytes` | Receive raw bytes (blocking). |
+| `send_to_node(dst_node_id, data) -> bool` | Send protocol message to another node via connected peer. |
 
 #### Context Manager
 

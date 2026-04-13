@@ -170,7 +170,7 @@ err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *pe
     uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
     msg_type_t type = (msg_type_t)PROTOCOL_FIELD_FROM_NETWORK(msg->type);
 
-    LOG_DEBUG("Received packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u, fd=%d", orig_src_node_id, src_node_id, dst_node_id, message_id, type, ttl, data_length, fd);
+    LOG_TRACE("Received packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u, fd=%d", orig_src_node_id, src_node_id, dst_node_id, message_id, type, ttl, data_length, fd);
 
     if (data_length > 0) {
         data = malloc(data_length);

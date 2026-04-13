@@ -25,6 +25,18 @@ static ssize_t send_wrapper(int fd, const uint8_t *buf, size_t len) {
     return send(fd, buf, len, 0);
 }
 
+static void log_sent_packet(uint8_t *header, int fd) {
+    protocol_msg_t *msg = (protocol_msg_t *)header;
+    uint32_t orig_src = PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id);
+    uint32_t src = PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id);
+    uint32_t dst = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
+    uint32_t msg_id = PROTOCOL_FIELD_FROM_NETWORK(msg->message_id);
+    uint32_t type = PROTOCOL_FIELD_FROM_NETWORK(msg->type);
+    uint32_t data_len = PROTOCOL_FIELD_FROM_NETWORK(msg->data_length);
+    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
+    LOG_TRACE("Sent packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u, fd=%d", orig_src, src, dst, msg_id, type, ttl, data_len, fd);
+}
+
 static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_node_id, uint8_t *header, const uint8_t *data, size_t data_len) {
     (void)sender_node_id;
     if (NULL == net || NULL == header) {
@@ -49,6 +61,8 @@ static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_
                 LOG_WARNING("Failed to broadcast to fd %d", client->fd);
             } else if ((size_t)sent < PROTOCOL_HEADER_SIZE) {
                 LOG_WARNING("Partial broadcast header to fd %d", client->fd);
+            } else {
+                log_sent_packet(header, client->fd);
             }
             if (NULL != data && 0 < data_len) {
                 sent = send(client->fd, data, data_len, 0);
@@ -99,6 +113,7 @@ static void broadcast_peer_info_to_others(network_t *net, int exclude_fd, uint32
             if (0 > sent) {
                 LOG_WARNING("Failed to broadcast PEER_INFO header to fd %d", client->fd);
             } else {
+                log_sent_packet(header, client->fd);
                 sent = send(client->fd, peer_data, peer_count * sizeof(uint32_t), 0);
                 if (0 > sent) {
                     LOG_WARNING("Failed to broadcast PEER_INFO data to fd %d", client->fd);
@@ -141,6 +156,7 @@ static void broadcast_node_disconnect(network_t *net, int exclude_fd, uint32_t d
             if (0 > sent) {
                 LOG_WARNING("Failed to broadcast NODE_DISCONNECT to fd %d", client->fd);
             } else {
+                log_sent_packet(header, client->fd);
                 LOG_DEBUG("Broadcast NODE_DISCONNECT for node %u to node %u", disconnected_node_id, client->peer_node_id);
             }
         }
@@ -233,6 +249,7 @@ static err_t send_peer_info(network_t *net, int fd, uint32_t src_node_id, uint32
         pthread_mutex_unlock(&net->clients_mutex);
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
+    log_sent_packet(header, fd);
 
     if (peer_count > 0) {
         uint8_t *peer_data = malloc(peer_count * sizeof(uint32_t));
@@ -286,6 +303,7 @@ static void send_node_init(int fd, uint32_t node_id) {
     if (0 > sent) {
         LOG_WARNING("Failed to send NODE_INIT to fd %d", fd);
     } else {
+        log_sent_packet(header, fd);
         LOG_DEBUG("Sent NODE_INIT to fd %d (node_id=%u)", fd, node_id);
     }
 }
@@ -308,6 +326,7 @@ static void send_connection_rejected(int fd, uint32_t node_id) {
     if (0 > sent) {
         LOG_ERROR("Failed to send CONNECTION_REJECTED to fd %d", fd);
     } else {
+        log_sent_packet(header, fd);
         LOG_DEBUG("Sent CONNECTION_REJECTED to fd %d (rejected peer, our node_id=%u)", fd, node_id);
     }
 
