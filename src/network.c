@@ -235,11 +235,18 @@ static void *socket_thread_func(void *arg) {
         for (int retry = 0; retry < net->reconnect_retries; retry++) {
             LOG_INFO("Reconnecting to %s:%d (attempt %d/%d)...", entry->client_ip, entry->client_port,
                      retry + 1, net->reconnect_retries);
-            sleep((unsigned int)net->reconnect_delay);
+
+            if (retry < net->reconnect_retries - 1) {
+                sleep((unsigned int)net->reconnect_delay);
+            }
 
             int new_fd = connect_to_addr(entry->client_ip, entry->client_port, net->connect_timeout);
             if (0 > new_fd) {
-                LOG_WARNING("Reconnect attempt %d/%d failed, retrying in %ds", retry + 1, net->reconnect_retries, net->reconnect_delay);
+                if (retry < net->reconnect_retries - 1) {
+                    LOG_WARNING("Reconnect attempt %d/%d failed, retrying in %ds", retry + 1, net->reconnect_retries, net->reconnect_delay);
+                } else {
+                    LOG_WARNING("Reconnect attempt %d/%d failed", retry + 1, net->reconnect_retries);
+                }
                 continue;
             }
 
