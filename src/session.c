@@ -178,7 +178,10 @@ err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *pe
     }
 
     rc = SESSION__handle_message(rt, fd, orig_src_node_id, src_node_id, dst_node_id, message_id, type, ttl, data_length, data, &discovered_node_id, &learned_peers, &learned_count);
-    FAIL_IF(E__SUCCESS != rc, E__SESSION__HANDLE_MESSAGE_FAILED);
+    if (E__SUCCESS != rc && E__SESSION__CONNECTION_REJECTED != rc) {
+        LOG_WARNING("Session message handling failed");
+        goto l_cleanup;
+    }
 
     if (NULL != peer_node_id && 0 != discovered_node_id) {
         *peer_node_id = discovered_node_id;
