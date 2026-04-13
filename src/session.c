@@ -4,31 +4,48 @@
 #include "common.h"
 #include "logging.h"
 #include "protocol.h"
+#include "routing.h"
 #include "session.h"
 #include "transport.h"
 
-#define PROTOCOL_HEADER_SIZE 20
-
-static err_t SESSION__handle_ping(uint32_t node_id, uint32_t message_id, uint32_t data_length) {
+static err_t SESSION__handle_node_init(routing_table_t *rt, int fd, uint32_t orig_src_node_id, uint32_t src_node_id, uint32_t message_id, uint32_t data_length, uint8_t *data, uint32_t *out_node_id) {
     err_t rc = E__SUCCESS;
 
-    (void)node_id;
+    (void)orig_src_node_id;
     (void)message_id;
     (void)data_length;
+    (void)data;
 
-    LOG_DEBUG("Received PING from node %u (msg_id=%u, data_len=%u)", node_id, message_id, data_length);
+    LOG_DEBUG("Received NODE_INIT from node %u (orig_src=%u, msg_id=%u, data_len=%u)", src_node_id, orig_src_node_id, message_id, data_length);
 
+    rc = ROUTING__add_direct(rt, src_node_id, fd);
+    if (E__SUCCESS != rc) {
+        LOG_WARNING("Failed to add node %u to routing table", src_node_id);
+        goto l_cleanup;
+    }
+
+    if (NULL != out_node_id) {
+        *out_node_id = src_node_id;
+    }
+
+l_cleanup:
     return rc;
 }
 
-static err_t SESSION__handle_message(uint32_t node_id, uint32_t message_id, msg_type_t type, uint32_t data_length) {
+static err_t SESSION__handle_message(routing_table_t *rt, int fd, uint32_t orig_src_node_id, uint32_t src_node_id, uint32_t dst_node_id, uint32_t message_id, msg_type_t type, uint32_t data_length, uint8_t *data, uint32_t *out_node_id) {
     err_t rc = E__SUCCESS;
 
-    LOG_INFO("Protocol: node_id=%u, msg_id=%u, type=%d, data_len=%u", node_id, message_id, type, data_length);
+    (void)orig_src_node_id;
+    (void)dst_node_id;
+    (void)message_id;
+    (void)data;
+
+    LOG_INFO("Protocol: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, data_len=%u", orig_src_node_id, src_node_id, dst_node_id, message_id, type, data_length);
 
     switch (type) {
-    case MSG__PING:
-        FAIL_IF(E__SUCCESS != SESSION__handle_ping(node_id, message_id, data_length), E__SESSION__HANDLE_PING_FAILED);
+    case MSG__NODE_INIT:
+        rc = SESSION__handle_node_init(rt, fd, orig_src_node_id, src_node_id, message_id, data_length, data, out_node_id);
+        FAIL_IF(E__SUCCESS != rc, E__SESSION__HANDLE_NODE_INIT_FAILED);
         break;
     default:
         LOG_WARNING("Unknown message type: %d", type);
@@ -39,11 +56,12 @@ l_cleanup:
     return rc;
 }
 
-err_t SESSION__process(transport_t *t) {
+err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *peer_node_id, uint8_t *out_header, size_t header_len) {
     err_t rc = E__SUCCESS;
     uint8_t *data = NULL;
+    uint32_t discovered_node_id = 0;
 
-    VALIDATE_ARGS(t);
+    VALIDATE_ARGS(rt, t);
 
     uint8_t header_buffer[PROTOCOL_HEADER_SIZE];
     ssize_t bytes_read = t->recv(t->fd, header_buffer, sizeof(header_buffer));
@@ -66,7 +84,15 @@ err_t SESSION__process(transport_t *t) {
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 
+    uint32_t orig_src_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id);
+    uint32_t src_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id);
+    uint32_t dst_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
+    uint32_t message_id = PROTOCOL_FIELD_FROM_NETWORK(msg->message_id);
     uint32_t data_length = PROTOCOL_FIELD_FROM_NETWORK(msg->data_length);
+    msg_type_t type = msg->type;
+
+    LOG_DEBUG("Received packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, data_len=%u, fd=%d", orig_src_node_id, src_node_id, dst_node_id, message_id, type, data_length, fd);
+
     if (data_length > 0) {
         data = malloc(data_length);
         FAIL_IF(NULL == data, E__INVALID_ARG_NULL_POINTER);
@@ -79,11 +105,16 @@ err_t SESSION__process(transport_t *t) {
         }
     }
 
-    uint32_t node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->node_id);
-    uint32_t message_id = PROTOCOL_FIELD_FROM_NETWORK(msg->message_id);
-    msg_type_t type = msg->type;
+    rc = SESSION__handle_message(rt, fd, orig_src_node_id, src_node_id, dst_node_id, message_id, type, data_length, data, &discovered_node_id);
+    FAIL_IF(E__SUCCESS != rc, E__SESSION__HANDLE_MESSAGE_FAILED);
 
-    FAIL_IF(E__SUCCESS != SESSION__handle_message(node_id, message_id, type, data_length), E__SESSION__HANDLE_MESSAGE_FAILED);
+    if (NULL != peer_node_id && 0 != discovered_node_id) {
+        *peer_node_id = discovered_node_id;
+    }
+
+    if (NULL != out_header && header_len >= PROTOCOL_HEADER_SIZE) {
+        memcpy(out_header, header_buffer, PROTOCOL_HEADER_SIZE);
+    }
 
 l_cleanup:
     FREE(data);

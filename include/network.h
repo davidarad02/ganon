@@ -6,6 +6,7 @@
 
 #include "args.h"
 #include "err.h"
+#include "routing.h"
 
 #define NETWORK_BUFFER_SIZE 4096
 
@@ -19,6 +20,7 @@ typedef struct socket_entry {
     char client_ip[INET_ADDRSTRLEN];
     int client_port;
     int is_incoming;
+    uint32_t peer_node_id;
 } socket_entry_t;
 
 struct network_t {
@@ -26,6 +28,7 @@ struct network_t {
     pthread_t accept_thread;
     socket_entry_t *clients;
     pthread_mutex_t clients_mutex;
+    routing_table_t routing_table;
     int running;
     addr_t listen_addr;
     addr_t *connect_addrs;

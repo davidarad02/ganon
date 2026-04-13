@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from ganon_client.protocol import GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader
+from ganon_client.routing import RoutingTable
 from ganon_client.transport import Transport
 
 LOG_LEVEL_TRACE = 0
@@ -68,6 +69,7 @@ class GanonClient:
         self,
         ip: str,
         port: int,
+        node_id: int,
         connect_timeout: int = 5,
         reconnect_retries: int = 5,
         reconnect_delay: int = 5,
@@ -75,6 +77,7 @@ class GanonClient:
     ):
         self.ip = ip
         self.port = port
+        self.node_id = node_id
         self.connect_timeout = connect_timeout
         self.reconnect_retries = reconnect_retries
         self.reconnect_delay = reconnect_delay
@@ -85,6 +88,9 @@ class GanonClient:
         self._lock = threading.Lock()
         self._recv_thread: Optional[threading.Thread] = None
         self._reconnecting = False
+        self._peer_node_id: Optional[int] = None
+
+        self._routing_table = RoutingTable()
 
         self._on_data_received: Optional[Callable[[bytes], None]] = None
         self._on_disconnected: Optional[Callable[[], None]] = None
@@ -150,24 +156,26 @@ class GanonClient:
             sock.close()
             return None
 
-    def _handle_ping(self, node_id: int, message_id: int, data: bytes):
-        self._debug("Received PING from node %d (msg_id=%d, data_len=%d)", node_id, message_id, len(data))
+    def _handle_node_init(self, orig_src_node_id: int, src_node_id: int, message_id: int, data: bytes):
+        self._debug("Received NODE_INIT from node %d (orig_src=%d, msg_id=%d, data_len=%d)", src_node_id, orig_src_node_id, message_id, len(data))
 
     def _process(self, header: dict, data: bytes):
-        node_id = header["node_id"]
+        orig_src_node_id = header["orig_src_node_id"]
+        src_node_id = header["src_node_id"]
+        dst_node_id = header["dst_node_id"]
         message_id = header["message_id"]
         msg_type = MsgType(header["type"])
         data_length = header["data_length"]
 
-        self._info("Protocol: node_id=%d, msg_id=%d, type=%s, data_len=%d", node_id, message_id, msg_type.name, data_length)
+        self._info("Protocol: orig_src=%d, src=%d, dst=%d, msg_id=%d, type=%s, data_len=%d", orig_src_node_id, src_node_id, dst_node_id, message_id, msg_type.name, data_length)
 
-        if msg_type == MsgType.PING:
-            self._handle_ping(node_id, message_id, data)
+        if msg_type == MsgType.NODE_INIT:
+            self._handle_node_init(orig_src_node_id, src_node_id, message_id, data)
         else:
             self._warning("Unknown message type: %d", header["type"])
 
     def _protocol_loop(self):
-        header_size = 20
+        header_size = 24
         transport = Transport(self._sock)
         while self._running:
             header_data = transport.recv_all(header_size)

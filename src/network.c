@@ -14,10 +14,39 @@
 #include "common.h"
 #include "logging.h"
 #include "network.h"
+#include "protocol.h"
 #include "session.h"
 #include "transport.h"
 
 int g_node_id = -1;
+
+static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_node_id, const uint8_t *header, const uint8_t *data, size_t data_len) {
+    if (NULL == net || NULL == header) {
+        return;
+    }
+
+    pthread_mutex_lock(&net->clients_mutex);
+    socket_entry_t *client = net->clients;
+    while (NULL != client) {
+        if (client->fd != exclude_fd) {
+            ssize_t sent = send(client->fd, header, PROTOCOL_HEADER_SIZE, 0);
+            if (0 > sent) {
+                LOG_WARNING("Failed to broadcast to fd %d", client->fd);
+            } else if ((size_t)sent < PROTOCOL_HEADER_SIZE) {
+                LOG_WARNING("Partial broadcast header to fd %d", client->fd);
+            }
+            if (NULL != data && 0 < data_len) {
+                sent = send(client->fd, data, data_len, 0);
+                if (0 > sent) {
+                    LOG_WARNING("Failed to broadcast data to fd %d", client->fd);
+                }
+            }
+            LOG_DEBUG("Broadcast NODE_INIT from node %u to node %u (fd=%d)", sender_node_id, client->peer_node_id, client->fd);
+        }
+        client = client->next;
+    }
+    pthread_mutex_unlock(&net->clients_mutex);
+}
 
 static int create_listen_socket(const char *ip, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -181,7 +210,21 @@ static void *socket_thread_func(void *arg) {
     }
 
     if (0 != entry->is_incoming) {
-        while (E__SUCCESS == SESSION__process(t)) {
+        uint32_t prev_peer_node_id = entry->peer_node_id;
+        uint8_t header_buffer[PROTOCOL_HEADER_SIZE];
+        memset(header_buffer, 0, sizeof(header_buffer));
+        while (E__SUCCESS == SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, header_buffer, sizeof(header_buffer))) {
+            if (prev_peer_node_id != entry->peer_node_id && 0 != entry->peer_node_id) {
+                LOG_INFO("Node %u connected (fd=%d), broadcasting to network", entry->peer_node_id, entry->fd);
+                broadcast_to_others(net, entry->fd, entry->peer_node_id, header_buffer, NULL, 0);
+                prev_peer_node_id = entry->peer_node_id;
+                memset(header_buffer, 0, sizeof(header_buffer));
+            }
+        }
+        if (0 != entry->peer_node_id) {
+            LOG_INFO("Node %u disconnected (fd=%d)", entry->peer_node_id, entry->fd);
+            ROUTING__remove(&net->routing_table, entry->peer_node_id);
+            ROUTING__remove_via_node(&net->routing_table, entry->peer_node_id);
         }
         TRANSPORT__destroy(t);
         shutdown(entry->fd, SHUT_RDWR);
@@ -194,9 +237,13 @@ static void *socket_thread_func(void *arg) {
     }
 
     while (true) {
-        err_t session_rc = SESSION__process(t);
+        err_t session_rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, NULL, 0);
         if (E__SUCCESS != session_rc) {
             LOG_WARNING("Session ended for %s:%d", entry->client_ip, entry->client_port);
+            if (0 != entry->peer_node_id) {
+                ROUTING__remove(&net->routing_table, entry->peer_node_id);
+                ROUTING__remove_via_node(&net->routing_table, entry->peer_node_id);
+            }
         }
 
         TRANSPORT__destroy(t);
@@ -236,6 +283,7 @@ static void *socket_thread_func(void *arg) {
 
             LOG_INFO("Reconnected to %s:%d (fd=%d)", entry->client_ip, entry->client_port, new_fd);
             entry->fd = new_fd;
+            entry->peer_node_id = 0;
             reconnected = 1;
             break;
         }
@@ -441,6 +489,13 @@ err_t NETWORK__init(network_t *net, const args_t *args) {
         FAIL(E__NET__THREAD_CREATE_FAILED);
     }
 
+    rc = ROUTING__init(&net->routing_table);
+    if (E__SUCCESS != rc) {
+        LOG_ERROR("Failed to initialize routing table");
+        pthread_mutex_destroy(&net->clients_mutex);
+        FAIL(rc);
+    }
+
     net->listen_fd = create_listen_socket(net->listen_addr.ip, net->listen_addr.port);
     if (0 > net->listen_fd) {
         pthread_mutex_destroy(&net->clients_mutex);
@@ -545,6 +600,8 @@ err_t NETWORK__shutdown(network_t *net) {
         }
     }
     FREE(net->connect_threads);
+
+    ROUTING__destroy(&net->routing_table);
 
     LOG_INFO("Network shutdown complete");
 

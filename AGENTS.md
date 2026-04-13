@@ -2,6 +2,17 @@
 
 This is the Ganon project - a mesh-style network tunneler in C built with CMake.
 
+## Agent Rules
+
+**Any change to the project must update this AGENTS.md file.**
+
+When making significant changes (new features, bug fixes, architectural changes, etc.), you must:
+1. Update the relevant sections of this document to reflect the new state
+2. Add or update the TODO list at the bottom
+3. Commit the AGENTS.md changes along with the code changes
+
+This ensures AGENTS.md stays in sync with the codebase.
+
 ## Project Structure
 
 - `src/` - Source files
@@ -18,8 +29,9 @@ This is the Ganon project - a mesh-style network tunneler in C built with CMake.
 - `src/args.c` - Argument parsing implementation
 - `src/logging.c` - Logging implementation
 - `src/network.c` - Network socket management, accept loop, client threads
-- `src/session.c` - Protocol message handling (PING, etc.)
+- `src/session.c` - Protocol message handling (NODE_INIT, etc.)
 - `src/transport.c` - Socket I/O abstraction layer
+- `src/routing.c` - Routing table implementation
 
 ### C Header Files
 
@@ -31,6 +43,7 @@ This is the Ganon project - a mesh-style network tunneler in C built with CMake.
 - `include/protocol.h` - Protocol message structs (protocol_msg_t, msg_type_t, GANON_PROTOCOL_MAGIC)
 - `include/session.h` - Session protocol handling (SESSION__process)
 - `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_all, TRANSPORT__send_all)
+- `include/routing.h` - Routing table (routing_table_t, route_entry_t, route_type_t)
 
 ### Python Client Library
 
@@ -39,6 +52,7 @@ This is the Ganon project - a mesh-style network tunneler in C built with CMake.
 - `ganon_client/client.py` - GanonClient class
 - `ganon_client/protocol.py` - Protocol structs using construct (ProtocolHeader, ProtocolMessage, MsgType)
 - `ganon_client/transport.py` - Transport class wrapping socket recv/send
+- `ganon_client/routing.py` - RoutingTable class
 - `ganon_client/pyproject.toml` - Build configuration
 - `venv/` - Python virtual environment
 
@@ -185,7 +199,7 @@ Log levels (in order of severity):
 - **ERROR** - Catastrophic errors that prevent the program from continuing
 - **WARN** - Issues that can be dealt with but indicate potential problems (e.g., disconnections, timeouts)
 - **INFO** - Major events in the program (e.g., application startup, shutdown, connections established)
-- **DEBUG** - Smaller events or more detail about other events
+- **DEBUG** - Smaller events or more detail about other events (packet routing, routing table changes)
 - **TRACE** - Detailed tracing data (argument parsing details, etc.)
 
 Use appropriate log levels for each message.
@@ -196,13 +210,17 @@ Use appropriate log levels for each message.
 
 All multi-byte integers use network byte order (big-endian) for cross-architecture compatibility.
 
-#### protocol_msg_t
+#### protocol_msg_t (24 bytes total)
 
 ```
 +--------+--------+--------+--------+
 |  Magic (4 bytes)           |  "GNN\0"
 +--------+--------+--------+--------+
-|        Node ID (4 bytes)         |
+|  Original Source Node ID (4 bytes) |
++--------+--------+--------+--------+
+|     Source Node ID (4 bytes)       |
++--------+--------+--------+--------+
+|     Destination Node ID (4 bytes) |
 +--------+--------+--------+--------+
 |       Message ID (4 bytes)       |
 +--------+--------+--------+--------+
@@ -218,9 +236,74 @@ All multi-byte integers use network byte order (big-endian) for cross-architectu
 
 ```c
 typedef enum {
-    MSG__PING = 0,
+    MSG__NODE_INIT = 0,
 } msg_type_t;
 ```
+
+#### Field Semantics
+
+- **orig_src_node_id**: Original sender of the message (for tracking path)
+- **src_node_id**: Previous hop (the node that forwarded this message)
+- **dst_node_id**: Destination node (0 for broadcast)
+
+#### Protocol Header Size
+
+```c
+#define PROTOCOL_HEADER_SIZE 24
+```
+
+## Routing Table
+
+### Overview
+
+Each node maintains a routing table (`routing_table_t`) that maps node IDs to route entries. Routes can be:
+- **DIRECT**: The node is directly connected (we have its socket fd)
+- **VIA_HOP**: The node is reachable through another node (we forward to next_hop_node_id)
+
+### Data Structures
+
+```c
+typedef enum {
+    ROUTE__DIRECT = 0,
+    ROUTE__VIA_HOP,
+} route_type_t;
+
+typedef struct route_entry {
+    uint32_t node_id;
+    uint32_t next_hop_node_id;
+    route_type_t route_type;
+    int fd;  // valid only for DIRECT routes
+} route_entry_t;
+
+typedef struct {
+    route_entry_t entries[ROUTING_TABLE_MAX_ENTRIES];
+    size_t entry_count;
+    pthread_mutex_t mutex;
+} routing_table_t;
+```
+
+### Routing Functions
+
+```c
+err_t ROUTING__init(routing_table_t *rt);
+void ROUTING__destroy(routing_table_t *rt);
+err_t ROUTING__add_direct(routing_table_t *rt, uint32_t node_id, int fd);
+err_t ROUTING__add_via_hop(routing_table_t *rt, uint32_t node_id, uint32_t next_hop_node_id);
+err_t ROUTING__remove(routing_table_t *rt, uint32_t node_id);
+err_t ROUTING__remove_via_node(routing_table_t *rt, uint32_t via_node_id);
+err_t ROUTING__get_route(routing_table_t *rt, uint32_t node_id, route_entry_t *entry);
+err_t ROUTING__get_next_hop(routing_table_t *rt, uint32_t node_id, uint32_t *next_hop);
+int ROUTING__is_direct(routing_table_t *rt, uint32_t node_id);
+err_t ROUTING__send_to_node(routing_table_t *rt, uint32_t node_id, const uint8_t *buf, size_t len,
+                            ssize_t (*send_fn)(int, const uint8_t *, size_t));
+```
+
+### Routing Error Codes
+
+Errors for routing are in range 0x501-0x5FF:
+- `E__ROUTING__NODE_NOT_FOUND = 0x501`
+- `E__ROUTING__TABLE_FULL`
+- `E__ROUTING__INVALID_ARG`
 
 ## Architecture
 
@@ -245,17 +328,20 @@ The architecture is separated into three layers for future extensibility:
    - `SESSION__process()` reads and validates protocol messages
    - Validates magic, parses header, reads data
    - Dispatches to message handlers based on `msg_type_t`
+   - Handles routing table updates on NODE_INIT
    - Can be extended for additional message types
 
 3. **Application Layer**: Message handlers
-   - `SESSION__handle_ping()` - handles PING messages
+   - `SESSION__handle_node_init()` - handles NODE_INIT messages, adds to routing table
    - Future: encryption key exchange, compression, etc.
 
-### Future Extensions
+### Routing Integration
 
-When adding encryption/compression:
-- C: Create new transport variant that wraps the existing transport, injects between session and socket
-- Python: Create new `Channel` class wrapping `Transport`
+- `network_t` contains `routing_table_t` member
+- `SESSION__process()` takes `routing_table_t*`, `fd`, `peer_node_id*`, `out_header*`, and `header_len` parameters
+- On NODE_INIT: `ROUTING__add_direct()` is called to add the peer to routing table, `peer_node_id` is returned
+- On disconnect: `ROUTING__remove()` and `ROUTING__remove_via_node()` are called with the peer's node_id
+- `broadcast_to_others()` broadcasts NODE_INIT to all connected clients except the sender
 
 ## Data Structures
 
@@ -279,6 +365,7 @@ typedef struct socket_entry {
     char client_ip[INET_ADDRSTRLEN]; // Remote IP
     int client_port;                   // Remote port
     int is_incoming;                  // 1 for incoming, 0 for outgoing
+    uint32_t peer_node_id;            // Node ID of the peer (when known)
 } socket_entry_t;
 ```
 
@@ -305,6 +392,7 @@ struct network_t {
     pthread_t accept_thread;           // Accept loop thread
     socket_entry_t *clients;          // Connected clients list
     pthread_mutex_t clients_mutex;     // Mutex for clients list
+    routing_table_t routing_table;    // Routing table for mesh
     int running;                      // Shutdown flag
     addr_t listen_addr;               // Listen address
     addr_t *connect_addrs;            // Outgoing connection targets
@@ -337,6 +425,7 @@ Errors are defined in `include/err.h` as enum `err_t`:
   - args: 0x200-0x2FF
   - network: 0x300-0x3FF
   - session: 0x401-0x4FF
+  - routing: 0x501-0x5FF
 
 ## Network Architecture
 
@@ -354,6 +443,8 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - Logs connection as "from" for incoming, "to" for outgoing
 - Logs disconnection at WARN level
 - Removes itself from clients list on disconnect
+- On disconnect: calls `ROUTING__remove()` and `ROUTING__remove_via_node()` with the peer's node_id
+- On NODE_INIT: calls `broadcast_to_others()` to announce new node to network
 
 ### Outgoing Connections
 - `connect_thread_func` handles each connection target
@@ -384,9 +475,10 @@ The package uses a **flat structure** - all modules are directly under `ganon_cl
 ```
 ganon_client/
 ├── __init__.py      # Exports GanonClient
-├── client.py         # GanonClient class
-├── protocol.py       # Protocol structs (construct)
-└── transport.py      # Transport class
+├── client.py        # GanonClient class
+├── protocol.py      # Protocol structs (construct)
+├── transport.py     # Transport class
+└── routing.py       # RoutingTable class
 ```
 
 ### Import Convention
@@ -422,8 +514,9 @@ from ganon_client import GanonClient
 client = GanonClient(
     ip="127.0.0.1",
     port=5555,
-    connect_timeout=5,      # Connection attempt timeout (seconds)
-    reconnect_retries=5,     # Retries on disconnect (-1 for unlimited)
+    node_id=1,              # This node's ID
+    connect_timeout=5,       # Connection attempt timeout (seconds)
+    reconnect_retries=5,    # Retries on disconnect (-1 for unlimited)
     reconnect_delay=5,       # Delay between reconnect attempts (seconds)
     log_level=LOG_LEVEL_INFO,
 )
@@ -435,6 +528,7 @@ client = GanonClient(
 |-----------|------|---------|-------------|
 | `ip` | str | (required) | Server IP address |
 | `port` | int | (required) | Server port |
+| `node_id` | int | (required) | This node's ID |
 | `connect_timeout` | int | 5 | Socket connection timeout (seconds) |
 | `reconnect_retries` | int | 5 | Reconnect attempts (-1 = unlimited, 0 = disabled) |
 | `reconnect_delay` | int | 5 | Seconds between reconnect attempts |
@@ -462,7 +556,7 @@ LOG_LEVEL_INFO = 2   # Informational messages
 #### Context Manager
 
 ```python
-with GanonClient("127.0.0.1", 5555) as client:
+with GanonClient("127.0.0.1", 5555, node_id=1) as client:
     client.send(b"hello")
     data = client.recv()
 ```
@@ -478,7 +572,7 @@ client.set_on_reconnected(lambda: print("Reconnected!"))
 ```
 
 | Callback | Signature | Triggered When |
-|----------|-----------|----------------|
+|----------|-----------|---------------|
 | `on_data_received` | `(data: bytes) -> None` | Data received from server |
 | `on_disconnected` | `() -> None` | Connection lost |
 | `on_reconnected` | `() -> None` | Successfully reconnected |
@@ -486,9 +580,10 @@ client.set_on_reconnected(lambda: print("Reconnected!"))
 #### Python Architecture
 
 - **Transport**: `Transport` class wraps socket recv/send with `recv_all`/`send_all` helpers
-- **Protocol**: `ProtocolHeader` and `ProtocolMessage` construct structs parse the wire format
+- **Protocol**: `ProtocolHeader` and `ProtocolMessage` construct structs parse the wire format (24 bytes)
+- **RoutingTable**: Maps node IDs to route entries (DIRECT or VIA_HOP)
 - **Protocol Loop**: `_protocol_loop()` reads and parses protocol messages
-- **Process**: `_process()` dispatches to `_handle_ping()` based on message type
+- **Process**: `_process()` dispatches to `_handle_node_init()` based on message type
 - **Thread Safety**: All public methods use locks for thread-safe access
 - **Logging**: Follows ganon C logging conventions (ERROR/WARN always logged, INFO/DEBUG/TRACE conditional)
 
@@ -517,3 +612,9 @@ client.set_on_reconnected(lambda: print("Reconnected!"))
 - `_reconnecting` flag prevents cascade reconnection loops
 - All socket operations protected by `_lock` mutex
 - `_sock` is set to None after socket is fully closed/shutdown
+
+## TODO
+
+- [ ] Implement forwarding of non-direct messages via `ROUTING__send_to_node()`
+- [ ] Update Python client with disconnect routing cleanup
+- [ ] Build and test with multiple nodes

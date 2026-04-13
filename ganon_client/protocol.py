@@ -1,16 +1,18 @@
 import construct as ct
 from enum import IntEnum
 
-GANON_PROTOCOL_MAGIC = b"GNN\0"
+GANON_PROTOCOL_MAGIC = b"GNN\x00"
 
 
 class MsgType(IntEnum):
-    PING = 0
+    NODE_INIT = 0
 
 
 ProtocolHeader = ct.Struct(
     "magic" / ct.PaddedString(4, "ascii"),
-    "node_id" / ct.Int32ub,
+    "orig_src_node_id" / ct.Int32ub,
+    "src_node_id" / ct.Int32ub,
+    "dst_node_id" / ct.Int32ub,
     "message_id" / ct.Int32ub,
     "type" / ct.Int32ub,
     "data_length" / ct.Int32ub,
