@@ -70,7 +70,6 @@ err_t SESSION__process(transport_t *t) {
         bytes_read = TRANSPORT__recv_all(t, data, data_length);
         if (0 > bytes_read) {
             LOG_WARNING("Failed to read data from fd %d", t->fd);
-            free(data);
             FAIL(E__NET__SOCKET_CONNECT_FAILED);
         }
     }
@@ -81,8 +80,7 @@ err_t SESSION__process(transport_t *t) {
 
     FAIL_IF(E__SUCCESS != SESSION__handle_message(node_id, message_id, type, data_length), E__SESSION__HANDLE_MESSAGE_FAILED);
 
-    free(data);
-
 l_cleanup:
+    FREE(data);
     return rc;
 }

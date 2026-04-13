@@ -33,6 +33,10 @@ typedef enum {
     E__NET__SOCKET_SETOPT_FAILED,
     E__NET__THREAD_CREATE_FAILED,
     E__NET__INVALID_SOCKET,
+
+    /* session.c */
+    E__SESSION__HANDLE_PING_FAILED = 0x401,
+    E__SESSION__HANDLE_MESSAGE_FAILED,
 } err_t;
 
 #endif /* #ifndef GANON_ERR_H */

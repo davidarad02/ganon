@@ -22,6 +22,14 @@ typedef int bool_t;
 #define CONTINUE_IF(condition) \
     if (condition) { continue; }
 
+#define FREE(ptr) \
+    do { \
+        if (NULL != (ptr)) { \
+            free((ptr)); \
+            (ptr) = NULL; \
+        } \
+    } while (0)
+
 #define VALIDATE_ARGS(...) \
     do { \
         void *args[] = { __VA_ARGS__ }; \
