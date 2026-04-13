@@ -308,7 +308,7 @@ static void send_connection_rejected(int fd, uint32_t node_id) {
     if (0 > sent) {
         LOG_ERROR("Failed to send CONNECTION_REJECTED to fd %d", fd);
     } else {
-        LOG_DEBUG("Sent CONNECTION_REJECTED to fd %d (node_id=%u)", fd, node_id);
+        LOG_DEBUG("Sent CONNECTION_REJECTED to fd %d (rejected peer, our node_id=%u)", fd, node_id);
     }
 
     struct timespec ts = {0, 100000};
@@ -488,7 +488,7 @@ static void *socket_thread_func(void *arg) {
             err_t rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, header_buffer, sizeof(header_buffer), &learned_peers, &learned_count, &data, &data_len);
             if (E__SUCCESS != rc) {
                 if (E__SESSION__CONNECTION_REJECTED == rc) {
-                    LOG_WARNING("Rejecting duplicate connection from node %u", entry->peer_node_id);
+                    LOG_WARNING("Rejecting duplicate connection (peer claims node_id=%u, already connected)", entry->peer_node_id);
                     send_connection_rejected(entry->fd, (uint32_t)g_node_id);
                 }
                 break;
