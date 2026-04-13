@@ -51,10 +51,9 @@ l_cleanup:
     return rc;
 }
 
-static err_t SESSION__handle_node_init(routing_table_t *rt, int fd, uint32_t orig_src_node_id, uint32_t src_node_id, uint32_t message_id, uint32_t ttl, uint32_t data_length, uint8_t *data, uint32_t *out_node_id) {
+static err_t SESSION__handle_node_init(routing_table_t *rt, int fd, uint32_t orig_src_node_id, uint32_t src_node_id, uint32_t message_id, uint32_t ttl, uint32_t data_length, uint8_t *data, uint32_t *out_node_id, uint32_t **out_peer_list, size_t *out_peer_count) {
     err_t rc = E__SUCCESS;
 
-    (void)orig_src_node_id;
     (void)message_id;
     (void)ttl;
     (void)data_length;
@@ -79,6 +78,18 @@ static err_t SESSION__handle_node_init(routing_table_t *rt, int fd, uint32_t ori
 
     if (NULL != out_node_id) {
         *out_node_id = src_node_id;
+    }
+
+    if (src_node_id != orig_src_node_id && NULL != out_peer_list && NULL != out_peer_count) {
+        uint32_t *peer_list = malloc(sizeof(uint32_t));
+        if (NULL == peer_list) {
+            LOG_WARNING("Failed to allocate peer list for relayed NODE_INIT");
+            FAIL(E__INVALID_ARG_NULL_POINTER);
+        }
+        peer_list[0] = PROTOCOL_FIELD_TO_NETWORK(orig_src_node_id);
+        *out_peer_list = peer_list;
+        *out_peer_count = 1;
+        LOG_DEBUG("Returning orig_src_node_id=%u as learned peer for propagation", orig_src_node_id);
     }
 
 l_cleanup:
@@ -147,7 +158,7 @@ static err_t SESSION__handle_message(routing_table_t *rt, int fd, uint32_t orig_
 
     switch (type) {
     case MSG__NODE_INIT:
-        rc = SESSION__handle_node_init(rt, fd, orig_src_node_id, src_node_id, message_id, ttl, data_length, data, out_node_id);
+        rc = SESSION__handle_node_init(rt, fd, orig_src_node_id, src_node_id, message_id, ttl, data_length, data, out_node_id, out_peer_list, out_peer_count);
         if (E__SUCCESS != rc && E__SESSION__CONNECTION_REJECTED != rc) {
             goto l_cleanup;
         }

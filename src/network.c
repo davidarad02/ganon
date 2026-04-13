@@ -493,8 +493,12 @@ static void *socket_thread_func(void *arg) {
             msg_type_t msg_type = (msg_type_t)PROTOCOL_FIELD_FROM_NETWORK(hdr->type);
             uint32_t dst_node_id = PROTOCOL_FIELD_FROM_NETWORK(hdr->dst_node_id);
 
-            if (msg_type == MSG__PEER_INFO && NULL != learned_peers && 0 != learned_count) {
-                LOG_DEBUG("Propagating %zu learned peers from PEER_INFO (via node %u) to other direct peers", learned_count, entry->peer_node_id);
+            if (NULL != learned_peers && 0 != learned_count) {
+                if (msg_type == MSG__PEER_INFO) {
+                    LOG_DEBUG("Propagating %zu learned peers from PEER_INFO (via node %u) to other direct peers", learned_count, entry->peer_node_id);
+                } else if (msg_type == MSG__NODE_INIT) {
+                    LOG_DEBUG("Propagating %zu learned peers from NODE_INIT (via node %u) to other direct peers", learned_count, entry->peer_node_id);
+                }
                 broadcast_peer_info_to_others(net, entry->fd, (uint32_t)g_node_id, learned_peers, learned_count);
                 free(learned_peers);
                 learned_peers = NULL;
