@@ -23,7 +23,7 @@ dev = ["pytest", "black", "ruff"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["ganon_client*"]
+include = ["ganon_client"]
 
 [tool.black]
 line-length = 100
