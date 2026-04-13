@@ -10,23 +10,13 @@
 #include "session.h"
 
 static void log_received_packet(const protocol_msg_t *msg, uint32_t data_len) {
-    uint32_t orig_src = PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id);
-    uint32_t src = PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id);
-    uint32_t dst = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
-    uint32_t msg_id = PROTOCOL_FIELD_FROM_NETWORK(msg->message_id);
-    uint32_t type = PROTOCOL_FIELD_FROM_NETWORK(msg->type);
-    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
-    LOG_TRACE("Received packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u", orig_src, src, dst, msg_id, type, ttl, data_len);
+    (void)msg;
+    (void)data_len;
 }
 
 static void log_sent_packet(const protocol_msg_t *msg, uint32_t data_len) {
-    uint32_t orig_src = PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id);
-    uint32_t src = PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id);
-    uint32_t dst = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
-    uint32_t msg_id = PROTOCOL_FIELD_FROM_NETWORK(msg->message_id);
-    uint32_t type = PROTOCOL_FIELD_FROM_NETWORK(msg->type);
-    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
-    LOG_TRACE("Sent packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u", orig_src, src, dst, msg_id, type, ttl, data_len);
+    (void)msg;
+    (void)data_len;
 }
 
 static err_t send_peer_info(session_t *s, uint32_t dst_node_id) {
@@ -304,6 +294,11 @@ l_cleanup:
 static err_t handle_peer_info(session_t *s, uint32_t orig_src, uint32_t src, uint32_t data_len, uint8_t *data) {
     err_t rc = E__SUCCESS;
 
+    (void)orig_src;
+    (void)src;
+    (void)data_len;
+    (void)data;
+
     LOG_DEBUG("Received PEER_INFO from node %u (orig_src=%u, data_len=%u)", src, orig_src, data_len);
 
     uint32_t *peer_list = (uint32_t *)data;
@@ -338,6 +333,7 @@ static err_t handle_node_disconnect(session_t *s, uint32_t orig_src) {
 
 static err_t handle_connection_rejected(session_t *s, uint32_t src) {
     (void)s;
+    (void)src;
     LOG_DEBUG("Received CONNECTION_REJECTED from node %u", src);
     return E__SESSION__CONNECTION_REJECTED;
 }
