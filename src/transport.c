@@ -66,7 +66,10 @@ l_cleanup:
 err_t TRANSPORT__send_all(transport_t *t, const uint8_t *buf, size_t len, ssize_t *bytes_sent) {
     err_t rc = E__SUCCESS;
 
-    VALIDATE_ARGS(t, buf, bytes_sent);
+    if (NULL == t || NULL == buf || NULL == bytes_sent) {
+        rc = E__INVALID_ARG_NULL_POINTER;
+        goto l_cleanup;
+    }
 
     *bytes_sent = 0;
 

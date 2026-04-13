@@ -12,6 +12,10 @@
 static err_t SESSION__handle_ping(uint32_t node_id, uint32_t message_id, uint32_t data_length) {
     err_t rc = E__SUCCESS;
 
+    (void)node_id;
+    (void)message_id;
+    (void)data_length;
+
     LOG_DEBUG("Received PING from node %u (msg_id=%u, data_len=%u)", node_id, message_id, data_length);
 
     return rc;
@@ -37,6 +41,7 @@ l_cleanup:
 
 err_t SESSION__process(transport_t *t) {
     err_t rc = E__SUCCESS;
+    uint8_t *data = NULL;
 
     VALIDATE_ARGS(t);
 
@@ -62,13 +67,12 @@ err_t SESSION__process(transport_t *t) {
     }
 
     uint32_t data_length = PROTOCOL_FIELD_FROM_NETWORK(msg->data_length);
-    uint8_t *data = NULL;
     if (data_length > 0) {
         data = malloc(data_length);
         FAIL_IF(NULL == data, E__INVALID_ARG_NULL_POINTER);
 
-        ssize_t bytes_read;
-        rc = TRANSPORT__recv_all(t, data, data_length, &bytes_read);
+        ssize_t recv_bytes;
+        rc = TRANSPORT__recv_all(t, data, data_length, &recv_bytes);
         if (E__SUCCESS != rc) {
             LOG_WARNING("Failed to read data from fd %d", t->fd);
             FAIL(rc);

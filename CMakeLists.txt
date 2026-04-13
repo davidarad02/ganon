@@ -11,9 +11,9 @@ endif()
 file(MAKE_DIRECTORY ${OUTPUT_DIR})
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O0 -D__DEBUG__")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O0 -D__DEBUG__ -Wall -Wextra -Werror")
 else()
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -s")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -s -Wall -Wextra -Werror")
 endif()
 
 add_subdirectory(src)

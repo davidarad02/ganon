@@ -71,6 +71,7 @@ static bool_t is_positional(const char *arg) {
     return ('-' != arg[0]);
 }
 
+#ifdef __DEBUG__
 static int count_v_flags(const char *arg) {
     if (NULL == arg || '-' != arg[0]) {
         return 0;
@@ -86,6 +87,7 @@ static int count_v_flags(const char *arg) {
     }
     return count;
 }
+#endif /* #ifdef __DEBUG__ */
 
 static char *get_env(const char *key) {
     if (NULL == key) {
@@ -270,7 +272,7 @@ static err_t parse_connect_list(const char *list, addr_t *addrs_out, int *count_
     while (NULL != token) {
         if (count >= max_count) {
             LOG_ERROR("Too many connect entries (max: %d)", max_count);
-            free(list_copy);
+            FREE(list_copy);
             FAIL(E__ARGS__TOO_MANY_CONNECT_ENTRIES);
         }
 
@@ -288,9 +290,9 @@ static err_t parse_connect_list(const char *list, addr_t *addrs_out, int *count_
             rc = parse_connect_entry(token, &addrs_out[count]);
             if (E__SUCCESS != rc) {
                 for (int i = 0; i < count; i++) {
-                    free(addrs_out[i].ip);
+                    FREE(addrs_out[i].ip);
                 }
-                free(list_copy);
+                FREE(list_copy);
                 goto l_cleanup;
             }
             count++;
@@ -299,7 +301,7 @@ static err_t parse_connect_list(const char *list, addr_t *addrs_out, int *count_
         token = strtok(NULL, ",");
     }
 
-    free(list_copy);
+    FREE(list_copy);
     *count_out = count;
 
 l_cleanup:
@@ -401,7 +403,7 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
         rc = parse_connect_list(env_connect, args_out->connect_addrs, &count, ARGS_MAX_CONNECT_ENTRIES);
         if (E__SUCCESS != rc) {
             for (int i = 0; i < count; i++) {
-                free(args_out->connect_addrs[i].ip);
+                FREE(args_out->connect_addrs[i].ip);
             }
             goto l_cleanup;
         }
@@ -510,7 +512,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                                         ARGS_MAX_CONNECT_ENTRIES - args_out->connect_count);
                 if (E__SUCCESS != rc) {
                     for (int j = 0; j < args_out->connect_count + count; j++) {
-                        free(args_out->connect_addrs[j].ip);
+                        FREE(args_out->connect_addrs[j].ip);
                     }
                     args_out->connect_count = 0;
                     goto l_cleanup;

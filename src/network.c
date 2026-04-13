@@ -19,14 +19,6 @@
 
 int g_node_id = -1;
 
-static int set_nonblocking(int fd) {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (-1 == flags) {
-        return -1;
-    }
-    return fcntl(fd, F_SETFL, flags | O_NONBLOCK);
-}
-
 static int create_listen_socket(const char *ip, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (0 > fd) {
@@ -179,7 +171,7 @@ static void *socket_thread_func(void *arg) {
         pthread_mutex_lock(&net->clients_mutex);
         socket_entry_remove_locked(net, entry);
         pthread_mutex_unlock(&net->clients_mutex);
-        free(entry);
+        FREE(entry);
         return NULL;
     }
 
@@ -192,7 +184,7 @@ static void *socket_thread_func(void *arg) {
         pthread_mutex_lock(&net->clients_mutex);
         socket_entry_remove_locked(net, entry);
         pthread_mutex_unlock(&net->clients_mutex);
-        free(entry);
+        FREE(entry);
         return NULL;
     }
 
@@ -257,7 +249,7 @@ static void *socket_thread_func(void *arg) {
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_remove_locked(net, entry);
     pthread_mutex_unlock(&net->clients_mutex);
-    free(entry);
+    FREE(entry);
     return NULL;
 }
 
@@ -320,7 +312,7 @@ static void *accept_thread_func(void *arg) {
         if (0 != pthread_mutex_lock(&net->clients_mutex)) {
             LOG_ERROR("Failed to lock mutex");
             close(client_fd);
-            free(entry);
+            FREE(entry);
             continue;
         }
 
@@ -337,7 +329,7 @@ static void *accept_thread_func(void *arg) {
         if (0 != pthread_create(&entry->thread, NULL, socket_thread_func, entry)) {
             LOG_ERROR("Failed to create client thread");
             close(client_fd);
-            free(entry);
+            FREE(entry);
             pthread_mutex_unlock(&net->clients_mutex);
             continue;
         }
@@ -361,14 +353,12 @@ static void *connect_thread_func(void *arg) {
     connect_thread_arg_t *targ = (connect_thread_arg_t *)arg;
     addr_t *addr = &targ->addr;
     int connect_timeout = targ->connect_timeout;
-    int reconnect_retries = targ->reconnect_retries;
-    int reconnect_delay = targ->reconnect_delay;
     network_t *net = targ->net;
 
     int fd = connect_to_addr(addr->ip, addr->port, connect_timeout);
     if (0 > fd) {
         LOG_WARNING("Failed to connect to %s:%d, continuing without it", addr->ip, addr->port);
-        free(arg);
+        FREE(arg);
         return NULL;
     }
 
@@ -376,7 +366,7 @@ static void *connect_thread_func(void *arg) {
     if (NULL == entry) {
         LOG_ERROR("Failed to allocate socket entry");
         close(fd);
-        free(arg);
+        FREE(arg);
         return NULL;
     }
 
@@ -391,8 +381,8 @@ static void *connect_thread_func(void *arg) {
     if (0 != pthread_mutex_lock(&net->clients_mutex)) {
         LOG_ERROR("Failed to lock mutex");
         close(fd);
-        free(entry);
-        free(arg);
+        FREE(entry);
+        FREE(arg);
         return NULL;
     }
 
@@ -415,14 +405,14 @@ static void *connect_thread_func(void *arg) {
         pthread_mutex_lock(&net->clients_mutex);
         socket_entry_remove_locked(net, entry);
         pthread_mutex_unlock(&net->clients_mutex);
-        free(entry);
-        free(arg);
+        FREE(entry);
+        FREE(arg);
         return NULL;
     }
 
     pthread_detach(entry->thread);
 
-    free(arg);
+    FREE(arg);
     return NULL;
 }
 
@@ -487,7 +477,7 @@ err_t NETWORK__init(network_t *net, const args_t *args) {
             if (0 != pthread_create(&net->connect_threads[i], NULL, connect_thread_func, targ)) {
                 LOG_ERROR("Failed to create connect thread for %s:%d",
                           targ->addr.ip, targ->addr.port);
-                free(targ);
+                FREE(targ);
                 continue;
             }
             net->connect_thread_count++;
@@ -549,7 +539,7 @@ err_t NETWORK__shutdown(network_t *net) {
             pthread_detach(net->connect_threads[i]);
         }
     }
-    free(net->connect_threads);
+    FREE(net->connect_threads);
 
     LOG_INFO("Network shutdown complete");
 
