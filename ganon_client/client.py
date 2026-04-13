@@ -139,6 +139,7 @@ class GanonClient:
             self._info("Connecting to %s:%s...", self.ip, self.port)
             sock.connect((self.ip, self.port))
             self._info("Connected to %s:%s", self.ip, self.port)
+            sock.settimeout(None)
             return sock
         except socket.timeout:
             self._warning("Connect to %s:%d timed out", self.ip, self.port)
@@ -242,6 +243,9 @@ class GanonClient:
 
             if not unlimited and retry >= self.reconnect_retries - 1:
                 self._warning("All reconnect attempts failed, giving up on %s:%d", self.ip, self.port)
+                self._running = False
+                if self._on_disconnected:
+                    self._on_disconnected()
                 return
 
             self._warning(
