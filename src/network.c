@@ -308,6 +308,9 @@ static void *connect_thread_func(void *arg) {
     entry->net = net;
     entry->next = NULL;
     entry->is_incoming = 0;
+    strncpy(entry->client_ip, addr->ip, INET_ADDRSTRLEN - 1);
+    entry->client_ip[INET_ADDRSTRLEN - 1] = '\0';
+    entry->client_port = addr->port;
 
     if (0 != pthread_mutex_lock(&net->clients_mutex)) {
         LOG_ERROR("Failed to lock mutex");
