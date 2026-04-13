@@ -380,6 +380,7 @@ The architecture is separated into three layers for future extensibility:
 - On NODE_INIT (relayed broadcast, src != orig_src): `ROUTING__add_via_hop()` is called with next_hop=src_node_id, and orig_src_node_id is returned as a learned peer for propagation
 - When broadcasting NODE_INIT via `broadcast_to_others()`, src_node_id is set to g_node_id so recipients know the message is relayed
 - Server sends NODE_INIT back to newly connected client so it can add the server as a direct route
+- Server sends PEER_INFO to newly connected client listing ALL known peers from routing table (not just direct peers)
 - Duplicate connection check in `SESSION__handle_node_init`: only applies to direct connections (src == orig_src), not broadcasts
 - `prev_peer_node_id` initialized to 0 in `socket_thread_func` (not `entry->peer_node_id`) to correctly detect node reconnections
 - On PEER_INFO: learned peers are returned via `out_peer_list*` and `out_peer_count*`
