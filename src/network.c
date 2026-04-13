@@ -102,7 +102,7 @@ static int connect_to_addr(const char *ip, int port, int timeout_sec) {
         memcpy(&addr.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
     }
 
-    LOG_DEBUG("Connecting to %s:%d...", ip, port);
+    LOG_INFO("Connecting to %s:%d...", ip, port);
     if (0 != connect(fd, (struct sockaddr *)&addr, sizeof(addr))) {
         if (EINPROGRESS == errno) {
             fd_set write_fds;
