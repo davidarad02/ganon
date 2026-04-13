@@ -12,28 +12,35 @@ This is the Ganon project - a mesh-style network tunneler in C built with CMake.
 - `cmake/` - Toolchain files for cross-compilation
 - `ganon_client/` - Python client library
 
-### Python Client Library
-
-- `ganon_client/` - Python package
-- `ganon_client/__init__.py` - Package init, exports GanonClient
-- `ganon_client/client.py` - GanonClient class
-- `ganon_client/pyproject.toml` - Build configuration
-- `venv/` - Python virtual environment
-
-### Headers
-
-- `include/err.h` - Error codes enum
-- `include/common.h` - Common macros (FAIL_IF, BREAK_IF, CONTINUE_IF)
-- `include/logging.h` - Logging macros (LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE)
-- `include/args.h` - Argument parsing, addr_t struct, args_t config
-- `include/network.h` - Network types, socket_entry_t, g_node_id global
-
-### Source Files
+### C Source Files
 
 - `src/main.c` - Main entry point, signal handling
 - `src/args.c` - Argument parsing implementation
 - `src/logging.c` - Logging implementation
 - `src/network.c` - Network socket management, accept loop, client threads
+- `src/session.c` - Protocol message handling (PING, etc.)
+- `src/transport.c` - Socket I/O abstraction layer
+
+### C Header Files
+
+- `include/err.h` - Error codes enum
+- `include/common.h` - Common macros (FAIL_IF, FAIL, BREAK_IF, CONTINUE_IF, FREE, VALIDATE_ARGS)
+- `include/logging.h` - Logging macros (LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE)
+- `include/args.h` - Argument parsing, addr_t struct, args_t config
+- `include/network.h` - Network types, socket_entry_t, g_node_id global
+- `include/protocol.h` - Protocol message structs (protocol_msg_t, msg_type_t, GANON_PROTOCOL_MAGIC)
+- `include/session.h` - Session protocol handling (SESSION__process)
+- `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_all, TRANSPORT__send_all)
+
+### Python Client Library
+
+- `ganon_client/` - Python package (flat structure, no subdirectories)
+- `ganon_client/__init__.py` - Package init, exports GanonClient
+- `ganon_client/client.py` - GanonClient class
+- `ganon_client/protocol.py` - Protocol structs using construct (ProtocolHeader, ProtocolMessage, MsgType)
+- `ganon_client/transport.py` - Transport class wrapping socket recv/send
+- `ganon_client/pyproject.toml` - Build configuration
+- `venv/` - Python virtual environment
 
 ## Commands
 
@@ -92,6 +99,10 @@ NODE_ID=1 CONNECT="192.168.1.10:5555,10.0.0.5" ./bin/ganon 0.0.0.0
 - **Release**: `-O3 -s` (stripped), outputs: `ganon_<ver>_<arch>`. No logging code compiled in.
 - **Debug**: `-g -O0 -D__DEBUG__` (with symbols), outputs: `ganon_<ver>_<arch>_debug`. All logging enabled.
 
+## Compiler Flags
+
+All builds use `-Wall -Wextra -Werror` to catch warnings as errors.
+
 ## Cross-Compilation
 
 All targets use static linking (`-static` flag):
@@ -101,12 +112,23 @@ All targets use static linking (`-static` flag):
 
 ## Code Style
 
+### C Code Style
+
 - Use C11 standard
 - Use meaningful function and variable names
 - Maximum line length: 100 characters
 - Global variables always start with `g_` (e.g., `g_log_level`, `g_node_id`)
 
-## Function Conventions
+### Python Code Style
+
+- All imports within the ganon_client package must use full package path:
+  ```python
+  from ganon_client.protocol import GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader
+  from ganon_client.transport import Transport
+  ```
+  Never use bare imports like `from protocol import ...`.
+
+## Function Conventions (C)
 
 Every function (except `main`) must:
 - Have the module name in all caps with double underscore as prefix (e.g., `ARGS__parse`, `NETWORK__init`)
@@ -119,6 +141,39 @@ Every function (except `main`) must:
 - Use `FAIL_IF(condition, error_code)` to check and fail
 - Use `FAIL(error_code)` when failure is unconditional
 - Use `BREAK_IF(condition)` and `CONTINUE_IF(condition)` in loops
+
+### Common Macros
+
+```c
+// Check condition and goto cleanup on failure
+#define FAIL_IF(condition, error) \
+    if (condition) { rc = error; goto l_cleanup; }
+
+// Unconditional failure
+#define FAIL(error) \
+    { rc = error; goto l_cleanup; }
+
+// Safe free - checks NULL, frees, and sets to NULL
+#define FREE(ptr) \
+    do { \
+        if (NULL != (ptr)) { \
+            free((ptr)); \
+            (ptr) = NULL; \
+        } \
+    } while (0)
+
+// Validate multiple pointer arguments
+#define VALIDATE_ARGS(...) \
+    do { \
+        void *args[] = { __VA_ARGS__ }; \
+        for (size_t i = 0; i < sizeof(args) / sizeof(args[0]); i++) { \
+            if (NULL == args[i]) { \
+                rc = E__INVALID_ARG_NULL_POINTER; \
+                goto l_cleanup; \
+            } \
+        } \
+    } while (0)
+```
 
 Comparison convention: static values first (e.g., `NULL != ptr`, `E__SUCCESS != rc`, `0 > value`)
 
@@ -134,6 +189,73 @@ Log levels (in order of severity):
 - **TRACE** - Detailed tracing data (argument parsing details, etc.)
 
 Use appropriate log levels for each message.
+
+## Protocol
+
+### Wire Format
+
+All multi-byte integers use network byte order (big-endian) for cross-architecture compatibility.
+
+#### protocol_msg_t
+
+```
++--------+--------+--------+--------+
+|  Magic (4 bytes)           |  "GNN\0"
++--------+--------+--------+--------+
+|        Node ID (4 bytes)         |
++--------+--------+--------+--------+
+|       Message ID (4 bytes)       |
++--------+--------+--------+--------+
+|        Message Type (4 bytes)    |  enum msg_type_t
++--------+--------+--------+--------+
+|       Data Length (4 bytes)      |
++--------+--------+--------+--------+
+|       Data (variable)            |
++---------------------------------+
+```
+
+#### msg_type_t
+
+```c
+typedef enum {
+    MSG__PING = 0,
+} msg_type_t;
+```
+
+## Architecture
+
+### Layer Separation
+
+The architecture is separated into three layers for future extensibility:
+
+```
++-------------------+     +-------------------+     +-------------------+
+|    Application    |     |     Session       |     |    Transport      |
+|   (message       | --> |   (protocol       | --> |    (socket        |
+|    handlers)      |     |    parsing)       |     |     I/O)          |
++-------------------+     +-------------------+     +-------------------+
+```
+
+1. **Transport Layer** (`transport.c/h`): Low-level socket I/O
+   - `transport_t` struct with function pointers for `recv` and `send`
+   - `TRANSPORT__recv_all()` / `TRANSPORT__send_all()` for guaranteed complete I/O
+   - Can be extended for encrypted/compressed channels
+
+2. **Session Layer** (`session.c/h`): Protocol message handling
+   - `SESSION__process()` reads and validates protocol messages
+   - Validates magic, parses header, reads data
+   - Dispatches to message handlers based on `msg_type_t`
+   - Can be extended for additional message types
+
+3. **Application Layer**: Message handlers
+   - `SESSION__handle_ping()` - handles PING messages
+   - Future: encryption key exchange, compression, etc.
+
+### Future Extensions
+
+When adding encryption/compression:
+- C: Create new transport variant that wraps the existing transport, injects between session and socket
+- Python: Create new `Channel` class wrapping `Transport`
 
 ## Data Structures
 
@@ -167,11 +289,11 @@ typedef struct {
     addr_t listen_addr;               // Listen IP and port
     log_level_t log_level;            // Log level (debug builds only)
     addr_t connect_addrs[64];         // Connection targets
-    int connect_count;                // Number of connection targets
-    int node_id;                     // This node's ID (mandatory)
-    int connect_timeout;              // Connect timeout in seconds
-    int reconnect_retries;            // Reconnect retries (-1 for unlimited)
-    int reconnect_delay;             // Delay between reconnect attempts
+    int connect_count;                 // Number of connection targets
+    int node_id;                      // This node's ID (mandatory)
+    int connect_timeout;               // Connect timeout in seconds
+    int reconnect_retries;             // Reconnect retries (-1 for unlimited)
+    int reconnect_delay;              // Delay between reconnect attempts
 } args_t;
 ```
 
@@ -182,16 +304,26 @@ struct network_t {
     int listen_fd;                    // Listening socket
     pthread_t accept_thread;           // Accept loop thread
     socket_entry_t *clients;          // Connected clients list
-    pthread_mutex_t clients_mutex;    // Mutex for clients list
+    pthread_mutex_t clients_mutex;     // Mutex for clients list
     int running;                      // Shutdown flag
-    addr_t listen_addr;              // Listen address
-    addr_t *connect_addrs;           // Outgoing connection targets
-    int connect_count;                // Number of targets
-    pthread_t *connect_threads;       // Outgoing connection threads
-    int connect_thread_count;         // Count of connect threads
-    int connect_timeout;              // Connect timeout in seconds
-    int reconnect_retries;            // Reconnect retries (-1 for unlimited)
-    int reconnect_delay;             // Delay between reconnect attempts
+    addr_t listen_addr;               // Listen address
+    addr_t *connect_addrs;            // Outgoing connection targets
+    int connect_count;                 // Number of targets
+    pthread_t *connect_threads;        // Outgoing connection threads
+    int connect_thread_count;          // Count of connect threads
+    int connect_timeout;               // Connect timeout in seconds
+    int reconnect_retries;             // Reconnect retries (-1 for unlimited)
+    int reconnect_delay;              // Delay between reconnect attempts
+};
+```
+
+### transport_t
+Transport abstraction:
+```c
+struct transport {
+    int fd;
+    ssize_t (*recv)(int fd, uint8_t *buf, size_t len);
+    ssize_t (*send)(int fd, const uint8_t *buf, size_t len);
 };
 ```
 
@@ -200,7 +332,11 @@ struct network_t {
 Errors are defined in `include/err.h` as enum `err_t`:
 - First error must be `E__SUCCESS = 0`
 - Naming convention: `E__<MODULE>_<FUNCTION>_<ERROR>`
-- Hex ranges: Generic=0x001-0x0FF, args=0x200-0x2FF, network=0x300-0x3FF
+- Hex ranges:
+  - Generic: 0x001-0x0FF
+  - args: 0x200-0x2FF
+  - network: 0x300-0x3FF
+  - session: 0x401-0x4FF
 
 ## Network Architecture
 
@@ -214,7 +350,7 @@ Errors are defined in `include/err.h` as enum `err_t`:
 ### Client Threads (Socket Handler)
 - Each connected socket runs in its own thread (`socket_thread_func`)
 - Unified handling for both incoming clients and outgoing connections
-- Echo functionality: received data is sent back on the same socket
+- Uses `SESSION__process()` for protocol handling
 - Logs connection as "from" for incoming, "to" for outgoing
 - Logs disconnection at WARN level
 - Removes itself from clients list on disconnect
@@ -228,8 +364,8 @@ Errors are defined in `include/err.h` as enum `err_t`:
 
 ### Auto-Reconnect
 - Only applies to outgoing connections
-- On disconnect, retries up to `NETWORK_RETRY_COUNT` (5) times
-- Waits `NETWORK_RETRY_DELAY_SEC` (5) seconds between retries
+- On disconnect, retries up to `reconnect_retries` times
+- Waits `reconnect_delay` seconds between retries
 - Logs each attempt and success/failure
 - If all retries fail, gives up and cleans up
 
@@ -242,18 +378,40 @@ Errors are defined in `include/err.h` as enum `err_t`:
 
 ## Python Client Development
 
+### Package Structure
+
+The package uses a **flat structure** - all modules are directly under `ganon_client/`:
+```
+ganon_client/
+├── __init__.py      # Exports GanonClient
+├── client.py         # GanonClient class
+├── protocol.py       # Protocol structs (construct)
+└── transport.py      # Transport class
+```
+
+### Import Convention
+
+**All imports must use full package path:**
+```python
+from ganon_client.protocol import GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader
+from ganon_client.transport import Transport
+```
+
+**Never use bare imports:**
+```python
+# WRONG
+from protocol import ...
+from transport import ...
+```
+
+### Dependencies
+
 Dependencies are specified in `ganon_client/pyproject.toml`:
 - `construct>=2.10` - Struct parsing for protocol messages
 
 After any change to `ganon_client/`, reinstall it in the venv:
 ```bash
 /home/arad/projects/ganon/venv/bin/pip install -e /home/arad/projects/ganon/ganon_client
-```
-
-Test the client:
-```bash
-/home/arad/projects/ganon/venv/bin/ipython
-from ganon_client import GanonClient
 ```
 
 ### GanonClient Class
@@ -265,8 +423,8 @@ client = GanonClient(
     ip="127.0.0.1",
     port=5555,
     connect_timeout=5,      # Connection attempt timeout (seconds)
-    reconnect_retries=5,    # Retries on disconnect (-1 for unlimited)
-    reconnect_delay=5,      # Delay between reconnect attempts (seconds)
+    reconnect_retries=5,     # Retries on disconnect (-1 for unlimited)
+    reconnect_delay=5,       # Delay between reconnect attempts (seconds)
     log_level=LOG_LEVEL_INFO,
 )
 ```
@@ -325,9 +483,11 @@ client.set_on_reconnected(lambda: print("Reconnected!"))
 | `on_disconnected` | `() -> None` | Connection lost |
 | `on_reconnected` | `() -> None` | Successfully reconnected |
 
-#### Architecture
+#### Python Architecture
 
-- **Receive Thread**: Background thread monitors socket for incoming data and disconnection
-- **Auto-Reconnect**: On unexpected disconnect, automatically attempts reconnection
+- **Transport**: `Transport` class wraps socket recv/send with `recv_all`/`send_all` helpers
+- **Protocol**: `ProtocolHeader` and `ProtocolMessage` construct structs parse the wire format
+- **Protocol Loop**: `_protocol_loop()` reads and parses protocol messages
+- **Process**: `_process()` dispatches to `_handle_ping()` based on message type
 - **Thread Safety**: All public methods use locks for thread-safe access
 - **Logging**: Follows ganon C logging conventions (ERROR/WARN always logged, INFO/DEBUG/TRACE conditional)
