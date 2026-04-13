@@ -73,9 +73,8 @@ The architecture is separated into four distinct layers:
    - Owns connection abstraction (fd, node_id, client_ip, port, etc.)
 
 3. **Protocol Layer** (`protocol.c/h`): Byte order and validation
-   - `PROTOCOL__parse_header()` - validates magic, converts network byte order to host
+   - `PROTOCOL__unserialize()` - validates magic, converts network byte order to host
    - `PROTOCOL__serialize()` - converts host byte order to network, adds magic
-   - `PROTOCOL__msg_ntoh()` / `PROTOCOL__msg_hton()` - byte order conversion
    - Session works with host byte order protocol_msg_t
 
 4. **Session Layer** (`session.c/h`): All protocol logic
@@ -144,9 +143,9 @@ Options:
 
 ```cmake
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c connection.c)
+    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c protocol.c)
 else()
-    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c connection.c)
+    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c protocol.c)
 endif()
 ```
 

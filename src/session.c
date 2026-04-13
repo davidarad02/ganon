@@ -61,7 +61,7 @@ static err_t send_peer_info(session_t *s, uint32_t dst_node_id) {
         peer_count = 0;
         for (size_t i = 0; i < rt->entry_count; i++) {
             if (rt->entries[i].node_id != dst_node_id) {
-                ((uint32_t *)peer_data)[peer_count] = PROTOCOL_FIELD_TO_NETWORK(rt->entries[i].node_id);
+                ((uint32_t *)peer_data)[peer_count] = rt->entries[i].node_id;
                 peer_count++;
             }
         }
@@ -73,13 +73,13 @@ static err_t send_peer_info(session_t *s, uint32_t dst_node_id) {
     memset(header, 0, sizeof(header));
     protocol_msg_t *msg = (protocol_msg_t *)header;
     memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
-    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)s->node_id);
-    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)s->node_id);
-    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(dst_node_id);
-    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__PEER_INFO);
-    msg->data_length = PROTOCOL_FIELD_TO_NETWORK((uint32_t)peer_data_len);
-    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
+    msg->orig_src_node_id = (uint32_t)s->node_id;
+    msg->src_node_id = (uint32_t)s->node_id;
+    msg->dst_node_id = dst_node_id;
+    msg->message_id = 0;
+    msg->type = MSG__PEER_INFO;
+    msg->data_length = (uint32_t)peer_data_len;
+    msg->ttl = DEFAULT_TTL;
 
     size_t total_len = PROTOCOL_HEADER_SIZE + peer_data_len;
     uint8_t *pkt = malloc(total_len);
@@ -110,13 +110,13 @@ static err_t send_node_init(session_t *s, uint32_t dst_node_id) {
     memset(header, 0, sizeof(header));
     protocol_msg_t *msg = (protocol_msg_t *)header;
     memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
-    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)s->node_id);
-    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)s->node_id);
-    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(dst_node_id);
-    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__NODE_INIT);
-    msg->data_length = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
+    msg->orig_src_node_id = (uint32_t)s->node_id;
+    msg->src_node_id = (uint32_t)s->node_id;
+    msg->dst_node_id = dst_node_id;
+    msg->message_id = 0;
+    msg->type = MSG__NODE_INIT;
+    msg->data_length = 0;
+    msg->ttl = DEFAULT_TTL;
 
     NETWORK__send_to(s->net, dst_node_id, header, PROTOCOL_HEADER_SIZE);
     log_sent_packet(msg, 0);
@@ -144,8 +144,8 @@ static void broadcast_to_others(session_t *s, uint32_t exclude_node_id, const pr
     protocol_msg_t *hdr = (protocol_msg_t *)header;
     uint32_t ttl = hdr->ttl;
     if (ttl > 0) {
-        hdr->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)s->node_id);
-        hdr->ttl = PROTOCOL_FIELD_TO_NETWORK(ttl - 1);
+        hdr->src_node_id = (uint32_t)s->node_id;
+        hdr->ttl = ttl - 1;
     }
 
     size_t total_len = PROTOCOL_HEADER_SIZE + data_len;
@@ -181,13 +181,13 @@ static void broadcast_peer_info(session_t *s, uint32_t *peer_list, size_t peer_c
     memset(header, 0, sizeof(header));
     protocol_msg_t *msg = (protocol_msg_t *)header;
     memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
-    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)s->node_id);
-    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)s->node_id);
-    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__PEER_INFO);
-    msg->data_length = PROTOCOL_FIELD_TO_NETWORK((uint32_t)(peer_count * sizeof(uint32_t)));
-    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
+    msg->orig_src_node_id = (uint32_t)s->node_id;
+    msg->src_node_id = (uint32_t)s->node_id;
+    msg->dst_node_id = 0;
+    msg->message_id = 0;
+    msg->type = MSG__PEER_INFO;
+    msg->data_length = (uint32_t)(peer_count * sizeof(uint32_t));
+    msg->ttl = DEFAULT_TTL;
 
     uint8_t *peer_data = malloc(peer_count * sizeof(uint32_t));
     if (NULL == peer_data) {
@@ -207,13 +207,13 @@ static void broadcast_node_disconnect(session_t *s, uint32_t disconnected_node_i
     memset(header, 0, sizeof(header));
     protocol_msg_t *msg = (protocol_msg_t *)header;
     memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
-    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK(disconnected_node_id);
-    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)s->node_id);
-    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__NODE_DISCONNECT);
-    msg->data_length = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
+    msg->orig_src_node_id = disconnected_node_id;
+    msg->src_node_id = (uint32_t)s->node_id;
+    msg->dst_node_id = 0;
+    msg->message_id = 0;
+    msg->type = MSG__NODE_DISCONNECT;
+    msg->data_length = 0;
+    msg->ttl = DEFAULT_TTL;
 
     broadcast_to_others(s, disconnected_node_id, msg, NULL, 0);
 }
@@ -244,8 +244,8 @@ static err_t forward_message(session_t *s, const protocol_msg_t *msg, const uint
     uint8_t header[PROTOCOL_HEADER_SIZE];
     memcpy(header, msg, PROTOCOL_HEADER_SIZE);
     protocol_msg_t *hdr = (protocol_msg_t *)header;
-    hdr->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)s->node_id);
-    hdr->ttl = PROTOCOL_FIELD_TO_NETWORK(ttl > 0 ? ttl - 1 : 0);
+    hdr->src_node_id = (uint32_t)s->node_id;
+    hdr->ttl = ttl > 0 ? ttl - 1 : 0;
 
     size_t total_len = PROTOCOL_HEADER_SIZE + data_len;
     uint8_t *pkt = malloc(total_len);
@@ -294,7 +294,7 @@ static err_t handle_node_init(session_t *s, transport_t *t, uint32_t orig_src, u
             LOG_WARNING("Failed to add route to node %u via node %u", orig_src, src);
         } else {
             LOG_INFO("Learned route to node %u via node %u", orig_src, src);
-            uint32_t peer_list[1] = { PROTOCOL_FIELD_TO_NETWORK(orig_src) };
+            uint32_t peer_list[1] = { orig_src };
             broadcast_peer_info(s, peer_list, 1, src);
         }
     }
@@ -317,7 +317,7 @@ static err_t handle_peer_info(session_t *s, uint32_t orig_src, uint32_t src, uin
     size_t peer_count = data_len / sizeof(uint32_t);
 
     for (size_t i = 0; i < peer_count; i++) {
-        uint32_t peer_id = PROTOCOL_FIELD_FROM_NETWORK(peer_list[i]);
+        uint32_t peer_id = peer_list[i];
         if (peer_id == (uint32_t)s->node_id) {
             continue;
         }

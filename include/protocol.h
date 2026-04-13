@@ -1,17 +1,15 @@
 #ifndef GANON_PROTOCOL_H
 #define GANON_PROTOCOL_H
 
-#include <arpa/inet.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
+
+#include "err.h"
 
 #define GANON_PROTOCOL_MAGIC "GNN\0"
 #define PROTOCOL_HEADER_SIZE sizeof(protocol_msg_t)
 #define DEFAULT_TTL 16
-
-#define PROTOCOL_FIELD_TO_NETWORK(x) htonl(x)
-#define PROTOCOL_FIELD_FROM_NETWORK(x) ntohl(x)
 
 typedef enum {
     MSG__NODE_INIT = 0,
@@ -33,10 +31,7 @@ typedef struct {
 
 bool PROTOCOL__validate_magic(const uint8_t *buf);
 
-err_t PROTOCOL__parse_header(const uint8_t *buf, protocol_msg_t *msg);
-err_t PROTOCOL__serialize(const protocol_msg_t *msg, uint8_t *buf, size_t buf_len, size_t *bytes_written);
-
-void PROTOCOL__msg_ntoh(protocol_msg_t *msg);
-void PROTOCOL__msg_hton(protocol_msg_t *msg);
+err_t PROTOCOL__unserialize(const uint8_t *buf, size_t len, protocol_msg_t *msg, uint8_t **data, size_t *data_len);
+err_t PROTOCOL__serialize(const protocol_msg_t *msg, const uint8_t *data, uint8_t *buf, size_t buf_len, size_t *bytes_written);
 
 #endif /* #ifndef GANON_PROTOCOL_H */

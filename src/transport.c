@@ -6,6 +6,7 @@
 #include "common.h"
 #include "err.h"
 #include "logging.h"
+#include "protocol.h"
 #include "transport.h"
 
 ssize_t TRANSPORT__recv(int fd, uint8_t *buf, size_t len) {
@@ -145,35 +146,18 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 
-    rc = PROTOCOL__parse_header(header, msg);
+    size_t data_len = 0;
+    rc = PROTOCOL__unserialize(header, PROTOCOL_HEADER_SIZE, msg, data, &data_len);
     if (E__SUCCESS != rc) {
-        LOG_WARNING("Invalid protocol header on fd %d", t->fd);
-        FAIL(E__NET__SOCKET_CONNECT_FAILED);
+        LOG_WARNING("Failed to unserialize message from fd %d", t->fd);
+        goto l_cleanup;
     }
 
     LOG_TRACE("RECV msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u, fd=%d",
               msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
               msg->message_id, msg->type, msg->data_length, msg->ttl, t->fd);
 
-    uint32_t data_length = msg->data_length;
-    if (data_length > 0) {
-        *data = malloc(data_length);
-        if (NULL == *data) {
-            LOG_ERROR("Failed to allocate data buffer of size %u", data_length);
-            FAIL(E__INVALID_ARG_NULL_POINTER);
-        }
-
-        rc = TRANSPORT__recv_all(t, *data, data_length, &bytes_read);
-        if (E__SUCCESS != rc) {
-            goto l_cleanup;
-        }
-    }
-
 l_cleanup:
-    if (E__SUCCESS != rc && NULL != *data) {
-        free(*data);
-        *data = NULL;
-    }
     return rc;
 }
 
@@ -186,14 +170,15 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
               msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
               msg->message_id, msg->type, msg->data_length, msg->ttl, t->fd);
 
-    rc = TRANSPORT__send_all(t, (const uint8_t *)msg, PROTOCOL_HEADER_SIZE, NULL);
-    FAIL_IF(E__SUCCESS != rc, rc);
-
-    uint32_t data_length = msg->data_length;
-    if (NULL != data && data_length > 0) {
-        rc = TRANSPORT__send_all(t, data, data_length, NULL);
-        FAIL_IF(E__SUCCESS != rc, rc);
+    uint8_t buf[PROTOCOL_HEADER_SIZE];
+    size_t bytes_written = 0;
+    rc = PROTOCOL__serialize(msg, data, buf, sizeof(buf), &bytes_written);
+    if (E__SUCCESS != rc) {
+        goto l_cleanup;
     }
+
+    rc = TRANSPORT__send_all(t, buf, bytes_written, NULL);
+    FAIL_IF(E__SUCCESS != rc, rc);
 
 l_cleanup:
     return rc;
