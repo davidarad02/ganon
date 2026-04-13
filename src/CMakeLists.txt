@@ -5,7 +5,7 @@ endif()
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c connection.c)
 else()
-    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c connection.c)
+    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c connection.c)
 endif()
 
 find_package(Threads REQUIRED)
