@@ -39,34 +39,34 @@ void args_print_help(const char *prog_name) {
     printf("  RECONNECT_DELAY     Delay between reconnect attempts (alternative to --reconnect-delay)\n");
 }
 
-static int is_help_flag(const char *arg) {
+static bool_t is_help_flag(const char *arg) {
     if (NULL == arg) {
-        return 0;
+        return false;
     }
     if (0 == strcmp(arg, ARGS_FLAG_HELP_SHORT) || 0 == strcmp(arg, ARGS_FLAG_HELP_LONG)) {
-        return 1;
+        return true;
     }
-    return 0;
+    return false;
 }
 #endif /* #ifdef __DEBUG__ */
 
-static int is_flag_short(const char *arg) {
+static bool_t is_flag_short(const char *arg) {
     if (NULL == arg) {
-        return 0;
+        return false;
     }
     return ('-' == arg[0] && '-' != arg[1] && '\0' != arg[1]);
 }
 
-static int is_flag_long(const char *arg) {
+static bool_t is_flag_long(const char *arg) {
     if (NULL == arg) {
-        return 0;
+        return false;
     }
     return ('-' == arg[0] && '-' == arg[1] && '\0' != arg[2]);
 }
 
-static int is_positional(const char *arg) {
+static bool_t is_positional(const char *arg) {
     if (NULL == arg) {
-        return 0;
+        return false;
     }
     return ('-' != arg[0]);
 }
@@ -139,15 +139,15 @@ static int parse_int(const char *value) {
     return (int)val;
 }
 
-static int validate_ip(const char *ip) {
+static bool_t validate_ip(const char *ip) {
     if (NULL == ip) {
-        return 0;
+        return false;
     }
     if ('\0' == ip[0]) {
-        return 0;
+        return false;
     }
     if ('.' == ip[0]) {
-        return 0;
+        return false;
     }
     int dots = 0;
     int part_idx = 0;
@@ -156,44 +156,44 @@ static int validate_ip(const char *ip) {
     while ('\0' != *p && 4 > part_idx) {
         if ('.' == *p) {
             if (255 < part_value) {
-                return 0;
+                return false;
             }
             dots++;
             part_idx++;
             part_value = 0;
             if (3 < part_idx) {
-                return 0;
+                return false;
             }
             if ('.' == *(p + 1) || '\0' == *(p + 1)) {
-                return 0;
+                return false;
             }
             p++;
             continue;
         }
         if ('0' > *p || '9' < *p) {
-            return 0;
+            return false;
         }
         part_value = part_value * 10 + (*p - '0');
         if (255 < part_value) {
-            return 0;
+            return false;
         }
         p++;
     }
     if (3 != dots || 3 != part_idx) {
-        return 0;
+        return false;
     }
     if ('\0' != *p) {
-        return 0;
+        return false;
     }
-    return 1;
+    return true;
 }
 
-static int validate_listen_ip(const char *ip) {
+static bool_t validate_listen_ip(const char *ip) {
     if (NULL == ip) {
-        return 0;
+        return false;
     }
     if (0 == strcmp(ip, "0.0.0.0") || 0 == strcmp(ip, "*")) {
-        return 1;
+        return true;
     }
     return validate_ip(ip);
 }

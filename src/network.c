@@ -171,7 +171,7 @@ static void *socket_thread_func(void *arg) {
     }
 
     if (0 != entry->is_incoming) {
-        while (1) {
+        while (true) {
             ssize_t bytes_read = recv(entry->fd, buffer, sizeof(buffer) - 1, 0);
             if (0 > bytes_read) {
                 if (EAGAIN == errno || EWOULDBLOCK == errno) {
@@ -203,8 +203,8 @@ static void *socket_thread_func(void *arg) {
         return NULL;
     }
 
-    while (1) {
-        while (1) {
+    while (true) {
+        while (true) {
             ssize_t bytes_read = recv(entry->fd, buffer, sizeof(buffer) - 1, 0);
             if (0 > bytes_read) {
                 if (EAGAIN == errno || EWOULDBLOCK == errno) {
