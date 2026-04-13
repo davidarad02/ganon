@@ -31,52 +31,60 @@ transport_t *TRANSPORT__create(int fd) {
 }
 
 void TRANSPORT__destroy(transport_t *t) {
-    if (NULL != t) {
-        free(t);
-    }
+    FREE(t);
 }
 
-ssize_t TRANSPORT__recv_all(transport_t *t, uint8_t *buf, size_t len) {
-    if (NULL == t || NULL == buf) {
-        return -1;
-    }
+err_t TRANSPORT__recv_all(transport_t *t, uint8_t *buf, size_t len, ssize_t *bytes_read) {
+    err_t rc = E__SUCCESS;
+
+    VALIDATE_ARGS(t, buf, bytes_read);
+
+    *bytes_read = 0;
 
     size_t total_read = 0;
     while (total_read < len) {
-        ssize_t bytes_read = t->recv(t->fd, buf + total_read, len - total_read);
-        if (0 > bytes_read) {
+        ssize_t n = t->recv(t->fd, buf + total_read, len - total_read);
+        if (0 > n) {
             if (EAGAIN == errno || EWOULDBLOCK == errno) {
                 continue;
             }
             LOG_WARNING("recv failed on fd %d: %s", t->fd, strerror(errno));
-            return -1;
-        } else if (0 == bytes_read) {
+            FAIL(E__NET__SOCKET_CONNECT_FAILED);
+        } else if (0 == n) {
             LOG_WARNING("Socket disconnected (fd=%d)", t->fd);
-            return -1;
+            FAIL(E__NET__SOCKET_CONNECT_FAILED);
         }
-        total_read += (size_t)bytes_read;
+        total_read += (size_t)n;
     }
 
-    return (ssize_t)total_read;
+    *bytes_read = (ssize_t)total_read;
+
+l_cleanup:
+    return rc;
 }
 
-ssize_t TRANSPORT__send_all(transport_t *t, const uint8_t *buf, size_t len) {
-    if (NULL == t || NULL == buf) {
-        return -1;
-    }
+err_t TRANSPORT__send_all(transport_t *t, const uint8_t *buf, size_t len, ssize_t *bytes_sent) {
+    err_t rc = E__SUCCESS;
+
+    VALIDATE_ARGS(t, buf, bytes_sent);
+
+    *bytes_sent = 0;
 
     size_t total_sent = 0;
     while (total_sent < len) {
-        ssize_t bytes_sent = t->send(t->fd, buf + total_sent, len - total_sent);
-        if (0 > bytes_sent) {
+        ssize_t n = t->send(t->fd, buf + total_sent, len - total_sent);
+        if (0 > n) {
             if (EAGAIN == errno || EWOULDBLOCK == errno) {
                 continue;
             }
             LOG_WARNING("send failed on fd %d: %s", t->fd, strerror(errno));
-            return -1;
+            FAIL(E__NET__SOCKET_CONNECT_FAILED);
         }
-        total_sent += (size_t)bytes_sent;
+        total_sent += (size_t)n;
     }
 
-    return (ssize_t)total_sent;
+    *bytes_sent = (ssize_t)total_sent;
+
+l_cleanup:
+    return rc;
 }

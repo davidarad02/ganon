@@ -38,7 +38,7 @@ l_cleanup:
 err_t SESSION__process(transport_t *t) {
     err_t rc = E__SUCCESS;
 
-    FAIL_IF(NULL == t, E__INVALID_ARG_NULL_POINTER);
+    VALIDATE_ARGS(t);
 
     uint8_t header_buffer[PROTOCOL_HEADER_SIZE];
     ssize_t bytes_read = t->recv(t->fd, header_buffer, sizeof(header_buffer));
@@ -67,10 +67,11 @@ err_t SESSION__process(transport_t *t) {
         data = malloc(data_length);
         FAIL_IF(NULL == data, E__INVALID_ARG_NULL_POINTER);
 
-        bytes_read = TRANSPORT__recv_all(t, data, data_length);
-        if (0 > bytes_read) {
+        ssize_t bytes_read;
+        rc = TRANSPORT__recv_all(t, data, data_length, &bytes_read);
+        if (E__SUCCESS != rc) {
             LOG_WARNING("Failed to read data from fd %d", t->fd);
-            FAIL(E__NET__SOCKET_CONNECT_FAILED);
+            FAIL(rc);
         }
     }
 

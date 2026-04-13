@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <sys/socket.h>
 
+#include "err.h"
+
 typedef struct transport transport_t;
 
 struct transport {
@@ -19,7 +21,7 @@ ssize_t TRANSPORT__send(int fd, const uint8_t *buf, size_t len);
 transport_t *TRANSPORT__create(int fd);
 void TRANSPORT__destroy(transport_t *t);
 
-ssize_t TRANSPORT__recv_all(transport_t *t, uint8_t *buf, size_t len);
-ssize_t TRANSPORT__send_all(transport_t *t, const uint8_t *buf, size_t len);
+err_t TRANSPORT__recv_all(transport_t *t, uint8_t *buf, size_t len, ssize_t *bytes_read);
+err_t TRANSPORT__send_all(transport_t *t, const uint8_t *buf, size_t len, ssize_t *bytes_sent);
 
 #endif /* #ifndef GANON_TRANSPORT_H */
