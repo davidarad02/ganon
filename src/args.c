@@ -144,10 +144,12 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     int port_set = 0;
 
     if (NULL == args_out) {
-        FAIL(E__ARGS__NULL_POINTER);
+        rc = E__INVALID_ARG_NULL_POINTER;
+        goto l_cleanup;
     }
 
 #ifdef __DEBUG__
+    for (int i = 1; i < argc; i++) {
     for (int i = 1; i < argc; i++) {
         if (is_help_flag(argv[i])) {
             args_print_help(argv[0]);

@@ -8,6 +8,9 @@ typedef enum {
     /* main.c */
     E__MAIN__RC_DEMO__SOME_ERROR = 0x100,
 
+    /* Generic errors (0x001) */
+    E__INVALID_ARG_NULL_POINTER = 0x001,
+
     /* args.c */
     E__ARGS__NULL_POINTER = 0x200,
     E__ARGS__CONFLICTING_ARGUMENTS,

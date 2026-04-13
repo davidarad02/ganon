@@ -17,4 +17,26 @@
 #define CONTINUE_IF(condition) \
     if (condition) { continue; }
 
+#define VALIDATE_ARGS(...) \
+    do { \
+        void *args[] = { __VA_ARGS__ }; \
+        for (size_t i = 0; i < sizeof(args) / sizeof(args[0]); i++) { \
+            if (NULL == args[i]) { \
+                rc = E__INVALID_ARG_NULL_POINTER; \
+                goto l_cleanup; \
+            } \
+        } \
+    } while (0)
+
+#define VALIDATE_ARGS_ERRNO(err, ...) \
+    do { \
+        void *args[] = { __VA_ARGS__ }; \
+        for (size_t i = 0; i < sizeof(args) / sizeof(args[0]); i++) { \
+            if (NULL == args[i]) { \
+                rc = err; \
+                goto l_cleanup; \
+            } \
+        } \
+    } while (0)
+
 #endif
