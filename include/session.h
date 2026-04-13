@@ -1,12 +1,34 @@
 #ifndef GANON_SESSION_H
 #define GANON_SESSION_H
 
+#include <stddef.h>
+#include <stdint.h>
+
+#include "connection.h"
 #include "protocol.h"
 #include "routing.h"
-#include "transport.h"
 
-err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *peer_node_id, uint8_t *out_header, size_t header_len, uint32_t **out_peer_list, size_t *out_peer_count, uint8_t **out_data, size_t *out_data_len);
+typedef struct network_t network_t;
 
-err_t SESSION__send_packet(transport_t *t, uint32_t src_node_id, uint32_t dst_node_id, msg_type_t type, const uint8_t *data, size_t data_len);
+typedef struct session_t session_t;
+
+struct session_t {
+    int node_id;
+    routing_table_t routing_table;
+    network_t *net;
+};
+
+err_t SESSION__init(session_t *s, int node_id);
+void SESSION__destroy(session_t *s);
+
+void SESSION__set_network(session_t *s, network_t *net);
+network_t *SESSION__get_network(session_t *s);
+
+void SESSION__on_connected(session_t *s, connection_t *conn);
+void SESSION__on_message(session_t *s, connection_t *conn, const uint8_t *buf, size_t len);
+void SESSION__on_disconnected(session_t *s, uint32_t node_id);
+
+int SESSION__get_node_id(session_t *s);
+routing_table_t *SESSION__get_routing_table(session_t *s);
 
 #endif /* #ifndef GANON_SESSION_H */

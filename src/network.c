@@ -12,343 +12,31 @@
 #include <pthread.h>
 
 #include "common.h"
+#include "connection.h"
 #include "logging.h"
 #include "network.h"
-#include "protocol.h"
-#include "routing.h"
-#include "session.h"
 #include "transport.h"
 
 int g_node_id = -1;
 
-static ssize_t send_wrapper(int fd, const uint8_t *buf, size_t len) {
-    return send(fd, buf, len, 0);
-}
-
-static void log_sent_packet(const uint8_t *header, int fd) {
-    protocol_msg_t *msg = (protocol_msg_t *)header;
-    uint32_t orig_src = PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id);
-    uint32_t src = PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id);
-    uint32_t dst = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
-    uint32_t msg_id = PROTOCOL_FIELD_FROM_NETWORK(msg->message_id);
-    uint32_t type = PROTOCOL_FIELD_FROM_NETWORK(msg->type);
-    uint32_t data_len = PROTOCOL_FIELD_FROM_NETWORK(msg->data_length);
-    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
-    LOG_TRACE("Sent packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u, fd=%d", orig_src, src, dst, msg_id, type, ttl, data_len, fd);
-}
-
-static err_t send_raw_packet(int fd, uint8_t *header, const uint8_t *data, size_t data_len) {
+static err_t send_raw(int fd, const uint8_t *buf, size_t len) {
     err_t rc = E__SUCCESS;
-    transport_t *t = TRANSPORT__create(fd);
-    if (NULL == t) {
-        FAIL(E__INVALID_ARG_NULL_POINTER);
+
+    size_t total_sent = 0;
+    while (total_sent < len) {
+        ssize_t n = send(fd, buf + total_sent, len - total_sent, 0);
+        if (0 > n) {
+            if (EAGAIN == errno || EWOULDBLOCK == errno) {
+                continue;
+            }
+            LOG_WARNING("send failed on fd %d: %s", fd, strerror(errno));
+            FAIL(E__NET__SOCKET_CONNECT_FAILED);
+        }
+        total_sent += (size_t)n;
     }
-
-    rc = TRANSPORT__send_one(t, header, PROTOCOL_HEADER_SIZE);
-    FAIL_IF(E__SUCCESS != rc, rc);
-    log_sent_packet(header, fd);
-
-    if (NULL != data && data_len > 0) {
-        rc = TRANSPORT__send_one(t, data, data_len);
-        FAIL_IF(E__SUCCESS != rc, rc);
-    }
-
-    TRANSPORT__destroy(t);
 
 l_cleanup:
     return rc;
-}
-
-static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_node_id, uint8_t *header, const uint8_t *data, size_t data_len) {
-    (void)sender_node_id;
-    if (NULL == net || NULL == header) {
-        return;
-    }
-
-    protocol_msg_t *msg = (protocol_msg_t *)header;
-    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
-    if (ttl == 0) {
-        return;
-    }
-
-    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)g_node_id);
-    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(ttl - 1);
-
-    pthread_mutex_lock(&net->clients_mutex);
-    socket_entry_t *client = net->clients;
-    while (NULL != client) {
-        if (client->fd != exclude_fd && 0 != client->peer_node_id) {
-            uint8_t hdr[PROTOCOL_HEADER_SIZE];
-            memcpy(hdr, header, PROTOCOL_HEADER_SIZE);
-            err_t rc = send_raw_packet(client->fd, hdr, data, data_len);
-            if (E__SUCCESS != rc) {
-                LOG_WARNING("Failed to broadcast to fd %d", client->fd);
-            } else {
-                LOG_DEBUG("Broadcast from node %u to node %u (fd=%d, ttl=%u)", sender_node_id, client->peer_node_id, client->fd, ttl - 1);
-            }
-        }
-        client = client->next;
-    }
-    pthread_mutex_unlock(&net->clients_mutex);
-}
-
-static void broadcast_peer_info_to_others(network_t *net, int exclude_fd, uint32_t src_node_id, uint32_t *peer_list, size_t peer_count) {
-    if (NULL == net || 0 == peer_count) {
-        return;
-    }
-
-    uint8_t *peer_data = malloc(peer_count * sizeof(uint32_t));
-    if (NULL == peer_data) {
-        LOG_ERROR("Failed to allocate peer data for broadcast");
-        return;
-    }
-
-    for (size_t i = 0; i < peer_count; i++) {
-        ((uint32_t *)peer_data)[i] = peer_list[i];
-    }
-
-    pthread_mutex_lock(&net->clients_mutex);
-    socket_entry_t *client = net->clients;
-    while (NULL != client) {
-        if (client->fd != exclude_fd && 0 != client->peer_node_id) {
-            transport_t *t = TRANSPORT__create(client->fd);
-            if (NULL != t) {
-                err_t rc = SESSION__send_packet(t, src_node_id, 0, MSG__PEER_INFO, peer_data, peer_count * sizeof(uint32_t));
-                if (E__SUCCESS != rc) {
-                    LOG_WARNING("Failed to broadcast PEER_INFO to fd %d", client->fd);
-                } else {
-                    LOG_DEBUG("Broadcast PEER_INFO (via node %u) to node %u: %zu peers", src_node_id, client->peer_node_id, peer_count);
-                }
-                TRANSPORT__destroy(t);
-            }
-        }
-        client = client->next;
-    }
-    pthread_mutex_unlock(&net->clients_mutex);
-
-    free(peer_data);
-}
-
-static void broadcast_node_disconnect(network_t *net, int exclude_fd, uint32_t disconnected_node_id) {
-    if (NULL == net) {
-        return;
-    }
-
-    uint8_t header[PROTOCOL_HEADER_SIZE];
-    memset(header, 0, sizeof(header));
-
-    protocol_msg_t *msg = (protocol_msg_t *)header;
-    memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
-    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK(disconnected_node_id);
-    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)g_node_id);
-    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__NODE_DISCONNECT);
-    msg->data_length = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
-
-    pthread_mutex_lock(&net->clients_mutex);
-    socket_entry_t *client = net->clients;
-    while (NULL != client) {
-        if (client->fd != exclude_fd && 0 != client->peer_node_id) {
-            uint8_t hdr[PROTOCOL_HEADER_SIZE];
-            memcpy(hdr, header, PROTOCOL_HEADER_SIZE);
-            err_t rc = send_raw_packet(client->fd, hdr, NULL, 0);
-            if (E__SUCCESS != rc) {
-                LOG_WARNING("Failed to broadcast NODE_DISCONNECT to fd %d", client->fd);
-            } else {
-                LOG_DEBUG("Broadcast NODE_DISCONNECT for node %u to node %u", disconnected_node_id, client->peer_node_id);
-            }
-        }
-        client = client->next;
-    }
-    pthread_mutex_unlock(&net->clients_mutex);
-}
-
-static err_t forward_message(network_t *net, uint8_t *header, uint8_t *data, size_t data_len) {
-    err_t rc = E__SUCCESS;
-
-    protocol_msg_t *msg = (protocol_msg_t *)header;
-    uint32_t dst_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
-    uint32_t src_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id);
-    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
-
-    if (dst_node_id == 0) {
-        routing_table_t *rt = &net->routing_table;
-        if (0 != pthread_mutex_lock(&rt->mutex)) {
-            LOG_ERROR("Failed to lock routing table mutex");
-            FAIL(E__NET__THREAD_CREATE_FAILED);
-        }
-
-        int exclude_fd = -1;
-        for (size_t i = 0; i < rt->entry_count; i++) {
-            if (rt->entries[i].node_id == src_node_id && rt->entries[i].route_type == ROUTE__DIRECT) {
-                exclude_fd = rt->entries[i].fd;
-                break;
-            }
-        }
-
-        if (exclude_fd < 0) {
-            pthread_mutex_unlock(&rt->mutex);
-            LOG_DEBUG("Cannot forward broadcast: sender node %u is not a direct peer", src_node_id);
-            goto l_cleanup;
-        }
-
-        pthread_mutex_unlock(&rt->mutex);
-
-        msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)g_node_id);
-        msg->ttl = PROTOCOL_FIELD_TO_NETWORK(ttl > 0 ? ttl - 1 : 0);
-
-        pthread_mutex_lock(&net->clients_mutex);
-        socket_entry_t *client = net->clients;
-        while (NULL != client) {
-            if (client->fd != exclude_fd && 0 != client->peer_node_id) {
-                uint8_t hdr[PROTOCOL_HEADER_SIZE];
-                memcpy(hdr, header, PROTOCOL_HEADER_SIZE);
-                err_t send_rc = send_raw_packet(client->fd, hdr, data, data_len);
-                if (E__SUCCESS != send_rc) {
-                    LOG_WARNING("Failed to forward broadcast to fd %d", client->fd);
-                } else {
-                    LOG_DEBUG("Forwarded broadcast to node %u (via node %u)", client->peer_node_id, g_node_id);
-                }
-            }
-            client = client->next;
-        }
-        pthread_mutex_unlock(&net->clients_mutex);
-
-        goto l_cleanup;
-    }
-
-    if ((uint32_t)g_node_id == dst_node_id) {
-        return E__SUCCESS;
-    }
-
-    if (ttl == 0) {
-        LOG_DEBUG("TTL 0, dropping forwarded message to node %u", dst_node_id);
-        return E__SUCCESS;
-    }
-
-    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)g_node_id);
-    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(ttl - 1);
-
-    size_t total_len = PROTOCOL_HEADER_SIZE + data_len;
-    uint8_t *buf = malloc(total_len);
-    if (NULL == buf) {
-        LOG_ERROR("Failed to allocate buffer for forwarding");
-        FAIL(E__INVALID_ARG_NULL_POINTER);
-    }
-
-    memcpy(buf, header, PROTOCOL_HEADER_SIZE);
-    if (NULL != data && 0 < data_len) {
-        memcpy(buf + PROTOCOL_HEADER_SIZE, data, data_len);
-    }
-
-    rc = ROUTING__send_to_node(&net->routing_table, dst_node_id, buf, total_len, send_wrapper);
-    if (E__SUCCESS != rc) {
-        LOG_WARNING("Failed to forward message to node %u", dst_node_id);
-    } else {
-        LOG_DEBUG("Forwarded message to node %u (ttl=%u)", dst_node_id, ttl - 1);
-    }
-
-    free(buf);
-
-l_cleanup:
-    return rc;
-}
-
-static err_t send_peer_info(network_t *net, int fd, uint32_t src_node_id, uint32_t dst_node_id) {
-    err_t rc = E__SUCCESS;
-
-    routing_table_t *rt = &net->routing_table;
-
-    if (0 != pthread_mutex_lock(&rt->mutex)) {
-        LOG_ERROR("Failed to lock routing table mutex");
-        FAIL(E__NET__THREAD_CREATE_FAILED);
-    }
-
-    size_t peer_count = 0;
-    for (size_t i = 0; i < rt->entry_count; i++) {
-        if (rt->entries[i].node_id != dst_node_id && rt->entries[i].node_id != src_node_id) {
-            peer_count++;
-        }
-    }
-
-    uint8_t *peer_data = NULL;
-    if (peer_count > 0) {
-        peer_data = malloc(peer_count * sizeof(uint32_t));
-        if (NULL == peer_data) {
-            LOG_ERROR("Failed to allocate peer data");
-            pthread_mutex_unlock(&rt->mutex);
-            FAIL(E__INVALID_ARG_NULL_POINTER);
-        }
-
-        peer_count = 0;
-        for (size_t i = 0; i < rt->entry_count; i++) {
-            if (rt->entries[i].node_id != dst_node_id && rt->entries[i].node_id != src_node_id) {
-                ((uint32_t *)peer_data)[peer_count] = PROTOCOL_FIELD_TO_NETWORK(rt->entries[i].node_id);
-                peer_count++;
-            }
-        }
-    }
-
-    pthread_mutex_unlock(&rt->mutex);
-
-    transport_t *t = TRANSPORT__create(fd);
-    if (NULL == t) {
-        LOG_ERROR("Failed to create transport for fd %d", fd);
-        FREE(peer_data);
-        FAIL(E__INVALID_ARG_NULL_POINTER);
-    }
-
-    rc = SESSION__send_packet(t, src_node_id, dst_node_id, MSG__PEER_INFO, peer_data, peer_count * sizeof(uint32_t));
-    if (E__SUCCESS != rc) {
-        LOG_WARNING("Failed to send PEER_INFO to fd %d", fd);
-    } else {
-        LOG_DEBUG("Sent PEER_INFO to node %u with %zu peers", src_node_id, peer_count);
-    }
-
-    TRANSPORT__destroy(t);
-    FREE(peer_data);
-
-l_cleanup:
-    return rc;
-}
-
-static void send_node_init(int fd, uint32_t node_id) {
-    transport_t *t = TRANSPORT__create(fd);
-    if (NULL == t) {
-        LOG_ERROR("Failed to create transport for fd %d", fd);
-        return;
-    }
-
-    err_t rc = SESSION__send_packet(t, node_id, 0, MSG__NODE_INIT, NULL, 0);
-    if (E__SUCCESS != rc) {
-        LOG_WARNING("Failed to send NODE_INIT to fd %d", fd);
-    } else {
-        LOG_DEBUG("Sent NODE_INIT to fd %d (node_id=%u)", fd, node_id);
-    }
-
-    TRANSPORT__destroy(t);
-}
-
-static void send_connection_rejected(int fd, uint32_t node_id) {
-    transport_t *t = TRANSPORT__create(fd);
-    if (NULL == t) {
-        LOG_ERROR("Failed to create transport for fd %d", fd);
-        return;
-    }
-
-    err_t rc = SESSION__send_packet(t, node_id, 0, MSG__CONNECTION_REJECTED, NULL, 0);
-    if (E__SUCCESS != rc) {
-        LOG_ERROR("Failed to send CONNECTION_REJECTED to fd %d", fd);
-    } else {
-        LOG_DEBUG("Sent CONNECTION_REJECTED to fd %d (rejected peer, our node_id=%u)", fd, node_id);
-    }
-
-    TRANSPORT__destroy(t);
-
-    struct timespec ts = {0, 100000};
-    nanosleep(&ts, NULL);
 }
 
 static int create_listen_socket(const char *ip, int port) {
@@ -490,193 +178,90 @@ static void socket_entry_remove_locked(network_t *net, socket_entry_t *entry) {
     }
 }
 
+void NETWORK__set_send_fn(network_t *net, network_send_fn_t fn, void *ctx) {
+    if (NULL == net) {
+        return;
+    }
+    net->send_fn = fn;
+    net->send_ctx = ctx;
+}
+
+err_t NETWORK__send_to(network_t *net, uint32_t node_id, const uint8_t *buf, size_t len) {
+    if (NULL == net || NULL == buf) {
+        return E__INVALID_ARG_NULL_POINTER;
+    }
+    if (NULL != net->send_fn) {
+        net->send_fn(node_id, buf, len, net->send_ctx);
+    }
+    return E__SUCCESS;
+}
+
 static void *socket_thread_func(void *arg) {
     socket_entry_t *entry = (socket_entry_t *)arg;
     network_t *net = entry->net;
+    connection_t *conn = &entry->conn;
 
-    if (entry->is_incoming) {
-        LOG_INFO("Socket connected (fd=%d) from %s:%d", entry->fd, entry->client_ip, entry->client_port);
+    if (entry->conn.is_incoming) {
+        LOG_INFO("Connection from %s:%d (fd=%d)", conn->client_ip, conn->client_port, conn->fd);
     } else {
-        LOG_INFO("Socket connected (fd=%d) to %s:%d", entry->fd, entry->client_ip, entry->client_port);
+        LOG_INFO("Connected to %s:%d (fd=%d)", conn->client_ip, conn->client_port, conn->fd);
     }
 
-    transport_t *t = TRANSPORT__create(entry->fd);
+    if (NULL != net->connected_cb) {
+        net->connected_cb(net->session_ctx, conn);
+    }
+
+    transport_t *t = TRANSPORT__create(conn->fd);
     if (NULL == t) {
-        LOG_ERROR("Failed to create transport for fd %d", entry->fd);
-        shutdown(entry->fd, SHUT_RDWR);
-        close(entry->fd);
+        LOG_ERROR("Failed to create transport for fd %d", conn->fd);
+        CONNECTION__close(conn);
         pthread_mutex_lock(&net->clients_mutex);
         socket_entry_remove_locked(net, entry);
         pthread_mutex_unlock(&net->clients_mutex);
-        FREE(entry);
-        return NULL;
-    }
-
-    if (0 != entry->is_incoming) {
-        uint32_t prev_peer_node_id = 0;
-        uint8_t header_buffer[PROTOCOL_HEADER_SIZE];
-        memset(header_buffer, 0, sizeof(header_buffer));
-        while (true) {
-            uint32_t *learned_peers = NULL;
-            size_t learned_count = 0;
-            uint8_t *data = NULL;
-            size_t data_len = 0;
-            err_t rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, header_buffer, sizeof(header_buffer), &learned_peers, &learned_count, &data, &data_len);
-            if (E__SUCCESS != rc) {
-                if (E__SESSION__CONNECTION_REJECTED == rc) {
-                    LOG_WARNING("Rejecting duplicate connection (peer claims node_id=%u, already connected)", entry->peer_node_id);
-                    send_connection_rejected(entry->fd, (uint32_t)g_node_id);
-                }
-                break;
-            }
-
-            protocol_msg_t *hdr = (protocol_msg_t *)header_buffer;
-            msg_type_t msg_type = (msg_type_t)PROTOCOL_FIELD_FROM_NETWORK(hdr->type);
-            uint32_t dst_node_id = PROTOCOL_FIELD_FROM_NETWORK(hdr->dst_node_id);
-            uint32_t src_node_id = PROTOCOL_FIELD_FROM_NETWORK(hdr->src_node_id);
-
-            if (NULL != learned_peers && 0 != learned_count) {
-                if (msg_type == MSG__PEER_INFO) {
-                    LOG_DEBUG("Propagating %zu learned peers from PEER_INFO (via node %u) to other direct peers", learned_count, entry->peer_node_id);
-                } else if (msg_type == MSG__NODE_INIT) {
-                    LOG_DEBUG("Propagating %zu learned peers from NODE_INIT (via node %u) to other direct peers", learned_count, entry->peer_node_id);
-                }
-                broadcast_peer_info_to_others(net, entry->fd, (uint32_t)g_node_id, learned_peers, learned_count);
-                free(learned_peers);
-                learned_peers = NULL;
-            }
-
-            if ((dst_node_id != 0 && (uint32_t)g_node_id != dst_node_id && msg_type != MSG__NODE_INIT && msg_type != MSG__PEER_INFO) ||
-                (dst_node_id == 0 && src_node_id != (uint32_t)g_node_id)) {
-                LOG_DEBUG("Forwarding message from node %u to node %u", entry->peer_node_id, dst_node_id);
-                forward_message(net, header_buffer, data, data_len);
-            }
-
-            if (prev_peer_node_id != entry->peer_node_id && 0 != entry->peer_node_id) {
-                LOG_INFO("Node %u connected (fd=%d), broadcasting to network and sending peer info", entry->peer_node_id, entry->fd);
-                broadcast_to_others(net, entry->fd, entry->peer_node_id, header_buffer, NULL, 0);
-                send_node_init(entry->fd, (uint32_t)g_node_id);
-                send_peer_info(net, entry->fd, (uint32_t)g_node_id, entry->peer_node_id);
-                prev_peer_node_id = entry->peer_node_id;
-                memset(header_buffer, 0, sizeof(header_buffer));
-            }
-
-            free(data);
+        if (NULL != net->disconnected_cb) {
+            net->disconnected_cb(net->session_ctx, conn);
         }
-        if (0 != entry->peer_node_id) {
-            LOG_INFO("Node %u disconnected (fd=%d)", entry->peer_node_id, entry->fd);
-            broadcast_node_disconnect(net, entry->fd, entry->peer_node_id);
-            ROUTING__remove(&net->routing_table, entry->peer_node_id);
-            ROUTING__remove_via_node(&net->routing_table, entry->peer_node_id);
-        }
-        TRANSPORT__destroy(t);
-        shutdown(entry->fd, SHUT_RDWR);
-        close(entry->fd);
-        pthread_mutex_lock(&net->clients_mutex);
-        socket_entry_remove_locked(net, entry);
-        pthread_mutex_unlock(&net->clients_mutex);
         FREE(entry);
         return NULL;
     }
 
     while (true) {
-        uint32_t *learned_peers = NULL;
-        size_t learned_count = 0;
+        protocol_msg_t msg;
         uint8_t *data = NULL;
-        size_t data_len = 0;
-        err_t session_rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, NULL, 0, &learned_peers, &learned_count, &data, &data_len);
-        if (E__SUCCESS != session_rc) {
-            LOG_WARNING("Session ended for %s:%d", entry->client_ip, entry->client_port);
-            if (0 != entry->peer_node_id) {
-                broadcast_node_disconnect(net, entry->fd, entry->peer_node_id);
-                ROUTING__remove(&net->routing_table, entry->peer_node_id);
-                ROUTING__remove_via_node(&net->routing_table, entry->peer_node_id);
-            }
+        err_t rc = TRANSPORT__recv_msg(t, &msg, &data);
+        if (E__SUCCESS != rc) {
+            break;
         }
 
-        if (NULL != learned_peers && 0 != learned_count) {
-            LOG_DEBUG("Propagating %zu learned peers from PEER_INFO (via node %u) to other direct peers", learned_count, entry->peer_node_id);
-            broadcast_peer_info_to_others(net, entry->fd, (uint32_t)g_node_id, learned_peers, learned_count);
-            free(learned_peers);
-            learned_peers = NULL;
+        if (NULL != net->message_cb) {
+            size_t total_len = PROTOCOL_HEADER_SIZE + PROTOCOL_FIELD_FROM_NETWORK(msg.data_length);
+            uint8_t *buf = malloc(total_len);
+            if (NULL != buf) {
+                memcpy(buf, &msg, PROTOCOL_HEADER_SIZE);
+                if (NULL != data && PROTOCOL_FIELD_FROM_NETWORK(msg.data_length) > 0) {
+                    memcpy(buf + PROTOCOL_HEADER_SIZE, data, PROTOCOL_FIELD_FROM_NETWORK(msg.data_length));
+                }
+                net->message_cb(net->session_ctx, conn, buf, total_len);
+                free(buf);
+            }
         }
 
         free(data);
-
-        if (E__SUCCESS != session_rc) {
-            TRANSPORT__destroy(t);
-            shutdown(entry->fd, SHUT_RDWR);
-            close(entry->fd);
-
-            if (E__SESSION__CONNECTION_REJECTED == session_rc) {
-                LOG_WARNING("Connection rejected, abandoning");
-                pthread_mutex_lock(&net->clients_mutex);
-                socket_entry_remove_locked(net, entry);
-                pthread_mutex_unlock(&net->clients_mutex);
-                FREE(entry);
-                return NULL;
-            }
-
-            int reconnected = 0;
-            int retry = 0;
-            while (true) {
-                if (0 > net->reconnect_retries) {
-                    LOG_INFO("Reconnecting to %s:%d (attempt %d)...", entry->client_ip, entry->client_port, retry + 1);
-                } else {
-                    LOG_INFO("Reconnecting to %s:%d (attempt %d/%d)...", entry->client_ip, entry->client_port,
-                             retry + 1, net->reconnect_retries);
-                }
-
-                if (0 > net->reconnect_retries || retry < net->reconnect_retries - 1) {
-                    sleep((unsigned int)net->reconnect_delay);
-                }
-
-                int new_fd = connect_to_addr(entry->client_ip, entry->client_port, net->connect_timeout);
-                if (0 > new_fd) {
-                    if (0 > net->reconnect_retries) {
-                        LOG_WARNING("Reconnect attempt %d failed, retrying in %ds", retry + 1, net->reconnect_delay);
-                    } else if (retry < net->reconnect_retries - 1) {
-                        LOG_WARNING("Reconnect attempt %d failed, retrying in %ds", retry + 1, net->reconnect_delay);
-                    } else {
-                        LOG_WARNING("Reconnect attempt %d failed", retry + 1);
-                    }
-                    retry++;
-                    continue;
-                }
-
-                LOG_INFO("Reconnected to %s:%d (fd=%d)", entry->client_ip, entry->client_port, new_fd);
-                entry->fd = new_fd;
-                entry->peer_node_id = 0;
-                reconnected = 1;
-                break;
-            }
-            if (0 == reconnected) {
-                LOG_WARNING("All reconnect attempts failed, giving up on %s:%d", entry->client_ip, entry->client_port);
-                break;
-            }
-
-            t = TRANSPORT__create(entry->fd);
-            if (NULL == t) {
-                LOG_ERROR("Failed to create transport for fd %d", entry->fd);
-                pthread_mutex_lock(&net->clients_mutex);
-                socket_entry_remove_locked(net, entry);
-                pthread_mutex_unlock(&net->clients_mutex);
-                FREE(entry);
-                return NULL;
-            }
-        }
     }
 
-    if (0 != entry->peer_node_id) {
-        LOG_INFO("Node %u disconnected (fd=%d)", entry->peer_node_id, entry->fd);
-        broadcast_node_disconnect(net, entry->fd, entry->peer_node_id);
-        ROUTING__remove(&net->routing_table, entry->peer_node_id);
-        ROUTING__remove_via_node(&net->routing_table, entry->peer_node_id);
+    TRANSPORT__destroy(t);
+    CONNECTION__close(conn);
+
+    LOG_INFO("Connection %s:%d closed", conn->client_ip, conn->client_port);
+
+    if (NULL != net->disconnected_cb) {
+        net->disconnected_cb(net->session_ctx, conn);
     }
 
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_remove_locked(net, entry);
     pthread_mutex_unlock(&net->clients_mutex);
+
     FREE(entry);
     return NULL;
 }
@@ -730,12 +315,12 @@ static void *accept_thread_func(void *arg) {
             continue;
         }
 
-        entry->fd = client_fd;
+        CONNECTION__init(&entry->conn, client_fd);
+        entry->conn.is_incoming = 1;
+        inet_ntop(AF_INET, &client_addr.sin_addr, entry->conn.client_ip, INET_ADDRSTRLEN);
+        entry->conn.client_port = ntohs(client_addr.sin_port);
         entry->net = net;
         entry->next = NULL;
-        entry->is_incoming = 1;
-        inet_ntop(AF_INET, &client_addr.sin_addr, entry->client_ip, INET_ADDRSTRLEN);
-        entry->client_port = ntohs(client_addr.sin_port);
 
         if (0 != pthread_mutex_lock(&net->clients_mutex)) {
             LOG_ERROR("Failed to lock mutex");
@@ -783,70 +368,73 @@ static void *connect_thread_func(void *arg) {
     int connect_timeout = targ->connect_timeout;
     network_t *net = targ->net;
 
-    int fd = connect_to_addr(addr->ip, addr->port, connect_timeout);
-    if (0 > fd) {
-        LOG_WARNING("Failed to connect to %s:%d, continuing without it", addr->ip, addr->port);
-        FREE(arg);
-        return NULL;
-    }
-
-    socket_entry_t *entry = malloc(sizeof(socket_entry_t));
-    if (NULL == entry) {
-        LOG_ERROR("Failed to allocate socket entry");
-        close(fd);
-        FREE(arg);
-        return NULL;
-    }
-
-    entry->fd = fd;
-    entry->net = net;
-    entry->next = NULL;
-    entry->is_incoming = 0;
-    strncpy(entry->client_ip, addr->ip, INET_ADDRSTRLEN - 1);
-    entry->client_ip[INET_ADDRSTRLEN - 1] = '\0';
-    entry->client_port = addr->port;
-
-    if (0 != pthread_mutex_lock(&net->clients_mutex)) {
-        LOG_ERROR("Failed to lock mutex");
-        close(fd);
-        FREE(entry);
-        FREE(arg);
-        return NULL;
-    }
-
-    socket_entry_t *tail = net->clients;
-    if (NULL == tail) {
-        net->clients = entry;
-    } else {
-        while (NULL != tail->next) {
-            tail = tail->next;
+    while (true) {
+        int fd = connect_to_addr(addr->ip, addr->port, connect_timeout);
+        if (0 > fd) {
+            if (targ->reconnect_retries >= 0) {
+                LOG_WARNING("Failed to connect to %s:%d, giving up", addr->ip, addr->port);
+                FREE(arg);
+                return NULL;
+            }
+            LOG_WARNING("Failed to connect to %s:%d, retrying in %ds...", addr->ip, addr->port, targ->reconnect_delay);
+            sleep((unsigned int)targ->reconnect_delay);
+            continue;
         }
-        tail->next = entry;
-    }
 
-    pthread_mutex_unlock(&net->clients_mutex);
+        socket_entry_t *entry = malloc(sizeof(socket_entry_t));
+        if (NULL == entry) {
+            LOG_ERROR("Failed to allocate socket entry");
+            close(fd);
+            FREE(arg);
+            return NULL;
+        }
 
-    send_node_init(fd, (uint32_t)g_node_id);
+        CONNECTION__init(&entry->conn, fd);
+        entry->conn.is_incoming = 0;
+        strncpy(entry->conn.client_ip, addr->ip, INET_ADDRSTRLEN - 1);
+        entry->conn.client_ip[INET_ADDRSTRLEN - 1] = '\0';
+        entry->conn.client_port = addr->port;
+        entry->net = net;
+        entry->next = NULL;
 
-    if (0 != pthread_create(&entry->thread, NULL, socket_thread_func, entry)) {
-        LOG_ERROR("Failed to create socket thread");
-        shutdown(fd, SHUT_RDWR);
-        close(fd);
-        pthread_mutex_lock(&net->clients_mutex);
-        socket_entry_remove_locked(net, entry);
+        if (0 != pthread_mutex_lock(&net->clients_mutex)) {
+            LOG_ERROR("Failed to lock mutex");
+            close(fd);
+            FREE(entry);
+            FREE(arg);
+            return NULL;
+        }
+
+        socket_entry_t *tail = net->clients;
+        if (NULL == tail) {
+            net->clients = entry;
+        } else {
+            while (NULL != tail->next) {
+                tail = tail->next;
+            }
+            tail->next = entry;
+        }
+
         pthread_mutex_unlock(&net->clients_mutex);
-        FREE(entry);
+
+        if (0 != pthread_create(&entry->thread, NULL, socket_thread_func, entry)) {
+            LOG_ERROR("Failed to create socket thread");
+            pthread_mutex_lock(&net->clients_mutex);
+            socket_entry_remove_locked(net, entry);
+            pthread_mutex_unlock(&net->clients_mutex);
+            close(fd);
+            FREE(entry);
+            FREE(arg);
+            return NULL;
+        }
+
+        pthread_detach(entry->thread);
         FREE(arg);
         return NULL;
     }
-
-    pthread_detach(entry->thread);
-
-    FREE(arg);
-    return NULL;
 }
 
-err_t NETWORK__init(network_t *net, const args_t *args) {
+err_t NETWORK__init(network_t *net, const args_t *args, int node_id, network_message_cb_t msg_cb, network_disconnected_cb_t disc_cb, network_connected_cb_t conn_cb, void *ctx) {
     err_t rc = E__SUCCESS;
 
     if (NULL == net || NULL == args) {
@@ -860,17 +448,15 @@ err_t NETWORK__init(network_t *net, const args_t *args) {
     net->connect_timeout = args->connect_timeout;
     net->reconnect_retries = args->reconnect_retries;
     net->reconnect_delay = args->reconnect_delay;
+    net->node_id = node_id;
+    net->message_cb = msg_cb;
+    net->disconnected_cb = disc_cb;
+    net->connected_cb = conn_cb;
+    net->session_ctx = ctx;
 
     if (0 != pthread_mutex_init(&net->clients_mutex, NULL)) {
         LOG_ERROR("Failed to initialize mutex");
         FAIL(E__NET__THREAD_CREATE_FAILED);
-    }
-
-    rc = ROUTING__init(&net->routing_table);
-    if (E__SUCCESS != rc) {
-        LOG_ERROR("Failed to initialize routing table");
-        pthread_mutex_destroy(&net->clients_mutex);
-        FAIL(rc);
     }
 
     net->listen_fd = create_listen_socket(net->listen_addr.ip, net->listen_addr.port);
@@ -912,8 +498,7 @@ err_t NETWORK__init(network_t *net, const args_t *args) {
             targ->net = net;
 
             if (0 != pthread_create(&net->connect_threads[i], NULL, connect_thread_func, targ)) {
-                LOG_ERROR("Failed to create connect thread for %s:%d",
-                          targ->addr.ip, targ->addr.port);
+                LOG_ERROR("Failed to create connect thread for %s:%d", targ->addr.ip, targ->addr.port);
                 FREE(targ);
                 continue;
             }
@@ -954,8 +539,7 @@ err_t NETWORK__shutdown(network_t *net) {
 
     while (NULL != iter) {
         socket_entry_t *next = iter->next;
-        shutdown(iter->fd, SHUT_RDWR);
-        close(iter->fd);
+        CONNECTION__close(&iter->conn);
         iter = next;
     }
 
@@ -978,10 +562,50 @@ err_t NETWORK__shutdown(network_t *net) {
     }
     FREE(net->connect_threads);
 
-    ROUTING__destroy(&net->routing_table);
-
     LOG_INFO("Network shutdown complete");
 
 l_cleanup:
     return rc;
+}
+
+connection_t *NETWORK__get_connection(network_t *net, uint32_t node_id) {
+    if (NULL == net) {
+        return NULL;
+    }
+
+    pthread_mutex_lock(&net->clients_mutex);
+    socket_entry_t *entry = net->clients;
+    while (NULL != entry) {
+        if (entry->conn.node_id == node_id) {
+            pthread_mutex_unlock(&net->clients_mutex);
+            return &entry->conn;
+        }
+        entry = entry->next;
+    }
+    pthread_mutex_unlock(&net->clients_mutex);
+    return NULL;
+}
+
+void NETWORK__close_connection(network_t *net, connection_t *conn) {
+    (void)net;
+    if (NULL == conn) {
+        return;
+    }
+    CONNECTION__close(conn);
+}
+
+void NETWORK__broadcast_to_all(network_t *net, const uint8_t *buf, size_t len, uint32_t exclude_node_id) {
+    if (NULL == net || NULL == buf) {
+        return;
+    }
+
+    pthread_mutex_lock(&net->clients_mutex);
+    socket_entry_t *entry = net->clients;
+    while (NULL != entry) {
+        if (entry->conn.node_id != 0 && entry->conn.node_id != exclude_node_id) {
+            send_raw(entry->conn.fd, buf, len);
+        }
+        entry = entry->next;
+    }
+    pthread_mutex_unlock(&net->clients_mutex);
 }

@@ -7,6 +7,7 @@
 #include "logging.h"
 #include "args.h"
 #include "network.h"
+#include "session.h"
 
 static volatile sig_atomic_t g_shutdown_requested = 0;
 
@@ -15,10 +16,32 @@ static void signal_handler(int sig) {
     g_shutdown_requested = 1;
 }
 
+static network_t g_network;
+static session_t g_session;
+
+static void on_connected(void *ctx, connection_t *conn) {
+    (void)ctx;
+    SESSION__on_connected(&g_session, conn);
+}
+
+static void on_message(void *ctx, connection_t *conn, const uint8_t *buf, size_t len) {
+    (void)ctx;
+    SESSION__on_message(&g_session, conn, buf, len);
+}
+
+static void on_disconnected(void *ctx, connection_t *conn) {
+    (void)ctx;
+    SESSION__on_disconnected(&g_session, CONNECTION__get_node_id(conn));
+}
+
+static void session_send_wrapper(uint32_t node_id, const uint8_t *buf, size_t len, void *ctx) {
+    (void)ctx;
+    NETWORK__send_to(&g_network, node_id, buf, len);
+}
+
 int main(int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
     args_t args;
-    network_t network;
 
     rc = ARGS__parse(&args, argc, argv);
     FAIL_IF(E__SUCCESS != rc, rc);
@@ -33,8 +56,14 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    rc = NETWORK__init(&network, &args);
+    rc = SESSION__init(&g_session, g_node_id);
     FAIL_IF(E__SUCCESS != rc, rc);
+
+    rc = NETWORK__init(&g_network, &args, g_node_id, on_message, on_disconnected, on_connected, &g_session);
+    FAIL_IF(E__SUCCESS != rc, rc);
+
+    SESSION__set_network(&g_session, &g_network);
+    NETWORK__set_send_fn(&g_network, session_send_wrapper, &g_session);
 
     LOG_INFO("Network initialized");
     LOG_INFO("Node ID: %d", g_node_id);
@@ -48,8 +77,10 @@ int main(int argc, char *argv[]) {
     }
 
     LOG_INFO("Shutdown requested, stopping network...");
-    rc = NETWORK__shutdown(&network);
+    rc = NETWORK__shutdown(&g_network);
     FAIL_IF(E__SUCCESS != rc, rc);
+
+    SESSION__destroy(&g_session);
 
     LOG_INFO("ganon stopped");
 

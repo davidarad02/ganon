@@ -32,7 +32,7 @@ typedef int bool_t;
 
 #define VALIDATE_ARGS(...) \
     do { \
-        void *args[] = { __VA_ARGS__ }; \
+        const void *args[] = { __VA_ARGS__ }; \
         for (size_t i = 0; i < sizeof(args) / sizeof(args[0]); i++) { \
             if (NULL == args[i]) { \
                 rc = E__INVALID_ARG_NULL_POINTER; \
@@ -43,7 +43,7 @@ typedef int bool_t;
 
 #define VALIDATE_ARGS_ERRNO(err, ...) \
     do { \
-        void *args[] = { __VA_ARGS__ }; \
+        const void *args[] = { __VA_ARGS__ }; \
         for (size_t i = 0; i < sizeof(args) / sizeof(args[0]); i++) { \
             if (NULL == args[i]) { \
                 rc = err; \
