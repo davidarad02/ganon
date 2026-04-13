@@ -10,13 +10,25 @@
 #include "session.h"
 
 static void log_received_packet(const protocol_msg_t *msg, uint32_t data_len) {
-    (void)msg;
-    (void)data_len;
+    LOG_TRACE("Received packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u",
+              PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id),
+              PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id),
+              PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id),
+              PROTOCOL_FIELD_FROM_NETWORK(msg->message_id),
+              PROTOCOL_FIELD_FROM_NETWORK(msg->type),
+              PROTOCOL_FIELD_FROM_NETWORK(msg->ttl),
+              data_len);
 }
 
 static void log_sent_packet(const protocol_msg_t *msg, uint32_t data_len) {
-    (void)msg;
-    (void)data_len;
+    LOG_TRACE("Sent packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u",
+              PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id),
+              PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id),
+              PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id),
+              PROTOCOL_FIELD_FROM_NETWORK(msg->message_id),
+              PROTOCOL_FIELD_FROM_NETWORK(msg->type),
+              PROTOCOL_FIELD_FROM_NETWORK(msg->ttl),
+              data_len);
 }
 
 static err_t send_peer_info(session_t *s, uint32_t dst_node_id) {
