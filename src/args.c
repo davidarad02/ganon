@@ -38,7 +38,7 @@ static int is_help_flag(const char *arg) {
     }
     return 0;
 }
-#endif
+#endif /* #ifdef __DEBUG__ */
 
 static int is_flag_short(const char *arg) {
     if (NULL == arg) {
@@ -190,22 +190,22 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     }
 
     if (v_count >= 2) {
-        log_set_level(LOG_LEVEL_TRACE);
+        g_log_level = LOG_LEVEL_TRACE;
     } else if (v_count >= 1) {
-        log_set_level(LOG_LEVEL_DEBUG);
+        g_log_level = LOG_LEVEL_DEBUG;
     } else if (NULL != log_level_env) {
         if (0 == strcmp(log_level_env, "info")) {
-            log_set_level(LOG_LEVEL_INFO);
+            g_log_level = LOG_LEVEL_INFO;
         } else if (0 == strcmp(log_level_env, "debug")) {
-            log_set_level(LOG_LEVEL_DEBUG);
+            g_log_level = LOG_LEVEL_DEBUG;
         } else if (0 == strcmp(log_level_env, "trace")) {
-            log_set_level(LOG_LEVEL_TRACE);
+            g_log_level = LOG_LEVEL_TRACE;
         } else {
             LOG_ERROR("Invalid LOG_LEVEL value: %s (must be info, debug, or trace)", log_level_env);
             FAIL(E__ARGS__INVALID_FORMAT);
         }
     }
-#endif
+#endif /* #ifdef __DEBUG__ */
 
     char *env_ip = get_env(ARGS_ENV_LISTEN_IP);
     char *env_port = get_env(ARGS_ENV_LISTEN_PORT);
@@ -247,7 +247,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 if (i >= argc - 1) {
 #ifdef __DEBUG__
                     args_print_usage(argv[0]);
-#endif
+#endif /* #ifdef __DEBUG__ */
                     FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
                 }
                 if (port_set) {
@@ -266,7 +266,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
 #ifdef __DEBUG__
             } else if (count_v_flags(arg) > 0) {
                 continue;
-#endif
+#endif /* #ifdef __DEBUG__ */
         } else {
                 LOG_ERROR("Unknown argument: %s", arg);
                 FAIL(E__ARGS__UNKNOWN_FLAG);
@@ -277,7 +277,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
     if (NULL == listen_ip) {
 #ifdef __DEBUG__
         args_print_usage(argv[0]);
-#endif
+#endif /* #ifdef __DEBUG__ */
         FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
     }
 

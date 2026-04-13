@@ -14,29 +14,7 @@
 #define COLOR_WHITE   "\033[37m"
 #define COLOR_BOLD    "\033[1m"
 
-static log_level_t g_log_level = LOG_LEVEL_INFO;
-
-void log_set_level(log_level_t level) {
-    g_log_level = level;
-}
-
-log_level_t log_get_level(void) {
-    return g_log_level;
-}
-
-void log_init_from_env(void) {
-    const char *env = getenv("LOG_LEVEL");
-    if (NULL == env) {
-        return;
-    }
-    if (0 == strcmp(env, "info")) {
-        g_log_level = LOG_LEVEL_INFO;
-    } else if (0 == strcmp(env, "debug")) {
-        g_log_level = LOG_LEVEL_DEBUG;
-    } else if (0 == strcmp(env, "trace")) {
-        g_log_level = LOG_LEVEL_TRACE;
-    }
-}
+log_level_t g_log_level = LOG_LEVEL_INFO;
 
 static const char *get_level_color(const char *level) {
     if ('I' == level[0]) {

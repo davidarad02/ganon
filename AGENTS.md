@@ -66,6 +66,8 @@ Every function (except `main`) must:
 
 Comparison convention: static values first (e.g., `NULL != ptr`, `E__SUCCESS != rc`, `0 > value`)
 
+Preprocessor convention: `#endif` should have a comment indicating which `#ifdef` it closes (e.g., `#endif /* #ifdef __DEBUG__ */`)
+
 ## Logging Conventions
 
 Log levels (in order of severity):
