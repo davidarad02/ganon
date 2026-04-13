@@ -45,7 +45,7 @@ static const char *get_level_pad(const char *level) {
     return "";
 }
 
-void log_message(const char *level, const char *file, int line, const char *msg, ...) {
+void LOGGING__message(const char *level, const char *file, int line, const char *msg, ...) {
     struct timeval tv;
     (void)gettimeofday(&tv, NULL);
 
