@@ -3,13 +3,18 @@ if(NOT TARGET_NAME)
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(LOGGING_SOURCES main.c logging.c args.c)
+    set(LOGGING_SOURCES main.c logging.c args.c network.c)
 else()
-    set(LOGGING_SOURCES main.c logging.c args.c)
+    set(LOGGING_SOURCES main.c logging.c args.c network.c)
+endif()
+
+find_package(Threads REQUIRED)
+if(THREADS_HAVE_PTHREAD_ARG)
+    set(CMAKE_THREAD_FLAGS -pthread)
 endif()
 
 add_executable(${TARGET_NAME} ${LOGGING_SOURCES})
-
+target_link_libraries(${TARGET_NAME} Threads::Threads)
 target_include_directories(${TARGET_NAME} PUBLIC ${CMAKE_SOURCE_DIR}/include)
 
 if(DEFINED OUTPUT_DIR)

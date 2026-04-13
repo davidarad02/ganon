@@ -141,9 +141,6 @@ static int validate_ip(const char *ip) {
         }
         p++;
     }
-    if (0 == part_value) {
-        return 0;
-    }
     if (3 != dots || 3 != part_idx) {
         return 0;
     }
@@ -151,6 +148,16 @@ static int validate_ip(const char *ip) {
         return 0;
     }
     return 1;
+}
+
+static int validate_listen_ip(const char *ip) {
+    if (NULL == ip) {
+        return 0;
+    }
+    if (0 == strcmp(ip, "0.0.0.0") || 0 == strcmp(ip, "*")) {
+        return 1;
+    }
+    return validate_ip(ip);
 }
 
 static err_t parse_connect_entry(const char *entry, addr_t *addr_out) {
@@ -425,7 +432,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
         FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
     }
 
-    if (!validate_ip(listen_ip)) {
+    if (!validate_listen_ip(listen_ip)) {
         LOG_ERROR("Invalid IP address format: %s (expected IPv4: 0-255.0-255.0-255.0-255)", listen_ip);
         FAIL(E__ARGS__INVALID_FORMAT);
     }
