@@ -6,8 +6,8 @@ import time
 from datetime import datetime
 from typing import Callable, Optional
 
-from protocol import GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader
-from transport import Transport
+from ganon_client.protocol import GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader
+from ganon_client.transport import Transport
 
 LOG_LEVEL_TRACE = 0
 LOG_LEVEL_DEBUG = 1
