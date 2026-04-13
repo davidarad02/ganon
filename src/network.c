@@ -143,8 +143,24 @@ static int connect_to_addr(const char *ip, int port, int timeout_sec) {
     return fd;
 }
 
+static void socket_entry_remove_locked(network_t *net, socket_entry_t *entry) {
+    if (NULL == net || NULL == entry) {
+        return;
+    }
+
+    socket_entry_t **prev = &net->clients;
+    while (NULL != *prev) {
+        if (*prev == entry) {
+            *prev = entry->next;
+            break;
+        }
+        prev = &(*prev)->next;
+    }
+}
+
 static void *client_thread_func(void *arg) {
     socket_entry_t *entry = (socket_entry_t *)arg;
+    network_t *net = entry->net;
     int fd = entry->fd;
     char buffer[NETWORK_BUFFER_SIZE];
 
@@ -168,12 +184,16 @@ static void *client_thread_func(void *arg) {
     }
 
     close(fd);
+    pthread_mutex_lock(&net->clients_mutex);
+    socket_entry_remove_locked(net, entry);
+    pthread_mutex_unlock(&net->clients_mutex);
     free(entry);
     return NULL;
 }
 
 static void *outgoing_thread_func(void *arg) {
     socket_entry_t *entry = (socket_entry_t *)arg;
+    network_t *net = entry->net;
     int fd = entry->fd;
     char buffer[NETWORK_BUFFER_SIZE];
 
@@ -197,6 +217,9 @@ static void *outgoing_thread_func(void *arg) {
     }
 
     close(fd);
+    pthread_mutex_lock(&net->clients_mutex);
+    socket_entry_remove_locked(net, entry);
+    pthread_mutex_unlock(&net->clients_mutex);
     free(entry);
     return NULL;
 }
@@ -251,6 +274,7 @@ static void *accept_thread_func(void *arg) {
         }
 
         entry->fd = client_fd;
+        entry->net = net;
         entry->next = NULL;
 
         if (0 != pthread_mutex_lock(&net->clients_mutex)) {
@@ -305,6 +329,7 @@ static void *connect_thread_func(void *arg) {
     }
 
     entry->fd = fd;
+    entry->net = net;
     entry->next = NULL;
 
     if (0 != pthread_mutex_lock(&net->clients_mutex)) {
