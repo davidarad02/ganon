@@ -26,6 +26,8 @@ LEVEL_COLORS = {
     "TRACE": COLOR_RESET,
 }
 
+LEVEL_WIDTH = 5
+
 
 class GanonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -35,7 +37,10 @@ class GanonFormatter(logging.Formatter):
         timestamp = datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S")
         microseconds = int(record.created % 1 * 1000000)
 
-        level_pad = " " if level in ("INFO", "WARNING", "WARN") else ""
+        if len(level) <= 5:
+            level_padded = level.ljust(5)
+        else:
+            level_padded = level
 
         if record.exc_info:
             exc_text = self.formatException(record.exc_info)
@@ -43,10 +48,14 @@ class GanonFormatter(logging.Formatter):
         else:
             message = record.getMessage()
 
+        filename = record.filename
+        lineno = record.lineno
+
         return (
             f"{COLOR_BOLD}{timestamp}.{microseconds:06d}{COLOR_RESET} "
-            f"[{COLOR_BOLD}{color}{level}{level_pad}{COLOR_RESET}] "
-            f"{message}"
+            f"[{COLOR_BOLD}{color}{level_padded}{COLOR_RESET}] "
+            f"{message} "
+            f"[{COLOR_BOLD}{filename}:{lineno}{COLOR_RESET}]"
         )
 
 
