@@ -9,6 +9,8 @@
 
 #define NETWORK_BUFFER_SIZE 4096
 #define NETWORK_CONNECT_TIMEOUT_SEC 5
+#define NETWORK_RETRY_COUNT 5
+#define NETWORK_RETRY_DELAY_SEC 5
 
 typedef struct network_t network_t;
 

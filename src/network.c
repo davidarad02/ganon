@@ -197,6 +197,25 @@ static void *socket_thread_func(void *arg) {
 
     shutdown(fd, SHUT_RDWR);
     close(fd);
+
+    if (!entry->is_incoming) {
+        for (int retry = 0; retry < NETWORK_RETRY_COUNT; retry++) {
+            LOG_INFO("Reconnecting to %s:%d (attempt %d/%d)...", entry->client_ip, entry->client_port,
+                     retry + 1, NETWORK_RETRY_COUNT);
+            sleep(NETWORK_RETRY_DELAY_SEC);
+
+            int new_fd = connect_to_addr(entry->client_ip, entry->client_port, NETWORK_CONNECT_TIMEOUT_SEC);
+            if (0 > new_fd) {
+                LOG_WARNING("Reconnect attempt %d/%d failed", retry + 1, NETWORK_RETRY_COUNT);
+                continue;
+            }
+
+            LOG_INFO("Reconnected to %s:%d (fd=%d)", entry->client_ip, entry->client_port, new_fd);
+            entry->fd = new_fd;
+            continue;
+        }
+        LOG_WARNING("All reconnect attempts failed, giving up on %s:%d", entry->client_ip, entry->client_port);
+    }
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_remove_locked(net, entry);
     pthread_mutex_unlock(&net->clients_mutex);
