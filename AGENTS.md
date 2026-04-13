@@ -94,6 +94,7 @@ All targets use static linking (`-static` flag):
 ## Function Conventions
 
 Every function (except `main`) must:
+- Have the module name in all caps with double underscore as prefix (e.g., `ARGS__parse`, `NETWORK__init`)
 - Return `err_t` (not `int`)
 - Start with `err_t rc = E__SUCCESS;`
 - Have an empty line after `err_t rc = E__SUCCESS;`
