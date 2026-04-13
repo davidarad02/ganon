@@ -77,14 +77,14 @@ static int connect_to_addr(const char *ip, int port, int timeout_sec) {
         return -1;
     }
 
-    struct timeval timeout;
-    timeout.tv_sec = timeout_sec;
-    timeout.tv_usec = 0;
-    if (0 != setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout))) {
-        LOG_WARN("Failed to set SO_RCVTIMEO: %s", strerror(errno));
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (-1 == flags) {
+        close(fd);
+        return -1;
     }
-    if (0 != setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout))) {
-        LOG_WARN("Failed to set SO_SNDTIMEO: %s", strerror(errno));
+    if (-1 == fcntl(fd, F_SETFL, flags | O_NONBLOCK)) {
+        close(fd);
+        return -1;
     }
 
     struct sockaddr_in addr;
