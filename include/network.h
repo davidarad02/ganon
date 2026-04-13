@@ -19,6 +19,7 @@ typedef struct socket_entry {
     network_t *net;
     char client_ip[INET_ADDRSTRLEN];
     int client_port;
+    int is_incoming;
 } socket_entry_t;
 
 struct network_t {
