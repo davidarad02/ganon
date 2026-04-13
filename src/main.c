@@ -59,11 +59,11 @@ int main(int argc, char *argv[]) {
     rc = SESSION__init(&g_session, g_node_id);
     FAIL_IF(E__SUCCESS != rc, rc);
 
-    rc = NETWORK__init(&g_network, &args, g_node_id, on_message, on_disconnected, on_connected, &g_session);
-    FAIL_IF(E__SUCCESS != rc, rc);
-
     SESSION__set_network(&g_session, &g_network);
     NETWORK__set_send_fn(&g_network, session_send_wrapper, &g_session);
+
+    rc = NETWORK__init(&g_network, &args, g_node_id, on_message, on_disconnected, on_connected, &g_session);
+    FAIL_IF(E__SUCCESS != rc, rc);
 
     LOG_INFO("Network initialized");
     LOG_INFO("Node ID: %d", g_node_id);
