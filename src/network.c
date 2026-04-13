@@ -77,7 +77,7 @@ static void broadcast_peer_info_to_others(network_t *net, int exclude_fd, uint32
     msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK(src_node_id);
     msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(0);
     msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->type = (msg_type_t)PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__PEER_INFO);
+    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__PEER_INFO);
     msg->data_length = PROTOCOL_FIELD_TO_NETWORK((uint32_t)(peer_count * sizeof(uint32_t)));
     msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
 
@@ -114,7 +114,7 @@ static void broadcast_peer_info_to_others(network_t *net, int exclude_fd, uint32
     free(peer_data);
 }
 
-static void broadcast_node_disconnect(network_t *net, uint32_t disconnected_node_id) {
+static void broadcast_node_disconnect(network_t *net, int exclude_fd, uint32_t disconnected_node_id) {
     (void)disconnected_node_id;
     if (NULL == net) {
         return;
@@ -129,14 +129,14 @@ static void broadcast_node_disconnect(network_t *net, uint32_t disconnected_node
     msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)g_node_id);
     msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(0);
     msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->type = (msg_type_t)PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__NODE_DISCONNECT);
+    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__NODE_DISCONNECT);
     msg->data_length = PROTOCOL_FIELD_TO_NETWORK(0);
     msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
 
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_t *client = net->clients;
     while (NULL != client) {
-        if (0 != client->peer_node_id) {
+        if (client->fd != exclude_fd && 0 != client->peer_node_id) {
             ssize_t sent = send(client->fd, header, sizeof(header), 0);
             if (0 > sent) {
                 LOG_WARNING("Failed to broadcast NODE_DISCONNECT to fd %d", client->fd);
@@ -223,7 +223,7 @@ static err_t send_peer_info(network_t *net, int fd, uint32_t src_node_id, uint32
     msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK(src_node_id);
     msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(dst_node_id);
     msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->type = (msg_type_t)PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__PEER_INFO);
+    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__PEER_INFO);
     msg->data_length = PROTOCOL_FIELD_TO_NETWORK((uint32_t)(peer_count * sizeof(uint32_t)));
     msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
 
@@ -278,7 +278,7 @@ static void send_node_init(int fd, uint32_t node_id) {
     msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK(node_id);
     msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(0);
     msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
-    msg->type = (msg_type_t)PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__NODE_INIT);
+    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__NODE_INIT);
     msg->data_length = PROTOCOL_FIELD_TO_NETWORK(0);
     msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
 
@@ -493,7 +493,7 @@ static void *socket_thread_func(void *arg) {
         }
         if (0 != entry->peer_node_id) {
             LOG_INFO("Node %u disconnected (fd=%d)", entry->peer_node_id, entry->fd);
-            broadcast_node_disconnect(net, entry->peer_node_id);
+            broadcast_node_disconnect(net, entry->fd, entry->peer_node_id);
             ROUTING__remove(&net->routing_table, entry->peer_node_id);
             ROUTING__remove_via_node(&net->routing_table, entry->peer_node_id);
         }
@@ -516,7 +516,7 @@ static void *socket_thread_func(void *arg) {
         if (E__SUCCESS != session_rc) {
             LOG_WARNING("Session ended for %s:%d", entry->client_ip, entry->client_port);
             if (0 != entry->peer_node_id) {
-                broadcast_node_disconnect(net, entry->peer_node_id);
+                broadcast_node_disconnect(net, entry->fd, entry->peer_node_id);
                 ROUTING__remove(&net->routing_table, entry->peer_node_id);
                 ROUTING__remove_via_node(&net->routing_table, entry->peer_node_id);
             }
