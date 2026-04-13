@@ -2,8 +2,12 @@
 #define GANON_PROTOCOL_H
 
 #include <stdint.h>
+#include <arpa/inet.h>
 
 #define GANON_PROTOCOL_MAGIC "GNN\0"
+
+#define PROTOCOL_FIELD_TO_NETWORK(x) htonl(x)
+#define PROTOCOL_FIELD_FROM_NETWORK(x) ntohl(x)
 
 typedef enum {
     E__MSG__FIRST = 0,
