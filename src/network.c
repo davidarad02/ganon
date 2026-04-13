@@ -72,6 +72,7 @@ static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_
         return;
     }
 
+    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)g_node_id);
     msg->ttl = PROTOCOL_FIELD_TO_NETWORK(ttl - 1);
 
     pthread_mutex_lock(&net->clients_mutex);
