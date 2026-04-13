@@ -251,7 +251,6 @@ static void *accept_thread_func(void *arg) {
         }
 
         entry->fd = client_fd;
-        entry->type = SOCKET_TYPE_CLIENT;
         entry->next = NULL;
 
         if (0 != pthread_mutex_lock(&net->clients_mutex)) {
@@ -306,7 +305,6 @@ static void *connect_thread_func(void *arg) {
     }
 
     entry->fd = fd;
-    entry->type = SOCKET_TYPE_OUTGOING;
     entry->next = NULL;
 
     if (0 != pthread_mutex_lock(&net->clients_mutex)) {
@@ -473,31 +471,4 @@ err_t network_shutdown(network_t *net) {
 
 l_cleanup:
     return rc;
-}
-
-void network_print_status(network_t *net) {
-    if (NULL == net) {
-        return;
-    }
-
-    LOG_INFO("=== Network Status ===");
-    LOG_INFO("Listen: %s:%d (fd=%d)", net->listen_addr.ip, net->listen_addr.port, net->listen_fd);
-
-    if (0 != pthread_mutex_lock(&net->clients_mutex)) {
-        return;
-    }
-
-    int client_count = 0;
-    socket_entry_t *current = net->clients;
-    while (NULL != current) {
-        client_count++;
-        const char *type_str = (SOCKET_TYPE_CLIENT == current->type) ? "client" : "outgoing";
-        LOG_INFO("  [%d] fd=%d type=%s", client_count, current->fd, type_str);
-        current = current->next;
-    }
-
-    pthread_mutex_unlock(&net->clients_mutex);
-
-    LOG_INFO("Total clients: %d", client_count);
-    LOG_INFO("=====================");
 }

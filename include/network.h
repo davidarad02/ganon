@@ -9,15 +9,8 @@
 #define NETWORK_BUFFER_SIZE 4096
 #define NETWORK_CONNECT_TIMEOUT_SEC 5
 
-typedef enum {
-    SOCKET_TYPE_LISTENER,
-    SOCKET_TYPE_CLIENT,
-    SOCKET_TYPE_OUTGOING,
-} socket_type_t;
-
 typedef struct socket_entry {
     int fd;
-    socket_type_t type;
     pthread_t thread;
     struct socket_entry *next;
 } socket_entry_t;
