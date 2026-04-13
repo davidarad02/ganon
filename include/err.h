@@ -17,6 +17,8 @@ typedef enum {
     E__ARGS__MISSING_REQUIRED_ARGUMENT,
     E__ARGS__INVALID_FORMAT,
     E__ARGS__UNKNOWN_FLAG,
+    E__ARGS__CONNECT_PARSING_ERROR,
+    E__ARGS__TOO_MANY_CONNECT_ENTRIES,
 } err_t;
 
-#endif
+#endif /* #ifndef GANON_ERR_H */

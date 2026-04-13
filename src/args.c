@@ -22,11 +22,13 @@ void args_print_help(const char *prog_name) {
     printf("\n");
     printf("Options:\n");
     printf("  -p, --port N    Listen port number (1-65535)\n");
+    printf("  -c, --connect   Comma-separated list of IP:port to connect (default port: 5555)\n");
     printf("  -h, --help      Show this help message\n");
     printf("\n");
     printf("Environment variables:\n");
     printf("  LISTEN_IP       Listen IP address (alternative to positional argument)\n");
     printf("  LISTEN_PORT     Listen port number (alternative to -p/--port)\n");
+    printf("  CONNECT         Comma-separated list of IP:port to connect (alternative to -c/--connect)\n");
 }
 
 static int is_help_flag(const char *arg) {
@@ -151,6 +153,114 @@ static int validate_ip(const char *ip) {
     return 1;
 }
 
+static err_t parse_connect_entry(const char *entry, addr_t *addr_out) {
+    err_t rc = E__SUCCESS;
+
+    if (NULL == entry || NULL == addr_out) {
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+
+    const char *colon = strchr(entry, ':');
+    char ip_part[16];
+    int ip_len;
+
+    if (NULL != colon) {
+        ip_len = (int)(colon - entry);
+        if (15 < ip_len) {
+            FAIL(E__ARGS__CONNECT_PARSING_ERROR);
+        }
+        strncpy(ip_part, entry, ip_len);
+        ip_part[ip_len] = '\0';
+
+        if (!validate_ip(ip_part)) {
+            LOG_ERROR("Invalid IP in connect entry: %s", ip_part);
+            FAIL(E__ARGS__CONNECT_PARSING_ERROR);
+        }
+
+        int port = parse_port(colon + 1);
+        if (0 == port) {
+            LOG_ERROR("Invalid port in connect entry: %s", colon + 1);
+            FAIL(E__ARGS__CONNECT_PARSING_ERROR);
+        }
+        addr_out->port = port;
+    } else {
+        ip_len = strlen(entry);
+        if (15 < ip_len) {
+            FAIL(E__ARGS__CONNECT_PARSING_ERROR);
+        }
+        strcpy(ip_part, entry);
+
+        if (!validate_ip(ip_part)) {
+            LOG_ERROR("Invalid IP in connect entry: %s", ip_part);
+            FAIL(E__ARGS__CONNECT_PARSING_ERROR);
+        }
+        addr_out->port = ARGS_CONNECT_DEFAULT_PORT;
+    }
+
+    addr_out->ip = malloc(ip_len + 1);
+    if (NULL == addr_out->ip) {
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+    strcpy(addr_out->ip, ip_part);
+
+l_cleanup:
+    return rc;
+}
+
+static err_t parse_connect_list(const char *list, addr_t *addrs_out, int *count_out, int max_count) {
+    err_t rc = E__SUCCESS;
+
+    if (NULL == list || NULL == addrs_out || NULL == count_out) {
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+
+    int count = 0;
+    char *list_copy = malloc(strlen(list) + 1);
+    if (NULL == list_copy) {
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+    strcpy(list_copy, list);
+
+    char *token = strtok(list_copy, ",");
+    while (NULL != token) {
+        if (count >= max_count) {
+            LOG_ERROR("Too many connect entries (max: %d)", max_count);
+            free(list_copy);
+            FAIL(E__ARGS__TOO_MANY_CONNECT_ENTRIES);
+        }
+
+        while (' ' == *token) {
+            token++;
+        }
+
+        char *end = token + strlen(token) - 1;
+        while (end > token && ' ' == *end) {
+            *end = '\0';
+            end--;
+        }
+
+        if ('\0' != *token) {
+            rc = parse_connect_entry(token, &addrs_out[count]);
+            if (E__SUCCESS != rc) {
+                for (int i = 0; i < count; i++) {
+                    free(addrs_out[i].ip);
+                }
+                free(list_copy);
+                goto l_cleanup;
+            }
+            count++;
+        }
+
+        token = strtok(NULL, ",");
+    }
+
+    free(list_copy);
+    *count_out = count;
+
+l_cleanup:
+    return rc;
+}
+
 err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
 
@@ -163,6 +273,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
         rc = E__INVALID_ARG_NULL_POINTER;
         goto l_cleanup;
     }
+    args_out->connect_count = 0;
 
 #ifdef __DEBUG__
     for (int i = 1; i < argc; i++) {
@@ -209,6 +320,7 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
 
     char *env_ip = get_env(ARGS_ENV_LISTEN_IP);
     char *env_port = get_env(ARGS_ENV_LISTEN_PORT);
+    char *env_connect = get_env(ARGS_ENV_CONNECT);
     if (NULL != env_ip) {
         LOG_TRACE("Using LISTEN_IP from environment: %s", env_ip);
         FAIL_IF(NULL != listen_ip,
@@ -225,6 +337,18 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
         }
         listen_port = port;
         port_set = 1;
+    }
+    if (NULL != env_connect) {
+        LOG_TRACE("Using CONNECT from environment: %s", env_connect);
+        int count = 0;
+        rc = parse_connect_list(env_connect, args_out->connect_addrs, &count, ARGS_MAX_CONNECT_ENTRIES);
+        if (E__SUCCESS != rc) {
+            for (int i = 0; i < count; i++) {
+                free(args_out->connect_addrs[i].ip);
+            }
+            goto l_cleanup;
+        }
+        args_out->connect_count = count;
     }
 
     for (int i = 1; i < argc; i++) {
@@ -263,11 +387,31 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 LOG_TRACE("Using port from CLI argument: %d", port);
                 listen_port = port;
                 port_set = 1;
+            } else if (0 == strcmp(arg, ARGS_FLAG_CONNECT_SHORT) || 0 == strcmp(arg, ARGS_FLAG_CONNECT_LONG)) {
+                LOG_TRACE("Connect flag detected: %s", arg);
+                if (i >= argc - 1) {
+#ifdef __DEBUG__
+                    args_print_usage(argv[0]);
+#endif /* #ifdef __DEBUG__ */
+                    FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+                }
+                i++;
+                int count = 0;
+                rc = parse_connect_list(argv[i], &args_out->connect_addrs[args_out->connect_count], &count,
+                                        ARGS_MAX_CONNECT_ENTRIES - args_out->connect_count);
+                if (E__SUCCESS != rc) {
+                    for (int j = 0; j < args_out->connect_count + count; j++) {
+                        free(args_out->connect_addrs[j].ip);
+                    }
+                    args_out->connect_count = 0;
+                    goto l_cleanup;
+                }
+                args_out->connect_count += count;
 #ifdef __DEBUG__
             } else if (count_v_flags(arg) > 0) {
                 continue;
 #endif /* #ifdef __DEBUG__ */
-        } else {
+            } else {
                 LOG_ERROR("Unknown argument: %s", arg);
                 FAIL(E__ARGS__UNKNOWN_FLAG);
             }
@@ -286,8 +430,8 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
         FAIL(E__ARGS__INVALID_FORMAT);
     }
 
-    args_out->listen_ip = listen_ip;
-    args_out->listen_port = listen_port;
+    args_out->listen_addr.ip = listen_ip;
+    args_out->listen_addr.port = listen_port;
 
 l_cleanup:
     return rc;

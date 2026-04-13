@@ -43,8 +43,11 @@ int main(int argc, char *argv[]) {
     FAIL_IF(E__SUCCESS != rc, rc);
 
     LOG_DEBUG("Starting main()");
-    LOG_INFO("Listen IP: %s", args.listen_ip);
-    LOG_INFO("Listen Port: %d", args.listen_port);
+    LOG_INFO("Listen IP: %s", args.listen_addr.ip);
+    LOG_INFO("Listen Port: %d", args.listen_addr.port);
+    for (int i = 0; i < args.connect_count; i++) {
+        LOG_INFO("Connect[%d]: %s:%d", i, args.connect_addrs[i].ip, args.connect_addrs[i].port);
+    }
 
 l_cleanup:
     return (int)rc;

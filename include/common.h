@@ -39,4 +39,4 @@
         } \
     } while (0)
 
-#endif
+#endif /* #ifndef GANON_COMMON_H */
