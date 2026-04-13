@@ -131,24 +131,34 @@ static void broadcast_peer_info_to_others(network_t *net, int exclude_fd, uint32
 }
 
 static void broadcast_node_disconnect(network_t *net, int exclude_fd, uint32_t disconnected_node_id) {
-    (void)disconnected_node_id;
     if (NULL == net) {
         return;
     }
+
+    uint8_t header[PROTOCOL_HEADER_SIZE];
+    memset(header, 0, sizeof(header));
+
+    protocol_msg_t *msg = (protocol_msg_t *)header;
+    memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
+    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK(disconnected_node_id);
+    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)g_node_id);
+    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__NODE_DISCONNECT);
+    msg->data_length = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
 
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_t *client = net->clients;
     while (NULL != client) {
         if (client->fd != exclude_fd && 0 != client->peer_node_id) {
-            transport_t *t = TRANSPORT__create(client->fd);
-            if (NULL != t) {
-                err_t rc = SESSION__send_packet(t, (uint32_t)g_node_id, 0, MSG__NODE_DISCONNECT, NULL, 0);
-                if (E__SUCCESS != rc) {
-                    LOG_WARNING("Failed to broadcast NODE_DISCONNECT to fd %d", client->fd);
-                } else {
-                    LOG_DEBUG("Broadcast NODE_DISCONNECT for node %u to node %u", disconnected_node_id, client->peer_node_id);
-                }
-                TRANSPORT__destroy(t);
+            uint8_t hdr[PROTOCOL_HEADER_SIZE];
+            memcpy(hdr, header, PROTOCOL_HEADER_SIZE);
+            err_t rc = send_raw_packet(client->fd, hdr, NULL, 0);
+            if (E__SUCCESS != rc) {
+                LOG_WARNING("Failed to broadcast NODE_DISCONNECT to fd %d", client->fd);
+            } else {
+                LOG_DEBUG("Broadcast NODE_DISCONNECT for node %u to node %u", disconnected_node_id, client->peer_node_id);
             }
         }
         client = client->next;
