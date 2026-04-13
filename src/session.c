@@ -62,12 +62,11 @@ static err_t SESSION__handle_node_init(routing_table_t *rt, int fd, uint32_t ori
 
     LOG_DEBUG("Received NODE_INIT from node %u (orig_src=%u, msg_id=%u, ttl=%u, data_len=%u)", src_node_id, orig_src_node_id, message_id, ttl, data_length);
 
-    if (ROUTING__is_direct(rt, src_node_id)) {
-        LOG_WARNING("Node %u is already connected, rejecting", src_node_id);
-        FAIL(E__SESSION__CONNECTION_REJECTED);
-    }
-
     if (src_node_id == orig_src_node_id) {
+        if (ROUTING__is_direct(rt, src_node_id)) {
+            LOG_WARNING("Node %u is already connected, rejecting", src_node_id);
+            FAIL(E__SESSION__CONNECTION_REJECTED);
+        }
         rc = ROUTING__add_direct(rt, src_node_id, fd);
     } else {
         LOG_DEBUG("NODE_INIT via broadcast (src=%u, orig_src=%u), adding as via_hop", src_node_id, orig_src_node_id);
