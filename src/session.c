@@ -33,7 +33,7 @@ l_cleanup:
     return rc;
 }
 
-static err_t SESSION__handle_peer_info(routing_table_t *rt, uint32_t orig_src_node_id, uint32_t src_node_id, uint32_t message_id, uint32_t ttl, uint32_t data_length, uint8_t *data, uint32_t *out_node_id) {
+static err_t SESSION__handle_peer_info(routing_table_t *rt, uint32_t orig_src_node_id, uint32_t src_node_id, uint32_t message_id, uint32_t ttl, uint32_t data_length, uint8_t *data, uint32_t *out_node_id, uint32_t **out_peer_list, size_t *out_peer_count) {
     err_t rc = E__SUCCESS;
 
     (void)orig_src_node_id;
@@ -45,6 +45,16 @@ static err_t SESSION__handle_peer_info(routing_table_t *rt, uint32_t orig_src_no
     uint32_t *peer_list = (uint32_t *)data;
     size_t peer_count = data_length / sizeof(uint32_t);
 
+    uint32_t *learned_peers = NULL;
+    size_t learned_count = 0;
+
+    if (peer_count > 0) {
+        learned_peers = malloc(peer_count * sizeof(uint32_t));
+        if (NULL == learned_peers) {
+            LOG_WARNING("Failed to allocate learned peers list");
+        }
+    }
+
     LOG_DEBUG("Peer list from node %u contains %zu peers:", src_node_id, peer_count);
     for (size_t i = 0; i < peer_count; i++) {
         uint32_t peer_id = PROTOCOL_FIELD_FROM_NETWORK(peer_list[i]);
@@ -52,15 +62,26 @@ static err_t SESSION__handle_peer_info(routing_table_t *rt, uint32_t orig_src_no
         rc = ROUTING__add_via_hop(rt, peer_id, src_node_id);
         if (E__SUCCESS != rc) {
             LOG_WARNING("Failed to add route to node %u via node %u", peer_id, src_node_id);
+        } else if (NULL != learned_peers) {
+            learned_peers[learned_count++] = peer_id;
         }
     }
 
     (void)out_node_id;
 
+    if (NULL != out_peer_list) {
+        *out_peer_list = learned_peers;
+    } else if (NULL != learned_peers) {
+        free(learned_peers);
+    }
+    if (NULL != out_peer_count) {
+        *out_peer_count = learned_count;
+    }
+
     return rc;
 }
 
-static err_t SESSION__handle_message(routing_table_t *rt, int fd, uint32_t orig_src_node_id, uint32_t src_node_id, uint32_t dst_node_id, uint32_t message_id, msg_type_t type, uint32_t ttl, uint32_t data_length, uint8_t *data, uint32_t *out_node_id) {
+static err_t SESSION__handle_message(routing_table_t *rt, int fd, uint32_t orig_src_node_id, uint32_t src_node_id, uint32_t dst_node_id, uint32_t message_id, msg_type_t type, uint32_t ttl, uint32_t data_length, uint8_t *data, uint32_t *out_node_id, uint32_t **out_peer_list, size_t *out_peer_count) {
     err_t rc = E__SUCCESS;
 
     (void)orig_src_node_id;
@@ -74,7 +95,7 @@ static err_t SESSION__handle_message(routing_table_t *rt, int fd, uint32_t orig_
         FAIL_IF(E__SUCCESS != rc, E__SESSION__HANDLE_NODE_INIT_FAILED);
         break;
     case MSG__PEER_INFO:
-        rc = SESSION__handle_peer_info(rt, orig_src_node_id, src_node_id, message_id, ttl, data_length, data, out_node_id);
+        rc = SESSION__handle_peer_info(rt, orig_src_node_id, src_node_id, message_id, ttl, data_length, data, out_node_id, out_peer_list, out_peer_count);
         FAIL_IF(E__SUCCESS != rc, E__SESSION__HANDLE_MESSAGE_FAILED);
         break;
     default:
@@ -86,10 +107,12 @@ l_cleanup:
     return rc;
 }
 
-err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *peer_node_id, uint8_t *out_header, size_t header_len) {
+err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *peer_node_id, uint8_t *out_header, size_t header_len, uint32_t **out_peer_list, size_t *out_peer_count) {
     err_t rc = E__SUCCESS;
     uint8_t *data = NULL;
     uint32_t discovered_node_id = 0;
+    uint32_t *learned_peers = NULL;
+    size_t learned_count = 0;
 
     VALIDATE_ARGS(rt, t);
 
@@ -136,7 +159,7 @@ err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *pe
         }
     }
 
-    rc = SESSION__handle_message(rt, fd, orig_src_node_id, src_node_id, dst_node_id, message_id, type, ttl, data_length, data, &discovered_node_id);
+    rc = SESSION__handle_message(rt, fd, orig_src_node_id, src_node_id, dst_node_id, message_id, type, ttl, data_length, data, &discovered_node_id, &learned_peers, &learned_count);
     FAIL_IF(E__SUCCESS != rc, E__SESSION__HANDLE_MESSAGE_FAILED);
 
     if (NULL != peer_node_id && 0 != discovered_node_id) {
@@ -147,7 +170,16 @@ err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *pe
         memcpy(out_header, header_buffer, PROTOCOL_HEADER_SIZE);
     }
 
+    if (NULL != out_peer_list && NULL != learned_peers) {
+        *out_peer_list = learned_peers;
+        learned_peers = NULL;
+    }
+    if (NULL != out_peer_count) {
+        *out_peer_count = learned_count;
+    }
+
 l_cleanup:
     FREE(data);
+    FREE(learned_peers);
     return rc;
 }

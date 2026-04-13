@@ -273,6 +273,14 @@ typedef enum {
 5. S sends PEER_INFO to B listing all peers (including A)
 6. B adds route to A via S
 
+**PEER_INFO Propagation (route learning):**
+When a node receives PEER_INFO, it extracts the peer list and broadcasts a NEW PEER_INFO to all its OTHER direct peers (excluding the sender). This propagates learned routes through the network.
+
+Example: Node 2 receives PEER_INFO from Node 3 listing Node 4
+- Node 2 adds VIA_HOP route to Node 4 via Node 3
+- Node 2 broadcasts PEER_INFO (listing Node 4) to all its other peers (Node 1, etc.)
+- Node 1 then learns it can reach Node 4 via Node 2
+
 ## Routing Table
 
 ### Overview
@@ -601,7 +609,7 @@ client.set_on_reconnected(lambda: print("Reconnected!"))
 #### Python Architecture
 
 - **Transport**: `Transport` class wraps socket recv/send with `recv_all`/`send_all` helpers
-- **Protocol**: `ProtocolHeader` and `ProtocolMessage` construct structs parse the wire format (24 bytes)
+- **Protocol**: `ProtocolHeader` and `ProtocolMessage` construct structs parse the wire format (32 bytes)
 - **RoutingTable**: Maps node IDs to route entries (DIRECT or VIA_HOP)
 - **Protocol Loop**: `_protocol_loop()` reads and parses protocol messages
 - **Process**: `_process()` dispatches to `_handle_node_init()` based on message type
@@ -637,23 +645,24 @@ client.set_on_reconnected(lambda: print("Reconnected!"))
 ## TODO
 
 - [ ] Implement forwarding of non-direct messages via `ROUTING__send_to_node()`
-## TODO
-
-- [ ] Implement PEER_INFO propagation: when a node receives PEER_INFO, it should broadcast the learned routes to its OTHER direct peers
 - [ ] Test multi-node mesh topology with various connection patterns
 - [ ] Update Python client with disconnect routing cleanup
 - [ ] Build and test with multiple nodes
 
-### Known Mesh Networking Edge Cases
+## PEER_INFO Propagation
 
-**Scenario: Node 1 ↔ Node 2, Node 3 ↔ Node 4, Node 2 connects to Node 3**
+When a node receives PEER_INFO, it extracts the peer list and broadcasts a NEW PEER_INFO to all its OTHER direct peers (excluding the sender). This propagates learned routes through the network.
 
+**Implementation:**
+- `SESSION__process()` now returns `out_peer_list` and `out_peer_count` for learned peers from PEER_INFO
+- `broadcast_peer_info_to_others()` sends PEER_INFO to all connected peers except the sender
+- `socket_thread_func` calls `broadcast_peer_info_to_others()` after learning new routes
+
+**Example: Node 1 ↔ Node 2, Node 3 ↔ Node 4, Node 2 connects to Node 3**
 1. Node 2→Node 3: NODE_INIT
 2. Node 3 broadcasts to Node 4: "Node 2 available via Node 3"
 3. Node 3→Node 2: PEER_INFO (listing Node 4)
 4. Node 2 adds route to Node 4 via Node 3
-
-**What's missing:**
-- Node 2 should broadcast the newly learned routes (Node 4) to its OTHER peers (Node 1)
-- Node 1 should then learn it can reach Node 3 and Node 4 via Node 2
-- This requires propagating PEER_INFO data further into the network
+5. **Node 2 broadcasts PEER_INFO (listing Node 4) to Node 1**
+6. **Node 1 adds route to Node 4 via Node 2**
+7. **Node 1 adds route to Node 3 via Node 2**

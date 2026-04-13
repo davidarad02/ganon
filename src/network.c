@@ -58,6 +58,57 @@ static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_
     pthread_mutex_unlock(&net->clients_mutex);
 }
 
+static void broadcast_peer_info_to_others(network_t *net, int exclude_fd, uint32_t src_node_id, uint32_t *peer_list, size_t peer_count) {
+    if (NULL == net || 0 == peer_count) {
+        return;
+    }
+
+    uint8_t header[PROTOCOL_HEADER_SIZE];
+    memset(header, 0, sizeof(header));
+
+    protocol_msg_t *msg = (protocol_msg_t *)header;
+    memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
+    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK(src_node_id);
+    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK(src_node_id);
+    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->type = (msg_type_t)PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__PEER_INFO);
+    msg->data_length = PROTOCOL_FIELD_TO_NETWORK((uint32_t)(peer_count * sizeof(uint32_t)));
+    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
+
+    uint8_t *peer_data = malloc(peer_count * sizeof(uint32_t));
+    if (NULL == peer_data) {
+        LOG_ERROR("Failed to allocate peer data for broadcast");
+        return;
+    }
+
+    for (size_t i = 0; i < peer_count; i++) {
+        ((uint32_t *)peer_data)[i] = PROTOCOL_FIELD_TO_NETWORK(peer_list[i]);
+    }
+
+    pthread_mutex_lock(&net->clients_mutex);
+    socket_entry_t *client = net->clients;
+    while (NULL != client) {
+        if (client->fd != exclude_fd && 0 != client->peer_node_id) {
+            ssize_t sent = send(client->fd, header, sizeof(header), 0);
+            if (0 > sent) {
+                LOG_WARNING("Failed to broadcast PEER_INFO header to fd %d", client->fd);
+            } else {
+                sent = send(client->fd, peer_data, peer_count * sizeof(uint32_t), 0);
+                if (0 > sent) {
+                    LOG_WARNING("Failed to broadcast PEER_INFO data to fd %d", client->fd);
+                } else {
+                    LOG_DEBUG("Broadcast PEER_INFO (via node %u) to node %u: %zu peers", src_node_id, client->peer_node_id, peer_count);
+                }
+            }
+        }
+        client = client->next;
+    }
+    pthread_mutex_unlock(&net->clients_mutex);
+
+    free(peer_data);
+}
+
 static err_t send_peer_info(network_t *net, int fd, uint32_t src_node_id, uint32_t dst_node_id) {
     err_t rc = E__SUCCESS;
 
@@ -313,7 +364,24 @@ static void *socket_thread_func(void *arg) {
         uint32_t prev_peer_node_id = entry->peer_node_id;
         uint8_t header_buffer[PROTOCOL_HEADER_SIZE];
         memset(header_buffer, 0, sizeof(header_buffer));
-        while (E__SUCCESS == SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, header_buffer, sizeof(header_buffer))) {
+        while (true) {
+            uint32_t *learned_peers = NULL;
+            size_t learned_count = 0;
+            err_t rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, header_buffer, sizeof(header_buffer), &learned_peers, &learned_count);
+            if (E__SUCCESS != rc) {
+                break;
+            }
+
+            protocol_msg_t *hdr = (protocol_msg_t *)header_buffer;
+            msg_type_t msg_type = (msg_type_t)PROTOCOL_FIELD_FROM_NETWORK(hdr->type);
+
+            if (msg_type == MSG__PEER_INFO && NULL != learned_peers && 0 != learned_count) {
+                LOG_DEBUG("Propagating %zu learned peers from PEER_INFO (via node %u) to other direct peers", learned_count, entry->peer_node_id);
+                broadcast_peer_info_to_others(net, entry->fd, (uint32_t)g_node_id, learned_peers, learned_count);
+                free(learned_peers);
+                learned_peers = NULL;
+            }
+
             if (prev_peer_node_id != entry->peer_node_id && 0 != entry->peer_node_id) {
                 LOG_INFO("Node %u connected (fd=%d), broadcasting to network and sending peer info", entry->peer_node_id, entry->fd);
                 broadcast_to_others(net, entry->fd, entry->peer_node_id, header_buffer, NULL, 0);
@@ -338,13 +406,22 @@ static void *socket_thread_func(void *arg) {
     }
 
     while (true) {
-        err_t session_rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, NULL, 0);
+        uint32_t *learned_peers = NULL;
+        size_t learned_count = 0;
+        err_t session_rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, NULL, 0, &learned_peers, &learned_count);
         if (E__SUCCESS != session_rc) {
             LOG_WARNING("Session ended for %s:%d", entry->client_ip, entry->client_port);
             if (0 != entry->peer_node_id) {
                 ROUTING__remove(&net->routing_table, entry->peer_node_id);
                 ROUTING__remove_via_node(&net->routing_table, entry->peer_node_id);
             }
+        }
+
+        if (NULL != learned_peers && 0 != learned_count) {
+            LOG_DEBUG("Propagating %zu learned peers from PEER_INFO (via node %u) to other direct peers", learned_count, entry->peer_node_id);
+            broadcast_peer_info_to_others(net, entry->fd, (uint32_t)g_node_id, learned_peers, learned_count);
+            free(learned_peers);
+            learned_peers = NULL;
         }
 
         TRANSPORT__destroy(t);
