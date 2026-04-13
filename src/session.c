@@ -10,25 +10,25 @@
 #include "transport.h"
 
 static void log_received_packet(const protocol_msg_t *msg, uint32_t data_len) {
-    LOG_TRACE("Received packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u",
-              PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id),
-              PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id),
-              PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id),
-              PROTOCOL_FIELD_FROM_NETWORK(msg->message_id),
-              PROTOCOL_FIELD_FROM_NETWORK(msg->type),
-              PROTOCOL_FIELD_FROM_NETWORK(msg->ttl),
-              data_len);
+    LOG_TRACE("RECV msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u",
+              msg->orig_src_node_id,
+              msg->src_node_id,
+              msg->dst_node_id,
+              msg->message_id,
+              msg->type,
+              data_len,
+              msg->ttl);
 }
 
 static void log_sent_packet(const protocol_msg_t *msg, uint32_t data_len) {
-    LOG_TRACE("Sent packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u",
-              PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id),
-              PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id),
-              PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id),
-              PROTOCOL_FIELD_FROM_NETWORK(msg->message_id),
-              PROTOCOL_FIELD_FROM_NETWORK(msg->type),
-              PROTOCOL_FIELD_FROM_NETWORK(msg->ttl),
-              data_len);
+    LOG_TRACE("SEND msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u",
+              msg->orig_src_node_id,
+              msg->src_node_id,
+              msg->dst_node_id,
+              msg->message_id,
+              msg->type,
+              data_len,
+              msg->ttl);
 }
 
 static err_t send_peer_info(session_t *s, uint32_t dst_node_id) {
@@ -142,7 +142,7 @@ static void broadcast_to_others(session_t *s, uint32_t exclude_node_id, const pr
     uint8_t header[PROTOCOL_HEADER_SIZE];
     memcpy(header, msg, PROTOCOL_HEADER_SIZE);
     protocol_msg_t *hdr = (protocol_msg_t *)header;
-    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(hdr->ttl);
+    uint32_t ttl = hdr->ttl;
     if (ttl > 0) {
         hdr->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)s->node_id);
         hdr->ttl = PROTOCOL_FIELD_TO_NETWORK(ttl - 1);
@@ -221,8 +221,8 @@ static void broadcast_node_disconnect(session_t *s, uint32_t disconnected_node_i
 static err_t forward_message(session_t *s, const protocol_msg_t *msg, const uint8_t *data, size_t data_len) {
     err_t rc = E__SUCCESS;
 
-    uint32_t dst_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
-    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
+    uint32_t dst_node_id = msg->dst_node_id;
+    uint32_t ttl = msg->ttl;
 
     if (dst_node_id == (uint32_t)s->node_id) {
         return E__SUCCESS;
@@ -432,12 +432,12 @@ void SESSION__on_message(session_t *s, transport_t *t, const uint8_t *buf, size_
         return;
     }
 
-    uint32_t orig_src = PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id);
-    uint32_t src = PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id);
-    uint32_t dst = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
-    uint32_t data_length = PROTOCOL_FIELD_FROM_NETWORK(msg->data_length);
-    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
-    msg_type_t type = (msg_type_t)PROTOCOL_FIELD_FROM_NETWORK(msg->type);
+    uint32_t orig_src = msg->orig_src_node_id;
+    uint32_t src = msg->src_node_id;
+    uint32_t dst = msg->dst_node_id;
+    uint32_t data_length = msg->data_length;
+    uint32_t ttl = msg->ttl;
+    msg_type_t type = (msg_type_t)msg->type;
 
     log_received_packet(msg, data_length);
 
