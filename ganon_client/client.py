@@ -84,6 +84,7 @@ class GanonClient:
         self._running = False
         self._lock = threading.Lock()
         self._recv_thread: Optional[threading.Thread] = None
+        self._reconnecting = False
 
         self._on_data_received: Optional[Callable[[bytes], None]] = None
         self._on_disconnected: Optional[Callable[[], None]] = None
@@ -203,8 +204,10 @@ class GanonClient:
                     pass
                 self._sock = None
 
-        if self._running:
+        if self._running and not self._reconnecting:
+            self._reconnecting = True
             self._do_reconnect()
+            self._reconnecting = False
 
     def _do_reconnect(self):
         retry = 0
@@ -271,6 +274,7 @@ class GanonClient:
     def disconnect(self):
         with self._lock:
             self._running = False
+            self._reconnecting = False
 
             if self._sock is not None:
                 self._info("Disconnecting from %s:%d", self.ip, self.port)
