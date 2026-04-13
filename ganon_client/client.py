@@ -158,9 +158,10 @@ class GanonClient:
                     retry + 1,
                 )
 
-            if self._connect() is not None:
+            sock = self._connect()
+            if sock is not None:
                 with self._lock:
-                    self._sock = self._sock
+                    self._sock = sock
                 self._info("Reconnected to %s:%d", self.ip, self.port)
                 if self._on_reconnected:
                     self._on_reconnected()
