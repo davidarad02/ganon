@@ -440,7 +440,7 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
         } else {
             int r = parse_int(env_reconnect_retries);
             if (0 > r) {
-                LOG_ERROR("Invalid RECONNECT_RETRIES value: %s (must be 0, max, or always)", env_reconnect_retries);
+                LOG_ERROR("Invalid RECONNECT_RETRIES value: %s (must be 0, max, always, or a non-negative integer)", env_reconnect_retries);
                 FAIL(E__ARGS__INVALID_RECONNECT_RETRIES);
             }
             reconnect_retries = r;
@@ -576,7 +576,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 } else {
                     int r = parse_int(argv[i]);
                     if (0 > r) {
-                        LOG_ERROR("Invalid reconnect retries value: %s (must be 0, max, or always)", argv[i]);
+                        LOG_ERROR("Invalid reconnect retries value: %s (must be 0, max, always, or a non-negative integer)", argv[i]);
                         FAIL(E__ARGS__INVALID_RECONNECT_RETRIES);
                     }
                     reconnect_retries = r;

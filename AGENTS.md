@@ -50,7 +50,7 @@ Options:
   -c, --connect   Comma-separated list of IP:port to connect (default port: 5555)
   -i, --node-id N Node ID (0 or greater, mandatory)
   -w, --connect-timeout N  Connect timeout in seconds (default: 5)
-  --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable)
+  --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable, max/always for unlimited)
   --reconnect-delay N       Delay between reconnect attempts (default: 5 seconds)
   -h, --help      Show this help message
 
@@ -60,7 +60,7 @@ Environment variables:
   CONNECT         Comma-separated list of IP:port (alternative to -c/--connect)
   NODE_ID         Node ID (alternative to -i/--node-id)
   CONNECT_TIMEOUT  Connect timeout in seconds (alternative to -w/--connect-timeout)
-  RECONNECT_RETRIES   Reconnect retries (alternative to --reconnect-retries)
+  RECONNECT_RETRIES   Reconnect retries: 0 to disable, max/always for unlimited (alternative to --reconnect-retries)
   RECONNECT_DELAY     Delay between reconnect attempts (alternative to --reconnect-delay)
   LOG_LEVEL       Log level: info, debug, or trace (alternative to -v flags)
 ```
@@ -159,7 +159,10 @@ typedef struct {
     log_level_t log_level;            // Log level (debug builds only)
     addr_t connect_addrs[64];         // Connection targets
     int connect_count;                // Number of connection targets
-    int node_id;                      // This node's ID (mandatory)
+    int node_id;                     // This node's ID (mandatory)
+    int connect_timeout;              // Connect timeout in seconds
+    int reconnect_retries;            // Reconnect retries (-1 for unlimited)
+    int reconnect_delay;             // Delay between reconnect attempts
 } args_t;
 ```
 
@@ -177,6 +180,9 @@ struct network_t {
     int connect_count;                // Number of targets
     pthread_t *connect_threads;       // Outgoing connection threads
     int connect_thread_count;         // Count of connect threads
+    int connect_timeout;              // Connect timeout in seconds
+    int reconnect_retries;            // Reconnect retries (-1 for unlimited)
+    int reconnect_delay;             // Delay between reconnect attempts
 };
 ```
 
