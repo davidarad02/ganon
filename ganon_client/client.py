@@ -363,6 +363,35 @@ class GanonClient:
                 raise ConnectionError("Not connected to %s:%d" % (self.ip, self.port))
             return self._sock.send(data)
 
+    def send_to_node(self, dst_node_id: int, data: bytes) -> bool:
+        with self._lock:
+            if self._sock is None:
+                raise ConnectionError("Not connected to %s:%d" % (self.ip, self.port))
+            return self._send_protocol_message(dst_node_id, b'\x00\x00\x00\x00', data)
+
+    def _send_protocol_message(self, dst_node_id: int, msg_type: bytes, data: bytes) -> bool:
+        if self._sock is None:
+            return False
+
+        header = ProtocolHeader.build({
+            "magic": "GNN",
+            "orig_src_node_id": self.node_id,
+            "src_node_id": self.node_id,
+            "dst_node_id": dst_node_id,
+            "message_id": 0,
+            "type": struct.unpack(">I", msg_type)[0],
+            "data_length": len(data),
+            "ttl": DEFAULT_TTL,
+        })
+
+        try:
+            self._sock.sendall(header + data)
+            self._debug("Sent message to node %d (type=%s, data_len=%d)", dst_node_id, msg_type.hex(), len(data))
+            return True
+        except Exception as e:
+            self._warning("Failed to send to node %d: %s", dst_node_id, e)
+            return False
+
     def recv(self, bufsize: int = 4096) -> bytes:
         with self._lock:
             if self._sock is None:
