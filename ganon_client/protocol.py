@@ -5,8 +5,7 @@ GANON_PROTOCOL_MAGIC = b"GNN\0"
 
 
 class MsgType(IntEnum):
-    FIRST = 0
-    LAST = 1
+    PING = 0
 
 
 ProtocolHeader = ct.Struct(

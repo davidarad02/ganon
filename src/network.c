@@ -14,6 +14,7 @@
 #include "common.h"
 #include "logging.h"
 #include "network.h"
+#include "session.h"
 
 int g_node_id = -1;
 
@@ -162,7 +163,6 @@ static void socket_entry_remove_locked(network_t *net, socket_entry_t *entry) {
 static void *socket_thread_func(void *arg) {
     socket_entry_t *entry = (socket_entry_t *)arg;
     network_t *net = entry->net;
-    char buffer[NETWORK_BUFFER_SIZE];
 
     if (entry->is_incoming) {
         LOG_INFO("Socket connected (fd=%d) from %s:%d", entry->fd, entry->client_ip, entry->client_port);
@@ -171,29 +171,7 @@ static void *socket_thread_func(void *arg) {
     }
 
     if (0 != entry->is_incoming) {
-        while (true) {
-            ssize_t bytes_read = recv(entry->fd, buffer, sizeof(buffer) - 1, 0);
-            if (0 > bytes_read) {
-                if (EAGAIN == errno || EWOULDBLOCK == errno) {
-                    continue;
-                }
-                LOG_WARNING("recv failed on fd %d: %s", entry->fd, strerror(errno));
-                break;
-            } else if (0 == bytes_read) {
-                LOG_WARNING("Socket disconnected (fd=%d)", entry->fd);
-                break;
-            }
-
-            buffer[bytes_read] = '\0';
-            LOG_TRACE("Received %zd bytes from fd %d", bytes_read, entry->fd);
-
-            ssize_t bytes_sent = send(entry->fd, buffer, (size_t)bytes_read, 0);
-            if (0 > bytes_sent) {
-                LOG_WARNING("send failed on fd %d: %s", entry->fd, strerror(errno));
-                break;
-            }
-            LOG_TRACE("Sent %zd bytes to fd %d", bytes_sent, entry->fd);
-        }
+        SESSION__protocol_loop(entry->fd);
         shutdown(entry->fd, SHUT_RDWR);
         close(entry->fd);
         pthread_mutex_lock(&net->clients_mutex);
@@ -204,32 +182,17 @@ static void *socket_thread_func(void *arg) {
     }
 
     while (true) {
-        while (true) {
-            ssize_t bytes_read = recv(entry->fd, buffer, sizeof(buffer) - 1, 0);
-            if (0 > bytes_read) {
-                if (EAGAIN == errno || EWOULDBLOCK == errno) {
-                    continue;
-                }
-                LOG_WARNING("recv failed on fd %d: %s", entry->fd, strerror(errno));
-                break;
-            } else if (0 == bytes_read) {
-                LOG_WARNING("Socket disconnected (fd=%d)", entry->fd);
-                break;
-            }
-
-            buffer[bytes_read] = '\0';
-            LOG_TRACE("Received %zd bytes from fd %d", bytes_read, entry->fd);
-
-            ssize_t bytes_sent = send(entry->fd, buffer, (size_t)bytes_read, 0);
-            if (0 > bytes_sent) {
-                LOG_WARNING("send failed on fd %d: %s", entry->fd, strerror(errno));
-                break;
-            }
-            LOG_TRACE("Sent %zd bytes to fd %d", bytes_sent, entry->fd);
+        err_t session_rc = SESSION__protocol_loop(entry->fd);
+        if (E__SUCCESS != session_rc) {
+            LOG_WARNING("Session ended for %s:%d", entry->client_ip, entry->client_port);
         }
 
         shutdown(entry->fd, SHUT_RDWR);
         close(entry->fd);
+
+        if (E__SUCCESS == session_rc) {
+            break;
+        }
 
         int reconnected = 0;
         int retry = 0;

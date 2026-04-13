@@ -10,10 +10,7 @@
 #define PROTOCOL_FIELD_FROM_NETWORK(x) ntohl(x)
 
 typedef enum {
-    E__MSG__FIRST = 0,
-
-    /* keep last */
-    E__MSG__LAST,
+    MSG__PING = 0,
 } msg_type_t;
 
 typedef struct {

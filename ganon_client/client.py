@@ -6,6 +6,8 @@ import time
 from datetime import datetime
 from typing import Callable, Optional
 
+from protocol import GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader
+
 LOG_LEVEL_TRACE = 0
 LOG_LEVEL_DEBUG = 1
 LOG_LEVEL_INFO = 2
@@ -166,6 +168,56 @@ class GanonClient:
                 self._on_disconnected()
             self._handle_disconnect()
 
+    def _handle_ping(self, node_id: int, message_id: int, data: bytes):
+        self._debug("Received PING from node %d (msg_id=%d, data_len=%d)", node_id, message_id, len(data))
+
+    def _handle_message(self, header: dict, data: bytes):
+        node_id = header["node_id"]
+        message_id = header["message_id"]
+        msg_type = MsgType(header["type"])
+        data_length = header["data_length"]
+
+        self._info("Protocol: node_id=%d, msg_id=%d, type=%s, data_len=%d", node_id, message_id, msg_type.name, data_length)
+
+        if msg_type == MsgType.PING:
+            self._handle_ping(node_id, message_id, data)
+        else:
+            self._warning("Unknown message type: %d", header["type"])
+
+    def _protocol_loop(self):
+        header_size = 20
+        while self._running:
+            try:
+                header_data = b""
+                while len(header_data) < header_size:
+                    chunk = self._sock.recv(header_size - len(header_data))
+                    if not chunk:
+                        return False
+                    header_data += chunk
+
+                header = ProtocolHeader.parse(header_data)
+
+                if header.magic != "GNN\x00":
+                    self._warning("Invalid magic: expected %s, got %.4s", GANON_PROTOCOL_MAGIC, header.magic)
+                    return False
+
+                data_length = header.data_length
+                data = b""
+                while len(data) < data_length:
+                    chunk = self._sock.recv(data_length - len(data))
+                    if not chunk:
+                        return False
+                    data += chunk
+
+                self._handle_message(header, data)
+
+            except socket.timeout:
+                continue
+            except OSError:
+                return False
+
+        return True
+
     def _handle_disconnect(self):
         with self._lock:
             if self._sock:
@@ -226,7 +278,7 @@ class GanonClient:
             retry += 1
 
     def _start_recv_thread(self):
-        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread = threading.Thread(target=self._protocol_loop, daemon=True)
         self._recv_thread.start()
 
     def connect(self) -> bool:
