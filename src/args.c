@@ -25,7 +25,7 @@ void args_print_help(const char *prog_name) {
     printf("  -c, --connect   Comma-separated list of IP:port to connect (default port: 5555)\n");
     printf("  -i, --node-id N Node ID (0 or greater)\n");
     printf("  -w, --connect-timeout N  Connect timeout in seconds (default: 5)\n");
-    printf("  --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable, max/always for unlimited)\n");
+    printf("  --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable, always for unlimited)\n");
     printf("  --reconnect-delay N       Delay between reconnect attempts (default: 5 seconds)\n");
     printf("  -h, --help      Show this help message\n");
     printf("\n");
@@ -435,12 +435,12 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
     if (NULL != env_reconnect_retries) {
         LOG_TRACE("Using RECONNECT_RETRIES from environment: %s", env_reconnect_retries);
         FAIL_IF(0 != reconnect_retries_set, E__ARGS__CONFLICTING_ARGUMENTS);
-        if (0 == strcmp(env_reconnect_retries, "max") || 0 == strcmp(env_reconnect_retries, "always")) {
+        if (0 == strcmp(env_reconnect_retries, "always")) {
             reconnect_retries = -1;
         } else {
             int r = parse_int(env_reconnect_retries);
             if (0 > r) {
-                LOG_ERROR("Invalid RECONNECT_RETRIES value: %s (must be 0, max, always, or a positive integer)", env_reconnect_retries);
+                LOG_ERROR("Invalid RECONNECT_RETRIES value: %s (must be 0 to disable, max, always, or a positive integer)", env_reconnect_retries);
                 FAIL(E__ARGS__INVALID_RECONNECT_RETRIES);
             }
             reconnect_retries = r;
@@ -571,12 +571,12 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                     FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 }
                 i++;
-                if (0 == strcmp(argv[i], "max") || 0 == strcmp(argv[i], "always")) {
+                if (0 == strcmp(argv[i], "always")) {
                     reconnect_retries = -1;
                 } else {
                     int r = parse_int(argv[i]);
                     if (0 > r) {
-                        LOG_ERROR("Invalid reconnect retries value: %s (must be 0, max, always, or a positive integer)", argv[i]);
+                        LOG_ERROR("Invalid reconnect retries value: %s (must be 0 to disable, always, or a positive integer)", argv[i]);
                         FAIL(E__ARGS__INVALID_RECONNECT_RETRIES);
                     }
                     reconnect_retries = r;
