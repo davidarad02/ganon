@@ -23,6 +23,8 @@ int main(int argc, char *argv[]) {
     rc = args_parse(&args, argc, argv);
     FAIL_IF(E__SUCCESS != rc, rc);
 
+    g_node_id = args.node_id;
+
     LOG_INFO("Starting ganon...");
 
     struct sigaction sa;
@@ -35,6 +37,7 @@ int main(int argc, char *argv[]) {
     FAIL_IF(E__SUCCESS != rc, rc);
 
     LOG_INFO("Network initialized");
+    LOG_INFO("Node ID: %d", g_node_id);
     LOG_INFO("Listen: %s:%d", args.listen_addr.ip, args.listen_addr.port);
     for (int i = 0; i < args.connect_count; i++) {
         LOG_INFO("Connect[%d]: %s:%d", i, args.connect_addrs[i].ip, args.connect_addrs[i].port);

@@ -23,12 +23,14 @@ void args_print_help(const char *prog_name) {
     printf("Options:\n");
     printf("  -p, --port N    Listen port number (1-65535)\n");
     printf("  -c, --connect   Comma-separated list of IP:port to connect (default port: 5555)\n");
+    printf("  -i, --node-id N Node ID (0 or greater)\n");
     printf("  -h, --help      Show this help message\n");
     printf("\n");
     printf("Environment variables:\n");
     printf("  LISTEN_IP       Listen IP address (alternative to positional argument)\n");
     printf("  LISTEN_PORT     Listen port number (alternative to -p/--port)\n");
     printf("  CONNECT         Comma-separated list of IP:port to connect (alternative to -c/--connect)\n");
+    printf("  NODE_ID         Node ID (alternative to -i/--node-id)\n");
 }
 
 static int is_help_flag(const char *arg) {
@@ -99,6 +101,21 @@ static int parse_port(const char *value) {
         return 0;
     }
     return (int)port;
+}
+
+static int parse_node_id(const char *value) {
+    if (NULL == value) {
+        return -1;
+    }
+    char *endptr = NULL;
+    long id = strtol(value, &endptr, 10);
+    if (NULL != endptr && '\0' != endptr[0]) {
+        return -1;
+    }
+    if (0 > id) {
+        return -1;
+    }
+    return (int)id;
 }
 
 static int validate_ip(const char *ip) {
@@ -275,12 +292,15 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
     int listen_port = ARGS_PORT_DEFAULT;
     int ip_set = 0;
     int port_set = 0;
+    int node_id = -1;
+    int node_id_set = 0;
 
     if (NULL == args_out) {
         rc = E__INVALID_ARG_NULL_POINTER;
         goto l_cleanup;
     }
     args_out->connect_count = 0;
+    args_out->node_id = -1;
 
 #ifdef __DEBUG__
     for (int i = 1; i < argc; i++) {
@@ -357,6 +377,18 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
         }
         args_out->connect_count = count;
     }
+    char *env_node_id = get_env(ARGS_ENV_NODE_ID);
+    if (NULL != env_node_id) {
+        LOG_TRACE("Using NODE_ID from environment: %s", env_node_id);
+        FAIL_IF(0 <= node_id, E__ARGS__CONFLICTING_ARGUMENTS);
+        int id = parse_node_id(env_node_id);
+        if (0 > id) {
+            LOG_ERROR("Invalid NODE_ID value: %s (must be 0 or greater)", env_node_id);
+            FAIL(E__ARGS__INVALID_NODE_ID);
+        }
+        node_id = id;
+        node_id_set = 1;
+    }
 
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -414,6 +446,27 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                     goto l_cleanup;
                 }
                 args_out->connect_count += count;
+            } else if (0 == strcmp(arg, ARGS_FLAG_NODE_ID_SHORT) || 0 == strcmp(arg, ARGS_FLAG_NODE_ID_LONG)) {
+                LOG_TRACE("Node ID flag detected: %s", arg);
+                if (i >= argc - 1) {
+#ifdef __DEBUG__
+                    args_print_usage(argv[0]);
+#endif /* #ifdef __DEBUG__ */
+                    FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+                }
+                if (node_id_set) {
+                    LOG_ERROR("Node ID already set via NODE_ID env, cannot override with CLI -i/--node-id");
+                    FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
+                }
+                i++;
+                int id = parse_node_id(argv[i]);
+                if (0 > id) {
+                    LOG_ERROR("Invalid node ID value: %s (must be 0 or greater)", argv[i]);
+                    FAIL(E__ARGS__INVALID_NODE_ID);
+                }
+                LOG_TRACE("Using node ID from CLI argument: %d", id);
+                node_id = id;
+                node_id_set = 1;
 #ifdef __DEBUG__
             } else if (count_v_flags(arg) > 0) {
                 continue;
@@ -437,8 +490,14 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
         FAIL(E__ARGS__INVALID_FORMAT);
     }
 
+    if (0 > node_id) {
+        LOG_ERROR("Node ID is required (use -i or --node-id, or NODE_ID env var)");
+        FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+    }
+
     args_out->listen_addr.ip = listen_ip;
     args_out->listen_addr.port = listen_port;
+    args_out->node_id = node_id;
 
 l_cleanup:
     return rc;

@@ -9,10 +9,13 @@
 #define ARGS_ENV_LISTEN_IP "LISTEN_IP"
 #define ARGS_ENV_LISTEN_PORT "LISTEN_PORT"
 #define ARGS_ENV_CONNECT "CONNECT"
+#define ARGS_ENV_NODE_ID "NODE_ID"
 #define ARGS_FLAG_PORT_SHORT "-p"
 #define ARGS_FLAG_PORT_LONG "--port"
 #define ARGS_FLAG_CONNECT_SHORT "-c"
 #define ARGS_FLAG_CONNECT_LONG "--connect"
+#define ARGS_FLAG_NODE_ID_SHORT "-i"
+#define ARGS_FLAG_NODE_ID_LONG "--node-id"
 #define ARGS_FLAG_HELP_SHORT "-h"
 #define ARGS_FLAG_HELP_LONG "--help"
 
@@ -30,6 +33,7 @@ typedef struct {
     log_level_t log_level;
     addr_t connect_addrs[ARGS_MAX_CONNECT_ENTRIES];
     int connect_count;
+    int node_id;
 } args_t;
 
 err_t args_parse(args_t *args_out, int argc, char *argv[]);

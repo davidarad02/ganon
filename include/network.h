@@ -38,4 +38,6 @@ err_t network_init(network_t *net, const args_t *args);
 err_t network_shutdown(network_t *net);
 void network_print_status(network_t *net);
 
+extern int g_node_id;
+
 #endif /* #ifndef GANON_NETWORK_H */

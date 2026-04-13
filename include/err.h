@@ -19,6 +19,7 @@ typedef enum {
     E__ARGS__UNKNOWN_FLAG,
     E__ARGS__CONNECT_PARSING_ERROR,
     E__ARGS__TOO_MANY_CONNECT_ENTRIES,
+    E__ARGS__INVALID_NODE_ID,
 
     /* network.c */
     E__NET__SOCKET_CREATE_FAILED = 0x300,

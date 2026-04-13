@@ -15,6 +15,8 @@
 #include "logging.h"
 #include "network.h"
 
+int g_node_id = -1;
+
 static int set_nonblocking(int fd) {
     int flags = fcntl(fd, F_GETFL, 0);
     if (-1 == flags) {
