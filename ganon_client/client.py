@@ -73,7 +73,7 @@ class GanonClient:
         connect_timeout: int = 5,
         reconnect_retries: int = 5,
         reconnect_delay: int = 5,
-        log_level: int = LOG_LEVEL_INFO,
+        log_level: int = LOG_LEVEL_DEBUG,
     ):
         self.ip = ip
         self.port = port
