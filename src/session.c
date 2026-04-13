@@ -427,7 +427,7 @@ void SESSION__on_message(session_t *s, connection_t *conn, const uint8_t *buf, s
     uint8_t *data = NULL;
     size_t data_len = 0;
 
-    if (0 != strncmp(msg->magic, GANON_PROTOCOL_MAGIC, 4)) {
+    if (!PROTOCOL__validate_magic(msg->magic)) {
         LOG_WARNING("Invalid magic from %s:%d", conn->client_ip, conn->client_port);
         return;
     }

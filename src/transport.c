@@ -118,14 +118,13 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 
-    memcpy(msg, header, sizeof(*msg));
-
-    if (0 != strncmp(msg->magic, GANON_PROTOCOL_MAGIC, 4)) {
-        LOG_WARNING("Invalid magic on fd %d: expected %s, got %.4s", t->fd, GANON_PROTOCOL_MAGIC, msg->magic);
+    rc = PROTOCOL__parse_header(header, msg);
+    if (E__SUCCESS != rc) {
+        LOG_WARNING("Invalid protocol header on fd %d", t->fd);
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 
-    uint32_t data_length = PROTOCOL_FIELD_FROM_NETWORK(msg->data_length);
+    uint32_t data_length = msg->data_length;
     if (data_length > 0) {
         *data = malloc(data_length);
         if (NULL == *data) {

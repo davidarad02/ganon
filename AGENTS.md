@@ -31,6 +31,7 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `src/network.c` - Socket management, accept loop, reconnection logic
 - `src/session.c` - All protocol logic, routing table, broadcasts
 - `src/transport.c` - Buffer layer, recv/send protocol_msg_t
+- `src/protocol.c` - Protocol parsing, serialization, byte order conversion
 - `src/routing.c` - Routing table implementation
 - `src/connection.c` - Connection abstraction
 
@@ -42,7 +43,7 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `include/args.h` - Argument parsing, addr_t struct, args_t config
 - `include/connection.h` - Connection struct (node_id, fd, client info)
 - `include/network.h` - Network initialization, callbacks, send functions
-- `include/protocol.h` - Protocol message structs (protocol_msg_t, msg_type_t, GANON_PROTOCOL_MAGIC)
+- `include/protocol.h` - Protocol message structs, macros, parsing/serialization functions
 - `include/session.h` - Session protocol handling (SESSION__on_message, SESSION__on_connected, etc.)
 - `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_msg, TRANSPORT__send_msg)
 - `include/routing.h` - Routing table (routing_table_t, route_entry_t, route_type_t)
@@ -51,34 +52,38 @@ This ensures AGENTS.md stays in sync with the codebase.
 
 ### Layer Separation
 
-The architecture is separated into three distinct layers:
+The architecture is separated into four distinct layers:
 
 ```
-+-------------------+     +-------------------+     +-------------------+
-|      Network      |     |     Session       |     |    Transport      |
-| (socket mgmt,    | --> | (protocol logic,  | --> |  (buffer layer,   |
-|  reconnection)    |     |  routing table)   |     |   encryption)     |
-+-------------------+     +-------------------+     +-------------------+
++-------------------+     +-------------------+     +-------------------+     +-------------------+
+|      Network      | --> |     Transport     | --> |     Protocol       | --> |     Session       |
+| (socket mgmt,    |     |  (buffer layer,   |     | (byte order,      |     | (protocol logic,  |
+|  reconnection)    |     |   recv/send msg) |     |  validation)       |     |  routing table)   |
++-------------------+     +-------------------+     +-------------------+     +-------------------+
 ```
 
 1. **Network Layer** (`network.c/h`): Socket management only
    - Creates listening socket, accepts connections
    - Manages client threads and reconnection logic
-   - Calls session callbacks with received raw bytes
+   - Calls transport callbacks with raw bytes
    - Does NOT know about node IDs or protocol logic
-   - Provides `NETWORK__send_to()` for session to send data
 
 2. **Transport Layer** (`transport.c/h`): Buffer between logic and network
-   - `TRANSPORT__recv_msg()` - receives a complete protocol_msg_t
+   - `TRANSPORT__recv_msg()` - receives a complete protocol_msg_t using transport
    - `TRANSPORT__send_msg()` - sends a complete protocol_msg_t
    - Plugs into send()/recv() syscalls
-   - Future: encryption/compression goes here
 
-3. **Session Layer** (`session.c/h`): All protocol logic
+3. **Protocol Layer** (`protocol.c/h`): Byte order and validation
+   - `PROTOCOL__parse_header()` - validates magic, converts network byte order to host
+   - `PROTOCOL__serialize()` - converts host byte order to network, adds magic
+   - `PROTOCOL__msg_ntoh()` / `PROTOCOL__msg_hton()` - byte order conversion
+   - Session works with host byte order protocol_msg_t
+
+4. **Session Layer** (`session.c/h`): All protocol logic
    - Handles all message types (NODE_INIT, PEER_INFO, NODE_DISCONNECT, etc.)
    - Maintains routing table
    - Implements broadcast propagation
-   - Does NOT know about sockets - only sends via network callback
+   - Does NOT know about sockets or byte order
 
 ### Key Design Principles
 
