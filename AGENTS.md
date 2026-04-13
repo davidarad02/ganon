@@ -359,7 +359,7 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - `connect_thread_func` handles each connection target
 - Socket set to non-blocking before connect for timeout control
 - 5-second timeout for connection attempts
-- On success: creates socket_entry_t with `is_incoming=0`, spawns socket_thread_func
+- On success: restores blocking mode, creates socket_entry_t with `is_incoming=0`, spawns socket_thread_func
 - On failure: logs warning and continues without it
 
 ### Auto-Reconnect
@@ -491,3 +491,29 @@ client.set_on_reconnected(lambda: print("Reconnected!"))
 - **Process**: `_process()` dispatches to `_handle_ping()` based on message type
 - **Thread Safety**: All public methods use locks for thread-safe access
 - **Logging**: Follows ganon C logging conventions (ERROR/WARN always logged, INFO/DEBUG/TRACE conditional)
+
+#### Python Client Internal Flow
+
+**Connection and Data Flow:**
+1. `connect()` creates socket with connect_timeout, calls `_connect()`, then removes timeout (`sock.settimeout(None)`)
+2. `_start_recv_thread()` spawns `_protocol_loop()` in a daemon thread
+3. `_protocol_loop()` uses `Transport.recv_all()` to block until full message is received
+4. On disconnect detection, calls `_handle_disconnect()` which triggers `_do_reconnect()`
+
+**Reconnection Flow:**
+1. `_handle_disconnect()` is called when `_protocol_loop` detects socket closed/disconnected
+2. Sets `_reconnecting = True` to prevent concurrent reconnection attempts
+3. `_do_reconnect()` loops with retry logic:
+   - On success: assigns new socket, starts new `_protocol_loop` thread
+   - On failure: if retries exhausted, sets `_running = False` and calls `_on_disconnected()`
+
+**Socket Timeout Behavior:**
+- Timeout is set ONLY during connect phase (`sock.settimeout(connect_timeout)`)
+- After successful connect, timeout is removed (`sock.settimeout(None)`)
+- This ensures recv operations block indefinitely waiting for data
+
+**Thread Safety:**
+- `_running` flag controls if client should stay connected
+- `_reconnecting` flag prevents cascade reconnection loops
+- All socket operations protected by `_lock` mutex
+- `_sock` is set to None after socket is fully closed/shutdown
