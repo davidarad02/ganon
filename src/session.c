@@ -107,7 +107,7 @@ l_cleanup:
     return rc;
 }
 
-err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *peer_node_id, uint8_t *out_header, size_t header_len, uint32_t **out_peer_list, size_t *out_peer_count) {
+err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *peer_node_id, uint8_t *out_header, size_t header_len, uint32_t **out_peer_list, size_t *out_peer_count, uint8_t **out_data, size_t *out_data_len) {
     err_t rc = E__SUCCESS;
     uint8_t *data = NULL;
     uint32_t discovered_node_id = 0;
@@ -176,6 +176,14 @@ err_t SESSION__process(routing_table_t *rt, int fd, transport_t *t, uint32_t *pe
     }
     if (NULL != out_peer_count) {
         *out_peer_count = learned_count;
+    }
+
+    if (NULL != out_data && NULL != data) {
+        *out_data = data;
+        data = NULL;
+    }
+    if (NULL != out_data_len) {
+        *out_data_len = data_length;
     }
 
 l_cleanup:

@@ -367,10 +367,12 @@ The architecture is separated into three layers for future extensibility:
 ### Routing Integration
 
 - `network_t` contains `routing_table_t` member
-- `SESSION__process()` takes `routing_table_t*`, `fd`, `peer_node_id*`, `out_header*`, and `header_len` parameters
+- `SESSION__process()` takes `routing_table_t*`, `fd`, `peer_node_id*`, `out_header*`, `header_len`, `out_peer_list*`, `out_peer_count*`, `out_data*`, `out_data_len*` parameters
 - On NODE_INIT: `ROUTING__add_direct()` is called to add the peer to routing table, `peer_node_id` is returned
+- On PEER_INFO: learned peers are returned via `out_peer_list*` and `out_peer_count*`
 - On disconnect: `ROUTING__remove()` and `ROUTING__remove_via_node()` are called with the peer's node_id
 - `broadcast_to_others()` broadcasts NODE_INIT to all connected clients except the sender
+- `forward_message()` forwards non-protocol messages to the next hop when `dst_node_id` is not local
 
 ## Data Structures
 
@@ -644,10 +646,30 @@ client.set_on_reconnected(lambda: print("Reconnected!"))
 
 ## TODO
 
-- [ ] Implement forwarding of non-direct messages via `ROUTING__send_to_node()`
+- [x] Implement forwarding of non-direct messages via `ROUTING__send_to_node()`
 - [ ] Test multi-node mesh topology with various connection patterns
 - [ ] Update Python client with disconnect routing cleanup
 - [ ] Build and test with multiple nodes
+
+## Message Forwarding
+
+When a node receives a message with `dst_node_id != 0` and `dst_node_id != g_node_id`:
+1. The message is NOT a broadcast or local delivery
+2. `forward_message()` is called to route the message to its destination
+3. `src_node_id` is updated to the current node (since we're forwarding)
+4. `ttl` is decremented
+5. `ROUTING__send_to_node()` looks up the route and sends to the next hop
+
+**Implementation:**
+- `forward_message()` modifies the header to update `src_node_id` and `ttl`
+- `ROUTING__send_to_node()` handles multi-hop routing recursively
+- `send_wrapper()` provides the correct function signature for `send()`
+
+**Forwarding Flow:**
+1. Receive message with dst_node_id = D, src_node_id = S, orig_src = O
+2. Look up route to D - if DIRECT, send directly; if VIA_HOP, forward to next_hop
+3. When forwarding: set src_node_id = our_node_id, ttl--
+4. The next hop repeats until message reaches D
 
 ## PEER_INFO Propagation
 

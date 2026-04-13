@@ -15,10 +15,15 @@
 #include "logging.h"
 #include "network.h"
 #include "protocol.h"
+#include "routing.h"
 #include "session.h"
 #include "transport.h"
 
 int g_node_id = -1;
+
+static ssize_t send_wrapper(int fd, const uint8_t *buf, size_t len) {
+    return send(fd, buf, len, 0);
+}
 
 static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_node_id, uint8_t *header, const uint8_t *data, size_t data_len) {
     (void)sender_node_id;
@@ -107,6 +112,57 @@ static void broadcast_peer_info_to_others(network_t *net, int exclude_fd, uint32
     pthread_mutex_unlock(&net->clients_mutex);
 
     free(peer_data);
+}
+
+static err_t forward_message(network_t *net, uint8_t *header, uint8_t *data, size_t data_len) {
+    err_t rc = E__SUCCESS;
+
+    protocol_msg_t *msg = (protocol_msg_t *)header;
+    uint32_t dst_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
+    uint32_t orig_src_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id);
+    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
+
+    (void)orig_src_node_id;
+
+    if (dst_node_id == 0) {
+        return E__SUCCESS;
+    }
+
+    if ((uint32_t)g_node_id == dst_node_id) {
+        return E__SUCCESS;
+    }
+
+    if (ttl == 0) {
+        LOG_DEBUG("TTL 0, dropping forwarded message to node %u", dst_node_id);
+        return E__SUCCESS;
+    }
+
+    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)g_node_id);
+    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(ttl - 1);
+
+    size_t total_len = PROTOCOL_HEADER_SIZE + data_len;
+    uint8_t *buf = malloc(total_len);
+    if (NULL == buf) {
+        LOG_ERROR("Failed to allocate buffer for forwarding");
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+
+    memcpy(buf, header, PROTOCOL_HEADER_SIZE);
+    if (NULL != data && 0 < data_len) {
+        memcpy(buf + PROTOCOL_HEADER_SIZE, data, data_len);
+    }
+
+    rc = ROUTING__send_to_node(&net->routing_table, dst_node_id, buf, total_len, send_wrapper);
+    if (E__SUCCESS != rc) {
+        LOG_WARNING("Failed to forward message to node %u", dst_node_id);
+    } else {
+        LOG_DEBUG("Forwarded message to node %u (ttl=%u)", dst_node_id, ttl - 1);
+    }
+
+    free(buf);
+
+l_cleanup:
+    return rc;
 }
 
 static err_t send_peer_info(network_t *net, int fd, uint32_t src_node_id, uint32_t dst_node_id) {
@@ -367,19 +423,27 @@ static void *socket_thread_func(void *arg) {
         while (true) {
             uint32_t *learned_peers = NULL;
             size_t learned_count = 0;
-            err_t rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, header_buffer, sizeof(header_buffer), &learned_peers, &learned_count);
+            uint8_t *data = NULL;
+            size_t data_len = 0;
+            err_t rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, header_buffer, sizeof(header_buffer), &learned_peers, &learned_count, &data, &data_len);
             if (E__SUCCESS != rc) {
                 break;
             }
 
             protocol_msg_t *hdr = (protocol_msg_t *)header_buffer;
             msg_type_t msg_type = (msg_type_t)PROTOCOL_FIELD_FROM_NETWORK(hdr->type);
+            uint32_t dst_node_id = PROTOCOL_FIELD_FROM_NETWORK(hdr->dst_node_id);
 
             if (msg_type == MSG__PEER_INFO && NULL != learned_peers && 0 != learned_count) {
                 LOG_DEBUG("Propagating %zu learned peers from PEER_INFO (via node %u) to other direct peers", learned_count, entry->peer_node_id);
                 broadcast_peer_info_to_others(net, entry->fd, (uint32_t)g_node_id, learned_peers, learned_count);
                 free(learned_peers);
                 learned_peers = NULL;
+            }
+
+            if (dst_node_id != 0 && (uint32_t)g_node_id != dst_node_id && msg_type != MSG__NODE_INIT && msg_type != MSG__PEER_INFO) {
+                LOG_DEBUG("Forwarding message from node %u to node %u", entry->peer_node_id, dst_node_id);
+                forward_message(net, header_buffer, data, data_len);
             }
 
             if (prev_peer_node_id != entry->peer_node_id && 0 != entry->peer_node_id) {
@@ -389,6 +453,8 @@ static void *socket_thread_func(void *arg) {
                 prev_peer_node_id = entry->peer_node_id;
                 memset(header_buffer, 0, sizeof(header_buffer));
             }
+
+            free(data);
         }
         if (0 != entry->peer_node_id) {
             LOG_INFO("Node %u disconnected (fd=%d)", entry->peer_node_id, entry->fd);
@@ -408,7 +474,9 @@ static void *socket_thread_func(void *arg) {
     while (true) {
         uint32_t *learned_peers = NULL;
         size_t learned_count = 0;
-        err_t session_rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, NULL, 0, &learned_peers, &learned_count);
+        uint8_t *data = NULL;
+        size_t data_len = 0;
+        err_t session_rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, NULL, 0, &learned_peers, &learned_count, &data, &data_len);
         if (E__SUCCESS != session_rc) {
             LOG_WARNING("Session ended for %s:%d", entry->client_ip, entry->client_port);
             if (0 != entry->peer_node_id) {
@@ -423,6 +491,8 @@ static void *socket_thread_func(void *arg) {
             free(learned_peers);
             learned_peers = NULL;
         }
+
+        free(data);
 
         TRANSPORT__destroy(t);
         shutdown(entry->fd, SHUT_RDWR);
