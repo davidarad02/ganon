@@ -472,23 +472,25 @@ err_t network_shutdown(network_t *net) {
         FAIL(E__NET__INVALID_SOCKET);
     }
 
-    socket_entry_t *current = net->clients;
-    while (NULL != current) {
-        socket_entry_t *next = current->next;
-        close(current->fd);
-        current = next;
+    socket_entry_t *head = net->clients;
+    socket_entry_t *iter = head;
+    net->clients = NULL;
+
+    while (NULL != iter) {
+        socket_entry_t *next = iter->next;
+        close(iter->fd);
+        iter = next;
     }
 
-    current = net->clients;
-    while (NULL != current) {
-        socket_entry_t *next = current->next;
-        if (0 != current->thread) {
-            pthread_join(current->thread, NULL);
+    pthread_mutex_unlock(&net->clients_mutex);
+
+    while (NULL != head) {
+        socket_entry_t *next = head->next;
+        if (0 != head->thread) {
+            pthread_join(head->thread, NULL);
         }
-        free(current);
-        current = next;
+        head = next;
     }
-    net->clients = NULL;
 
     pthread_mutex_unlock(&net->clients_mutex);
     pthread_mutex_destroy(&net->clients_mutex);
