@@ -158,13 +158,13 @@ static void socket_entry_remove_locked(network_t *net, socket_entry_t *entry) {
     }
 }
 
-static void *client_thread_func(void *arg) {
+static void *socket_thread_func(void *arg) {
     socket_entry_t *entry = (socket_entry_t *)arg;
     network_t *net = entry->net;
     int fd = entry->fd;
     char buffer[NETWORK_BUFFER_SIZE];
 
-    LOG_INFO("Client connected (fd=%d) from %s:%d", fd, entry->client_ip, entry->client_port);
+    LOG_INFO("Socket connected (fd=%d) from %s:%d", fd, entry->client_ip, entry->client_port);
 
     while (1) {
         ssize_t bytes_read = recv(fd, buffer, sizeof(buffer) - 1, 0);
@@ -175,7 +175,7 @@ static void *client_thread_func(void *arg) {
             LOG_WARNING("recv failed on fd %d: %s", fd, strerror(errno));
             break;
         } else if (0 == bytes_read) {
-            LOG_DEBUG("Client disconnected (fd=%d)", fd);
+            LOG_WARNING("Socket disconnected (fd=%d)", fd);
             break;
         }
 
@@ -183,39 +183,7 @@ static void *client_thread_func(void *arg) {
         LOG_TRACE("Received %zd bytes from fd %d", bytes_read, fd);
     }
 
-    close(fd);
-    pthread_mutex_lock(&net->clients_mutex);
-    socket_entry_remove_locked(net, entry);
-    pthread_mutex_unlock(&net->clients_mutex);
-    free(entry);
-    return NULL;
-}
-
-static void *outgoing_thread_func(void *arg) {
-    socket_entry_t *entry = (socket_entry_t *)arg;
-    network_t *net = entry->net;
-    int fd = entry->fd;
-    char buffer[NETWORK_BUFFER_SIZE];
-
-    LOG_INFO("Outgoing connection established (fd=%d)", fd);
-
-    while (1) {
-        ssize_t bytes_read = recv(fd, buffer, sizeof(buffer) - 1, 0);
-        if (0 > bytes_read) {
-            if (EAGAIN == errno || EWOULDBLOCK == errno) {
-                continue;
-            }
-            LOG_WARNING("recv failed on fd %d: %s", fd, strerror(errno));
-            break;
-        } else if (0 == bytes_read) {
-            LOG_DEBUG("Outgoing connection closed (fd=%d)", fd);
-            break;
-        }
-
-        buffer[bytes_read] = '\0';
-        LOG_TRACE("Received %zd bytes from outgoing fd %d", bytes_read, fd);
-    }
-
+    shutdown(fd, SHUT_RDWR);
     close(fd);
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_remove_locked(net, entry);
@@ -296,7 +264,7 @@ static void *accept_thread_func(void *arg) {
             tail->next = entry;
         }
 
-        if (0 != pthread_create(&entry->thread, NULL, client_thread_func, entry)) {
+        if (0 != pthread_create(&entry->thread, NULL, socket_thread_func, entry)) {
             LOG_ERROR("Failed to create client thread");
             close(client_fd);
             free(entry);
@@ -354,22 +322,19 @@ static void *connect_thread_func(void *arg) {
 
     pthread_mutex_unlock(&net->clients_mutex);
 
-    outgoing_thread_func(entry);
-
-    if (0 != pthread_mutex_lock(&net->clients_mutex)) {
+    if (0 != pthread_create(&entry->thread, NULL, socket_thread_func, entry)) {
+        LOG_ERROR("Failed to create socket thread");
+        shutdown(fd, SHUT_RDWR);
+        close(fd);
+        pthread_mutex_lock(&net->clients_mutex);
+        socket_entry_remove_locked(net, entry);
+        pthread_mutex_unlock(&net->clients_mutex);
+        free(entry);
+        free(arg);
         return NULL;
     }
 
-    socket_entry_t **prev = &net->clients;
-    while (NULL != *prev) {
-        if (*prev == entry) {
-            *prev = entry->next;
-            break;
-        }
-        prev = &(*prev)->next;
-    }
-
-    pthread_mutex_unlock(&net->clients_mutex);
+    pthread_detach(entry->thread);
 
     free(arg);
     return NULL;
