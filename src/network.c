@@ -531,57 +531,66 @@ static void *socket_thread_func(void *arg) {
 
         free(data);
 
-        TRANSPORT__destroy(t);
-        shutdown(entry->fd, SHUT_RDWR);
-        close(entry->fd);
+        if (E__SUCCESS != session_rc) {
+            TRANSPORT__destroy(t);
+            shutdown(entry->fd, SHUT_RDWR);
+            close(entry->fd);
 
-        if (E__SUCCESS == session_rc) {
-            break;
-        }
-
-        int reconnected = 0;
-        int retry = 0;
-        while (true) {
-            if (0 > net->reconnect_retries) {
-                LOG_INFO("Reconnecting to %s:%d (attempt %d)...", entry->client_ip, entry->client_port, retry + 1);
-            } else {
-                LOG_INFO("Reconnecting to %s:%d (attempt %d/%d)...", entry->client_ip, entry->client_port,
-                         retry + 1, net->reconnect_retries);
-            }
-
-            if (0 > net->reconnect_retries || retry < net->reconnect_retries - 1) {
-                sleep((unsigned int)net->reconnect_delay);
-            }
-
-            int new_fd = connect_to_addr(entry->client_ip, entry->client_port, net->connect_timeout);
-            if (0 > new_fd) {
+            int reconnected = 0;
+            int retry = 0;
+            while (true) {
                 if (0 > net->reconnect_retries) {
-                    LOG_WARNING("Reconnect attempt %d failed, retrying in %ds", retry + 1, net->reconnect_delay);
-                } else if (retry < net->reconnect_retries - 1) {
-                    LOG_WARNING("Reconnect attempt %d failed, retrying in %ds", retry + 1, net->reconnect_delay);
+                    LOG_INFO("Reconnecting to %s:%d (attempt %d)...", entry->client_ip, entry->client_port, retry + 1);
                 } else {
-                    LOG_WARNING("Reconnect attempt %d failed", retry + 1);
+                    LOG_INFO("Reconnecting to %s:%d (attempt %d/%d)...", entry->client_ip, entry->client_port,
+                             retry + 1, net->reconnect_retries);
                 }
-                retry++;
-                continue;
+
+                if (0 > net->reconnect_retries || retry < net->reconnect_retries - 1) {
+                    sleep((unsigned int)net->reconnect_delay);
+                }
+
+                int new_fd = connect_to_addr(entry->client_ip, entry->client_port, net->connect_timeout);
+                if (0 > new_fd) {
+                    if (0 > net->reconnect_retries) {
+                        LOG_WARNING("Reconnect attempt %d failed, retrying in %ds", retry + 1, net->reconnect_delay);
+                    } else if (retry < net->reconnect_retries - 1) {
+                        LOG_WARNING("Reconnect attempt %d failed, retrying in %ds", retry + 1, net->reconnect_delay);
+                    } else {
+                        LOG_WARNING("Reconnect attempt %d failed", retry + 1);
+                    }
+                    retry++;
+                    continue;
+                }
+
+                LOG_INFO("Reconnected to %s:%d (fd=%d)", entry->client_ip, entry->client_port, new_fd);
+                entry->fd = new_fd;
+                entry->peer_node_id = 0;
+                reconnected = 1;
+                break;
+            }
+            if (0 == reconnected) {
+                LOG_WARNING("All reconnect attempts failed, giving up on %s:%d", entry->client_ip, entry->client_port);
+                break;
             }
 
-            LOG_INFO("Reconnected to %s:%d (fd=%d)", entry->client_ip, entry->client_port, new_fd);
-            entry->fd = new_fd;
-            entry->peer_node_id = 0;
-            reconnected = 1;
-            break;
+            t = TRANSPORT__create(entry->fd);
+            if (NULL == t) {
+                LOG_ERROR("Failed to create transport for fd %d", entry->fd);
+                pthread_mutex_lock(&net->clients_mutex);
+                socket_entry_remove_locked(net, entry);
+                pthread_mutex_unlock(&net->clients_mutex);
+                FREE(entry);
+                return NULL;
+            }
         }
-        if (0 == reconnected) {
-            LOG_WARNING("All reconnect attempts failed, giving up on %s:%d", entry->client_ip, entry->client_port);
-            break;
-        }
+    }
 
-        t = TRANSPORT__create(entry->fd);
-        if (NULL == t) {
-            LOG_ERROR("Failed to create transport for fd %d", entry->fd);
-            break;
-        }
+    if (0 != entry->peer_node_id) {
+        LOG_INFO("Node %u disconnected (fd=%d)", entry->peer_node_id, entry->fd);
+        broadcast_node_disconnect(net, entry->fd, entry->peer_node_id);
+        ROUTING__remove(&net->routing_table, entry->peer_node_id);
+        ROUTING__remove_via_node(&net->routing_table, entry->peer_node_id);
     }
 
     pthread_mutex_lock(&net->clients_mutex);
