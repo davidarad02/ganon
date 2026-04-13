@@ -81,7 +81,8 @@ The architecture is separated into four distinct layers:
    - Handles all message types (NODE_INIT, PEER_INFO, NODE_DISCONNECT, etc.)
    - Maintains routing table
    - Implements broadcast propagation
-   - Sends ONLY via `TRANSPORT__send_to_node_id()` - never raw sockets
+   - Sends via `TRANSPORT__send_msg()` or `TRANSPORT__send_to_node_id()` - never raw sockets
+   - For initial connection setup (NODE_INIT), uses `TRANSPORT__send_msg()` directly with transport
 
 ### Key Design Principles
 
@@ -89,7 +90,7 @@ The architecture is separated into four distinct layers:
 - **Session knows nothing about sockets** - it handles protocol logic only
 - **Transport is the ONLY place that calls send()/recv()** - all network I/O goes through transport
 - **All byte order conversion happens in protocol.c** - serialize/unserialize
-- **Session sends messages only via TRANSPORT__send_to_node_id()** - never raw
+- **Session sends messages via TRANSPORT__send_msg() (direct) or TRANSPORT__send_to_node_id() (by node_id lookup)** - never raw
 
 ### Interface
 
@@ -393,5 +394,6 @@ Errors are defined in `include/err.h` as enum `err_t`:
 ## TODO
 
 - [x] Major refactor: separate network/session/transport layers
+- [x] Fix byte order conversion - session works in host order, transport serializes
 - [ ] Update Python client to match new architecture
 - [ ] Test multi-node mesh topology

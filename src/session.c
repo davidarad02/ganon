@@ -98,14 +98,15 @@ l_cleanup:
     return rc;
 }
 
-static err_t send_node_init(session_t *s, uint32_t dst_node_id) {
+static err_t send_node_init(transport_t *t) {
     err_t rc = E__SUCCESS;
+    session_t *s = SESSION__get_session();
 
     protocol_msg_t msg = {0};
     memcpy(msg.magic, GANON_PROTOCOL_MAGIC, 4);
     msg.orig_src_node_id = (uint32_t)s->node_id;
     msg.src_node_id = (uint32_t)s->node_id;
-    msg.dst_node_id = dst_node_id;
+    msg.dst_node_id = 0;
     msg.message_id = 0;
     msg.type = MSG__NODE_INIT;
     msg.data_length = 0;
@@ -113,9 +114,9 @@ static err_t send_node_init(session_t *s, uint32_t dst_node_id) {
 
     log_sent_packet(&msg, 0);
 
-    rc = TRANSPORT__send_to_node_id(s->net, dst_node_id, &msg, NULL);
+    rc = TRANSPORT__send_msg(t, &msg, NULL);
     if (E__SUCCESS != rc) {
-        LOG_WARNING("Failed to send NODE_INIT to node %u", dst_node_id);
+        LOG_WARNING("Failed to send NODE_INIT");
     }
 
     return rc;
@@ -375,7 +376,7 @@ void SESSION__on_connected(transport_t *t) {
     LOG_INFO("Connection established with %s:%d", t->client_ip, t->client_port);
 
     if (!t->is_incoming) {
-        send_node_init(s, 0);
+        send_node_init(t);
     }
 }
 
