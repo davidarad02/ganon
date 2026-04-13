@@ -21,8 +21,6 @@ int g_node_id = -1;
 static err_t send_raw(int fd, const uint8_t *buf, size_t len) {
     err_t rc = E__SUCCESS;
 
-    LOG_TRACE("send_raw called: fd=%d, len=%zu", fd, len);
-
     size_t total_sent = 0;
     while (total_sent < len) {
         ssize_t n = send(fd, buf + total_sent, len - total_sent, 0);
@@ -33,7 +31,6 @@ static err_t send_raw(int fd, const uint8_t *buf, size_t len) {
             LOG_WARNING("send failed on fd %d: %s", fd, strerror(errno));
             FAIL(E__NET__SOCKET_CONNECT_FAILED);
         }
-        LOG_TRACE("send returned %zd on fd %d", n, fd);
         total_sent += (size_t)n;
     }
 
@@ -232,21 +229,15 @@ static void *socket_thread_func(void *arg) {
         LOG_INFO("Connected to %s:%d (fd=%d)", t->client_ip, t->client_port, t->fd);
     }
 
-    LOG_DEBUG("Calling connected_cb for fd=%d", t->fd);
-
     if (NULL != net->connected_cb) {
         net->connected_cb(net->session_ctx, t);
     }
 
-    LOG_DEBUG("Starting recv loop for fd=%d", t->fd);
-
     while (true) {
-        LOG_TRACE("About to call TRANSPORT__recv_msg on fd=%d", t->fd);
         protocol_msg_t msg;
         uint8_t *data = NULL;
         err_t rc = TRANSPORT__recv_msg(t, &msg, &data);
         if (E__SUCCESS != rc) {
-            LOG_DEBUG("TRANSPORT__recv_msg returned error on fd=%d, closing connection", t->fd);
             break;
         }
 

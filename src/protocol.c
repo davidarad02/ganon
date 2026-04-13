@@ -18,6 +18,7 @@ err_t PROTOCOL__parse_header(const uint8_t *buf, protocol_msg_t *msg) {
     VALIDATE_ARGS(buf, msg);
 
     if (!PROTOCOL__validate_magic(buf)) {
+        LOG_WARNING("Invalid magic: expected %.4s, got %.4s", GANON_PROTOCOL_MAGIC, buf);
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 

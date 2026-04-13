@@ -7,7 +7,7 @@
 #include <stdbool.h>
 
 #define GANON_PROTOCOL_MAGIC "GNN\0"
-#define PROTOCOL_HEADER_SIZE 32
+#define PROTOCOL_HEADER_SIZE sizeof(protocol_msg_t)
 #define DEFAULT_TTL 16
 
 #define PROTOCOL_FIELD_TO_NETWORK(x) htonl(x)
