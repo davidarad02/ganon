@@ -377,7 +377,7 @@ The architecture is separated into three layers for future extensibility:
 - `network_t` contains `routing_table_t` member
 - `SESSION__process()` takes `routing_table_t*`, `fd`, `peer_node_id*`, `out_header*`, `header_len`, `out_peer_list*`, `out_peer_count*`, `out_data*`, `out_data_len*` parameters
 - On NODE_INIT (direct connection, src == orig_src): `ROUTING__add_direct()` is called to add the peer to routing table
-- On NODE_INIT (relayed broadcast, src != orig_src): `ROUTING__add_via_hop()` is called with next_hop=src_node_id
+- On NODE_INIT (relayed broadcast, src != orig_src): `ROUTING__add_via_hop()` is called with next_hop=src_node_id, and orig_src_node_id is returned as a learned peer for propagation
 - When broadcasting NODE_INIT via `broadcast_to_others()`, src_node_id is set to g_node_id so recipients know the message is relayed
 - Server sends NODE_INIT back to newly connected client so it can add the server as a direct route
 - Duplicate connection check in `SESSION__handle_node_init`: only applies to direct connections (src == orig_src), not broadcasts
