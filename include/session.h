@@ -23,10 +23,11 @@ void SESSION__destroy(session_t *s);
 
 void SESSION__set_network(session_t *s, network_t *net);
 network_t *SESSION__get_network(session_t *s);
+session_t *SESSION__get_session(void);
 
-void SESSION__on_connected(session_t *s, transport_t *t);
-void SESSION__on_message(session_t *s, transport_t *t, const uint8_t *buf, size_t len);
-void SESSION__on_disconnected(session_t *s, uint32_t node_id);
+void SESSION__on_connected(transport_t *t);
+void SESSION__on_message(transport_t *t, const protocol_msg_t *msg, const uint8_t *data, size_t data_len);
+void SESSION__on_disconnected(transport_t *t);
 
 int SESSION__get_node_id(session_t *s);
 routing_table_t *SESSION__get_routing_table(session_t *s);

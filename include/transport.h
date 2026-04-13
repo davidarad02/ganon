@@ -9,6 +9,7 @@
 #include "err.h"
 #include "protocol.h"
 
+typedef struct network_t network_t;
 typedef struct transport transport_t;
 
 struct transport {
@@ -37,5 +38,7 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
 int TRANSPORT__get_fd(transport_t *t);
 uint32_t TRANSPORT__get_node_id(transport_t *t);
 void TRANSPORT__set_node_id(transport_t *t, uint32_t node_id);
+
+err_t TRANSPORT__send_to_node_id(network_t *net, uint32_t node_id, const protocol_msg_t *msg, const uint8_t *data);
 
 #endif /* #ifndef GANON_TRANSPORT_H */

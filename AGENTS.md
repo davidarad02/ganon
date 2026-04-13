@@ -63,12 +63,12 @@ The architecture is separated into four distinct layers:
 1. **Network Layer** (`network.c/h`): Socket management only
    - Creates listening socket, accepts connections
    - Manages client threads and reconnection logic
-   - Calls transport callbacks with raw bytes
    - Does NOT know about node IDs or protocol logic
 
  2. **Transport Layer** (`transport.c/h`): Buffer between logic and network
-   - `TRANSPORT__recv_msg()` - receives a complete protocol_msg_t using transport
-   - `TRANSPORT__send_msg()` - sends a complete protocol_msg_t
+   - `TRANSPORT__recv_msg()` - receives a complete protocol_msg_t, calls `PROTOCOL__unserialize()`
+   - `TRANSPORT__send_msg()` - sends a complete protocol_msg_t, calls `PROTOCOL__serialize()`
+   - `TRANSPORT__send_to_node_id()` - looks up transport by node_id and sends
    - Plugs into send()/recv() syscalls
    - Owns connection abstraction (fd, node_id, client_ip, port, etc.)
 
@@ -81,26 +81,25 @@ The architecture is separated into four distinct layers:
    - Handles all message types (NODE_INIT, PEER_INFO, NODE_DISCONNECT, etc.)
    - Maintains routing table
    - Implements broadcast propagation
-   - Does NOT know about sockets or byte order
+   - Sends ONLY via `TRANSPORT__send_to_node_id()` - never raw sockets
 
 ### Key Design Principles
 
-- **Network knows nothing about node IDs** - it just manages sockets and calls callbacks
-- **Session knows nothing about sockets** - it handles protocol and calls network send
-- **Transport is the buffer** - it handles complete message framing
-- `send()` syscall is ONLY called from transport.c
+- **Network knows nothing about node IDs or protocol** - it just manages sockets
+- **Session knows nothing about sockets** - it handles protocol logic only
+- **Transport is the ONLY place that calls send()/recv()** - all network I/O goes through transport
+- **All byte order conversion happens in protocol.c** - serialize/unserialize
+- **Session sends messages only via TRANSPORT__send_to_node_id()** - never raw
 
 ### Interface
 
 **main.c wires everything together:**
 ```c
-static void on_connected(void *ctx, transport_t *t);
-static void on_message(void *ctx, transport_t *t, const uint8_t *buf, size_t len);
-static void on_disconnected(void *ctx, transport_t *t);
+SESSION__init(SESSION__get_session(), node_id);
+SESSION__set_network(SESSION__get_session(), &net);
 
-NETWORK__init(&net, &args, node_id, on_message, on_disconnected, on_connected, &session);
-SESSION__set_network(&session, &net);
-NETWORK__set_send_fn(&net, session_send_wrapper, &session);
+NETWORK__init(&net, &args, node_id, SESSION__on_message, SESSION__on_disconnected, SESSION__on_connected);
+```
 ```
 
 ## Usage

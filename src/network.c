@@ -18,26 +18,6 @@
 
 int g_node_id = -1;
 
-static err_t send_raw(int fd, const uint8_t *buf, size_t len) {
-    err_t rc = E__SUCCESS;
-
-    size_t total_sent = 0;
-    while (total_sent < len) {
-        ssize_t n = send(fd, buf + total_sent, len - total_sent, 0);
-        if (0 > n) {
-            if (EAGAIN == errno || EWOULDBLOCK == errno) {
-                continue;
-            }
-            LOG_WARNING("send failed on fd %d: %s", fd, strerror(errno));
-            FAIL(E__NET__SOCKET_CONNECT_FAILED);
-        }
-        total_sent += (size_t)n;
-    }
-
-l_cleanup:
-    return rc;
-}
-
 static int create_listen_socket(const char *ip, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (0 > fd) {
@@ -177,47 +157,6 @@ static void socket_entry_remove_locked(network_t *net, socket_entry_t *entry) {
     }
 }
 
-void NETWORK__set_send_fn(network_t *net, network_send_fn_t fn, void *ctx) {
-    if (NULL == net) {
-        return;
-    }
-    net->send_fn = fn;
-    net->send_ctx = ctx;
-}
-
-err_t NETWORK__send_to(network_t *net, uint32_t node_id, const uint8_t *buf, size_t len) {
-    if (NULL == net || NULL == buf) {
-        return E__INVALID_ARG_NULL_POINTER;
-    }
-
-    pthread_mutex_lock(&net->clients_mutex);
-    socket_entry_t *entry = net->clients;
-
-    if (node_id == 0) {
-        while (NULL != entry) {
-            if (entry->t->fd >= 0) {
-                send_raw(entry->t->fd, buf, len);
-            }
-            entry = entry->next;
-        }
-        pthread_mutex_unlock(&net->clients_mutex);
-        return E__SUCCESS;
-    }
-
-    while (NULL != entry) {
-        if (entry->t->node_id == node_id) {
-            err_t rc = send_raw(entry->t->fd, buf, len);
-            pthread_mutex_unlock(&net->clients_mutex);
-            return rc;
-        }
-        entry = entry->next;
-    }
-    pthread_mutex_unlock(&net->clients_mutex);
-
-    LOG_WARNING("NETWORK__send_to: no transport found for node_id=%u", node_id);
-    return E__NET__SOCKET_CONNECT_FAILED;
-}
-
 static void *socket_thread_func(void *arg) {
     socket_entry_t *entry = (socket_entry_t *)arg;
     network_t *net = entry->net;
@@ -230,7 +169,7 @@ static void *socket_thread_func(void *arg) {
     }
 
     if (NULL != net->connected_cb) {
-        net->connected_cb(net->session_ctx, t);
+        net->connected_cb(t);
     }
 
     while (true) {
@@ -242,16 +181,7 @@ static void *socket_thread_func(void *arg) {
         }
 
         if (NULL != net->message_cb) {
-            size_t total_len = PROTOCOL_HEADER_SIZE + msg.data_length;
-            uint8_t *buf = malloc(total_len);
-            if (NULL != buf) {
-                memcpy(buf, &msg, PROTOCOL_HEADER_SIZE);
-                if (NULL != data && msg.data_length > 0) {
-                    memcpy(buf + PROTOCOL_HEADER_SIZE, data, msg.data_length);
-                }
-                net->message_cb(net->session_ctx, t, buf, total_len);
-                free(buf);
-            }
+            net->message_cb(t, &msg, data, msg.data_length);
         }
 
         free(data);
@@ -260,7 +190,7 @@ static void *socket_thread_func(void *arg) {
     LOG_INFO("Connection %s:%d closed", t->client_ip, t->client_port);
 
     if (NULL != net->disconnected_cb) {
-        net->disconnected_cb(net->session_ctx, t);
+        net->disconnected_cb(t);
     }
 
     TRANSPORT__destroy(t);
@@ -453,7 +383,7 @@ static void *connect_thread_func(void *arg) {
     }
 }
 
-err_t NETWORK__init(network_t *net, const args_t *args, int node_id, network_message_cb_t msg_cb, network_disconnected_cb_t disc_cb, network_connected_cb_t conn_cb, void *ctx) {
+err_t NETWORK__init(network_t *net, const args_t *args, int node_id, network_message_cb_t msg_cb, network_disconnected_cb_t disc_cb, network_connected_cb_t conn_cb) {
     err_t rc = E__SUCCESS;
 
     if (NULL == net || NULL == args) {
@@ -471,7 +401,6 @@ err_t NETWORK__init(network_t *net, const args_t *args, int node_id, network_mes
     net->message_cb = msg_cb;
     net->disconnected_cb = disc_cb;
     net->connected_cb = conn_cb;
-    net->session_ctx = ctx;
 
     if (0 != pthread_mutex_init(&net->clients_mutex, NULL)) {
         LOG_ERROR("Failed to initialize mutex");
@@ -615,20 +544,4 @@ void NETWORK__close_transport(network_t *net, transport_t *t) {
         close(t->fd);
         t->fd = -1;
     }
-}
-
-void NETWORK__broadcast_to_all(network_t *net, const uint8_t *buf, size_t len, uint32_t exclude_node_id) {
-    if (NULL == net || NULL == buf) {
-        return;
-    }
-
-    pthread_mutex_lock(&net->clients_mutex);
-    socket_entry_t *entry = net->clients;
-    while (NULL != entry) {
-        if (entry->t->node_id != 0 && entry->t->node_id != exclude_node_id) {
-            send_raw(entry->t->fd, buf, len);
-        }
-        entry = entry->next;
-    }
-    pthread_mutex_unlock(&net->clients_mutex);
 }

@@ -6,6 +6,7 @@
 #include "common.h"
 #include "err.h"
 #include "logging.h"
+#include "network.h"
 #include "protocol.h"
 #include "transport.h"
 
@@ -182,4 +183,18 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
 
 l_cleanup:
     return rc;
+}
+
+err_t TRANSPORT__send_to_node_id(network_t *net, uint32_t node_id, const protocol_msg_t *msg, const uint8_t *data) {
+    if (NULL == net || NULL == msg) {
+        return E__INVALID_ARG_NULL_POINTER;
+    }
+
+    transport_t *t = NETWORK__get_transport(net, node_id);
+    if (NULL == t) {
+        LOG_WARNING("TRANSPORT__send_to_node_id: no transport for node_id=%u", node_id);
+        return E__NET__SOCKET_CONNECT_FAILED;
+    }
+
+    return TRANSPORT__send_msg(t, msg, data);
 }

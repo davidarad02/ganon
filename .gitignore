@@ -3,4 +3,4 @@ ganon
 bin/
 build-*/
 cmake-build-debug/
-venv/
+venv/logs/

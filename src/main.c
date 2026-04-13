@@ -18,27 +18,6 @@ static void signal_handler(int sig) {
 }
 
 static network_t g_network;
-static session_t g_session;
-
-static void on_connected(void *ctx, transport_t *t) {
-    (void)ctx;
-    SESSION__on_connected(&g_session, t);
-}
-
-static void on_message(void *ctx, transport_t *t, const uint8_t *buf, size_t len) {
-    (void)ctx;
-    SESSION__on_message(&g_session, t, buf, len);
-}
-
-static void on_disconnected(void *ctx, transport_t *t) {
-    (void)ctx;
-    SESSION__on_disconnected(&g_session, TRANSPORT__get_node_id(t));
-}
-
-static void session_send_wrapper(uint32_t node_id, const uint8_t *buf, size_t len, void *ctx) {
-    (void)ctx;
-    NETWORK__send_to(&g_network, node_id, buf, len);
-}
 
 int main(int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
@@ -57,13 +36,12 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    rc = SESSION__init(&g_session, g_node_id);
+    rc = SESSION__init(SESSION__get_session(), g_node_id);
     FAIL_IF(E__SUCCESS != rc, rc);
 
-    SESSION__set_network(&g_session, &g_network);
-    NETWORK__set_send_fn(&g_network, session_send_wrapper, &g_session);
+    SESSION__set_network(SESSION__get_session(), &g_network);
 
-    rc = NETWORK__init(&g_network, &args, g_node_id, on_message, on_disconnected, on_connected, &g_session);
+    rc = NETWORK__init(&g_network, &args, g_node_id, SESSION__on_message, SESSION__on_disconnected, SESSION__on_connected);
     FAIL_IF(E__SUCCESS != rc, rc);
 
     LOG_INFO("Network initialized");
@@ -81,10 +59,10 @@ int main(int argc, char *argv[]) {
     rc = NETWORK__shutdown(&g_network);
     FAIL_IF(E__SUCCESS != rc, rc);
 
-    SESSION__destroy(&g_session);
+    SESSION__destroy(SESSION__get_session());
 
     LOG_INFO("ganon stopped");
 
-l_cleanup:
+ l_cleanup:
     return (int)rc;
 }

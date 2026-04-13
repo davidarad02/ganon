@@ -31,6 +31,12 @@ static void log_sent_packet(const protocol_msg_t *msg, uint32_t data_len) {
               msg->ttl);
 }
 
+static session_t g_session;
+
+session_t *SESSION__get_session(void) {
+    return &g_session;
+}
+
 static err_t send_peer_info(session_t *s, uint32_t dst_node_id) {
     err_t rc = E__SUCCESS;
 
@@ -69,34 +75,23 @@ static err_t send_peer_info(session_t *s, uint32_t dst_node_id) {
 
     pthread_mutex_unlock(&rt->mutex);
 
-    uint8_t header[PROTOCOL_HEADER_SIZE];
-    memset(header, 0, sizeof(header));
-    protocol_msg_t *msg = (protocol_msg_t *)header;
-    memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
-    msg->orig_src_node_id = (uint32_t)s->node_id;
-    msg->src_node_id = (uint32_t)s->node_id;
-    msg->dst_node_id = dst_node_id;
-    msg->message_id = 0;
-    msg->type = MSG__PEER_INFO;
-    msg->data_length = (uint32_t)peer_data_len;
-    msg->ttl = DEFAULT_TTL;
+    protocol_msg_t msg = {0};
+    memcpy(msg.magic, GANON_PROTOCOL_MAGIC, 4);
+    msg.orig_src_node_id = (uint32_t)s->node_id;
+    msg.src_node_id = (uint32_t)s->node_id;
+    msg.dst_node_id = dst_node_id;
+    msg.message_id = 0;
+    msg.type = MSG__PEER_INFO;
+    msg.data_length = (uint32_t)peer_data_len;
+    msg.ttl = DEFAULT_TTL;
 
-    size_t total_len = PROTOCOL_HEADER_SIZE + peer_data_len;
-    uint8_t *pkt = malloc(total_len);
-    if (NULL == pkt) {
-        LOG_ERROR("Failed to allocate packet");
-        FREE(peer_data);
-        FAIL(E__INVALID_ARG_NULL_POINTER);
-    }
-    memcpy(pkt, header, PROTOCOL_HEADER_SIZE);
-    if (NULL != peer_data && peer_data_len > 0) {
-        memcpy(pkt + PROTOCOL_HEADER_SIZE, peer_data, peer_data_len);
+    log_sent_packet(&msg, (uint32_t)peer_data_len);
+
+    rc = TRANSPORT__send_to_node_id(s->net, dst_node_id, &msg, peer_data);
+    if (E__SUCCESS != rc) {
+        LOG_WARNING("Failed to send PEER_INFO to node %u", dst_node_id);
     }
 
-    NETWORK__send_to(s->net, dst_node_id, pkt, total_len);
-    log_sent_packet(msg, (uint32_t)peer_data_len);
-
-    free(pkt);
     free(peer_data);
 
 l_cleanup:
@@ -106,32 +101,27 @@ l_cleanup:
 static err_t send_node_init(session_t *s, uint32_t dst_node_id) {
     err_t rc = E__SUCCESS;
 
-    uint8_t header[PROTOCOL_HEADER_SIZE];
-    memset(header, 0, sizeof(header));
-    protocol_msg_t *msg = (protocol_msg_t *)header;
-    memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
-    msg->orig_src_node_id = (uint32_t)s->node_id;
-    msg->src_node_id = (uint32_t)s->node_id;
-    msg->dst_node_id = dst_node_id;
-    msg->message_id = 0;
-    msg->type = MSG__NODE_INIT;
-    msg->data_length = 0;
-    msg->ttl = DEFAULT_TTL;
+    protocol_msg_t msg = {0};
+    memcpy(msg.magic, GANON_PROTOCOL_MAGIC, 4);
+    msg.orig_src_node_id = (uint32_t)s->node_id;
+    msg.src_node_id = (uint32_t)s->node_id;
+    msg.dst_node_id = dst_node_id;
+    msg.message_id = 0;
+    msg.type = MSG__NODE_INIT;
+    msg.data_length = 0;
+    msg.ttl = DEFAULT_TTL;
 
-    NETWORK__send_to(s->net, dst_node_id, header, PROTOCOL_HEADER_SIZE);
-    log_sent_packet(msg, 0);
+    log_sent_packet(&msg, 0);
+
+    rc = TRANSPORT__send_to_node_id(s->net, dst_node_id, &msg, NULL);
+    if (E__SUCCESS != rc) {
+        LOG_WARNING("Failed to send NODE_INIT to node %u", dst_node_id);
+    }
 
     return rc;
 }
 
-static err_t send_to_node(session_t *s, uint32_t dst_node_id, const uint8_t *buf, size_t len) {
-    if (NULL == s || NULL == buf) {
-        return E__INVALID_ARG_NULL_POINTER;
-    }
-    return NETWORK__send_to(s->net, dst_node_id, buf, len);
-}
-
-static void broadcast_to_others(session_t *s, uint32_t exclude_node_id, const protocol_msg_t *msg, const uint8_t *data, size_t data_len) {
+static void broadcast_to_others(session_t *s, uint32_t exclude_node_id, const protocol_msg_t *msg, const uint8_t *data) {
     routing_table_t *rt = &s->routing_table;
 
     if (0 != pthread_mutex_lock(&rt->mutex)) {
@@ -139,36 +129,21 @@ static void broadcast_to_others(session_t *s, uint32_t exclude_node_id, const pr
         return;
     }
 
-    uint8_t header[PROTOCOL_HEADER_SIZE];
-    memcpy(header, msg, PROTOCOL_HEADER_SIZE);
-    protocol_msg_t *hdr = (protocol_msg_t *)header;
-    uint32_t ttl = hdr->ttl;
+    protocol_msg_t hdr = *msg;
+    uint32_t ttl = hdr.ttl;
     if (ttl > 0) {
-        hdr->src_node_id = (uint32_t)s->node_id;
-        hdr->ttl = ttl - 1;
-    }
-
-    size_t total_len = PROTOCOL_HEADER_SIZE + data_len;
-    uint8_t *pkt = malloc(total_len);
-    if (NULL == pkt) {
-        LOG_ERROR("Failed to allocate broadcast packet");
-        pthread_mutex_unlock(&rt->mutex);
-        return;
-    }
-    memcpy(pkt, header, PROTOCOL_HEADER_SIZE);
-    if (NULL != data && data_len > 0) {
-        memcpy(pkt + PROTOCOL_HEADER_SIZE, data, data_len);
+        hdr.src_node_id = (uint32_t)s->node_id;
+        hdr.ttl = ttl - 1;
     }
 
     for (size_t i = 0; i < rt->entry_count; i++) {
         uint32_t node_id = rt->entries[i].node_id;
         if (node_id != exclude_node_id && rt->entries[i].route_type == ROUTE__DIRECT) {
-            LOG_DEBUG("Broadcast to node %u (ttl=%u)", node_id, ttl - 1);
-            send_to_node(s, node_id, pkt, total_len);
+            LOG_DEBUG("Broadcast to node %u (ttl=%u)", node_id, hdr.ttl);
+            TRANSPORT__send_to_node_id(s->net, node_id, &hdr, data);
         }
     }
 
-    free(pkt);
     pthread_mutex_unlock(&rt->mutex);
 }
 
@@ -198,7 +173,7 @@ static void broadcast_peer_info(session_t *s, uint32_t *peer_list, size_t peer_c
         ((uint32_t *)peer_data)[i] = peer_list[i];
     }
 
-    broadcast_to_others(s, exclude_node_id, msg, peer_data, peer_count * sizeof(uint32_t));
+    broadcast_to_others(s, exclude_node_id, msg, peer_data);
     free(peer_data);
 }
 
@@ -215,11 +190,12 @@ static void broadcast_node_disconnect(session_t *s, uint32_t disconnected_node_i
     msg->data_length = 0;
     msg->ttl = DEFAULT_TTL;
 
-    broadcast_to_others(s, disconnected_node_id, msg, NULL, 0);
+    broadcast_to_others(s, disconnected_node_id, msg, NULL);
 }
 
 static err_t forward_message(session_t *s, const protocol_msg_t *msg, const uint8_t *data, size_t data_len) {
     err_t rc = E__SUCCESS;
+    (void)data_len;
 
     uint32_t dst_node_id = msg->dst_node_id;
     uint32_t ttl = msg->ttl;
@@ -241,33 +217,17 @@ static err_t forward_message(session_t *s, const protocol_msg_t *msg, const uint
         return rc;
     }
 
-    uint8_t header[PROTOCOL_HEADER_SIZE];
-    memcpy(header, msg, PROTOCOL_HEADER_SIZE);
-    protocol_msg_t *hdr = (protocol_msg_t *)header;
-    hdr->src_node_id = (uint32_t)s->node_id;
-    hdr->ttl = ttl > 0 ? ttl - 1 : 0;
+    protocol_msg_t hdr = *msg;
+    hdr.src_node_id = (uint32_t)s->node_id;
+    hdr.ttl = ttl > 0 ? ttl - 1 : 0;
 
-    size_t total_len = PROTOCOL_HEADER_SIZE + data_len;
-    uint8_t *pkt = malloc(total_len);
-    if (NULL == pkt) {
-        LOG_ERROR("Failed to allocate forward packet");
-        FAIL(E__INVALID_ARG_NULL_POINTER);
-    }
-    memcpy(pkt, header, PROTOCOL_HEADER_SIZE);
-    if (NULL != data && data_len > 0) {
-        memcpy(pkt + PROTOCOL_HEADER_SIZE, data, data_len);
-    }
-
-    rc = send_to_node(s, entry.next_hop_node_id, pkt, total_len);
+    rc = TRANSPORT__send_to_node_id(s->net, entry.next_hop_node_id, &hdr, data);
     if (E__SUCCESS != rc) {
         LOG_WARNING("Failed to forward message to node %u", dst_node_id);
     } else {
-        LOG_DEBUG("Forwarded message to node %u (ttl=%u)", dst_node_id, ttl - 1);
+        LOG_DEBUG("Forwarded message to node %u (ttl=%u)", dst_node_id, hdr.ttl);
     }
 
-    free(pkt);
-
-l_cleanup:
     return rc;
 }
 
@@ -406,7 +366,8 @@ routing_table_t *SESSION__get_routing_table(session_t *s) {
     return &s->routing_table;
 }
 
-void SESSION__on_connected(session_t *s, transport_t *t) {
+void SESSION__on_connected(transport_t *t) {
+    session_t *s = SESSION__get_session();
     if (NULL == s || NULL == t) {
         return;
     }
@@ -418,14 +379,11 @@ void SESSION__on_connected(session_t *s, transport_t *t) {
     }
 }
 
-void SESSION__on_message(session_t *s, transport_t *t, const uint8_t *buf, size_t len) {
-    if (NULL == s || NULL == t || NULL == buf || len < PROTOCOL_HEADER_SIZE) {
+void SESSION__on_message(transport_t *t, const protocol_msg_t *msg, const uint8_t *data, size_t data_len) {
+    session_t *s = SESSION__get_session();
+    if (NULL == s || NULL == t || NULL == msg) {
         return;
     }
-
-    protocol_msg_t *msg = (protocol_msg_t *)buf;
-    uint8_t *data = NULL;
-    size_t data_len = 0;
 
     if (!PROTOCOL__validate_magic(msg->magic)) {
         LOG_WARNING("Invalid magic from %s:%d", t->client_ip, t->client_port);
@@ -441,11 +399,6 @@ void SESSION__on_message(session_t *s, transport_t *t, const uint8_t *buf, size_
 
     log_received_packet(msg, data_length);
 
-    if (data_length > 0 && len >= PROTOCOL_HEADER_SIZE + data_length) {
-        data_len = data_length;
-        data = (uint8_t *)buf + PROTOCOL_HEADER_SIZE;
-    }
-
     err_t rc = E__SUCCESS;
 
     switch (type) {
@@ -456,7 +409,7 @@ void SESSION__on_message(session_t *s, transport_t *t, const uint8_t *buf, size_
         }
         break;
     case MSG__PEER_INFO:
-        rc = handle_peer_info(s, orig_src, src, data_length, data);
+        rc = handle_peer_info(s, orig_src, src, data_length, (uint8_t *)data);
         break;
     case MSG__NODE_DISCONNECT:
         rc = handle_node_disconnect(s, orig_src);
@@ -472,9 +425,7 @@ void SESSION__on_message(session_t *s, transport_t *t, const uint8_t *buf, size_
 
     if (dst == 0) {
         uint32_t exclude_node_id = (src == (uint32_t)s->node_id) ? orig_src : src;
-        protocol_msg_t forward_msg;
-        memcpy(&forward_msg, msg, sizeof(forward_msg));
-        broadcast_to_others(s, exclude_node_id, &forward_msg, data, data_len);
+        broadcast_to_others(s, exclude_node_id, msg, data);
     } else if (dst != (uint32_t)s->node_id) {
         forward_message(s, msg, data, data_len);
     }
@@ -484,7 +435,9 @@ void SESSION__on_message(session_t *s, transport_t *t, const uint8_t *buf, size_
     }
 }
 
-void SESSION__on_disconnected(session_t *s, uint32_t node_id) {
+void SESSION__on_disconnected(transport_t *t) {
+    session_t *s = SESSION__get_session();
+    uint32_t node_id = TRANSPORT__get_node_id(t);
     if (NULL == s || 0 == node_id) {
         return;
     }
