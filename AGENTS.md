@@ -100,17 +100,6 @@ SESSION__set_network(&session, &net);
 NETWORK__set_send_fn(&net, session_send_wrapper, &session);
 ```
 
-## Commands
-
-- Build all: `make`
-- Build x64 (both): `make x64`
-- Build x64 release: `make x64r`
-- Build x64 debug: `make x64d`
-- Build armv5: `make armv5`
-- Build mips32be: `make mips32be`
-- Run: `./bin/ganon_<ver>_<arch>`
-- Clean: `make clean`
-
 ## Usage
 
 ```
@@ -131,12 +120,61 @@ Options:
 
 ## Build Types
 
-- **Release**: `-O3 -s` (stripped), outputs: `ganon_<ver>_<arch>`. No logging code compiled in.
-- **Debug**: `-g -O0 -D__DEBUG__` (with symbols), outputs: `ganon_<ver>_<arch>_debug`. All logging enabled.
+### Release
+- Compiler flags: `-O3 -s -Wall -Wextra -Werror`
+- Output: `ganon_<ver>_<arch>_release`
+- **CRITICAL**: `logging.c` is NOT compiled - no logging code included
+- Uses `CMAKE_BUILD_TYPE=Release`
 
-## Compiler Flags
+### Debug
+- Compiler flags: `-g -O0 -D__DEBUG__ -Wall -Wextra -Werror`
+- Output: `ganon_<ver>_<arch>_debug`
+- `logging.c` IS compiled with `__DEBUG__` defined
+- Uses `CMAKE_BUILD_TYPE=Debug`
 
-All builds use `-Wall -Wextra -Werror` to catch warnings as errors.
+## Build Configuration
+
+### CMakeLists.txt Structure
+
+**src/CMakeLists.txt** controls which source files are compiled based on build type:
+
+```cmake
+if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c connection.c)
+else()
+    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c connection.c)
+endif()
+```
+
+**IMPORTANT**: When adding new source files:
+- If the file uses logging macros (LOG_ERROR, LOG_DEBUG, etc.), add it ONLY to the Debug sources list
+- If the file does NOT use logging, add it to BOTH lists
+- Never add `logging.c` to Release sources - it will cause link errors since logging.h will be missing
+
+### Makefile Targets
+
+- `make` - Builds all targets (x64r, x64d, armr, armd, mips32ber, mips32bed)
+- `make x64` - Builds x64 release and debug
+- `make x64r` - Builds x64 release only
+- `make x64d` - Builds x64 debug only
+- `make arm` - Builds arm release and debug
+- `make mips32be` - Builds mips32be release and debug
+- `make clean` - Removes all build artifacts
+
+### Binary Output
+
+After build, binaries are in `bin/`:
+```
+bin/
+├── ganon_<ver>_x64_release
+├── ganon_<ver>_x64_debug
+├── ganon_<ver>_arm_release
+├── ganon_<ver>_arm_debug
+├── ganon_<ver>_mips32be_release
+└── ganon_<ver>_mips32be_debug
+```
+
+A convenience symlink `ganon` in project root points to `./bin/ganon_<ver>_x64_debug` for local development.
 
 ## Cross-Compilation
 
@@ -144,6 +182,10 @@ All targets use static linking (`-static` flag):
 - x64: Native GCC
 - armv5: arm-linux-gnueabihf-gcc (ARMv7 hard-float)
 - mips32be: mips-linux-gnu-gcc (MIPS big-endian, o32 ABI)
+
+Toolchain files are in `cmake/`:
+- `cmake/armv5-toolchain.cmake`
+- `cmake/mips32be-toolchain.cmake`
 
 ## Code Style
 
