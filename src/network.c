@@ -170,13 +170,53 @@ static err_t forward_message(network_t *net, uint8_t *header, uint8_t *data, siz
 
     protocol_msg_t *msg = (protocol_msg_t *)header;
     uint32_t dst_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
-    uint32_t orig_src_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id);
+    uint32_t src_node_id = PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id);
     uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
 
-    (void)orig_src_node_id;
-
     if (dst_node_id == 0) {
-        return E__SUCCESS;
+        routing_table_t *rt = &net->routing_table;
+        if (0 != pthread_mutex_lock(&rt->mutex)) {
+            LOG_ERROR("Failed to lock routing table mutex");
+            FAIL(E__NET__THREAD_CREATE_FAILED);
+        }
+
+        int exclude_fd = -1;
+        for (size_t i = 0; i < rt->entry_count; i++) {
+            if (rt->entries[i].node_id == src_node_id && rt->entries[i].route_type == ROUTE__DIRECT) {
+                exclude_fd = rt->entries[i].fd;
+                break;
+            }
+        }
+
+        if (exclude_fd < 0) {
+            pthread_mutex_unlock(&rt->mutex);
+            LOG_DEBUG("Cannot forward broadcast: sender node %u is not a direct peer", src_node_id);
+            goto l_cleanup;
+        }
+
+        pthread_mutex_unlock(&rt->mutex);
+
+        msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK((uint32_t)g_node_id);
+        msg->ttl = PROTOCOL_FIELD_TO_NETWORK(ttl > 0 ? ttl - 1 : 0);
+
+        pthread_mutex_lock(&net->clients_mutex);
+        socket_entry_t *client = net->clients;
+        while (NULL != client) {
+            if (client->fd != exclude_fd && 0 != client->peer_node_id) {
+                uint8_t hdr[PROTOCOL_HEADER_SIZE];
+                memcpy(hdr, header, PROTOCOL_HEADER_SIZE);
+                err_t send_rc = send_raw_packet(client->fd, hdr, data, data_len);
+                if (E__SUCCESS != send_rc) {
+                    LOG_WARNING("Failed to forward broadcast to fd %d", client->fd);
+                } else {
+                    LOG_DEBUG("Forwarded broadcast to node %u (via node %u)", client->peer_node_id, g_node_id);
+                }
+            }
+            client = client->next;
+        }
+        pthread_mutex_unlock(&net->clients_mutex);
+
+        goto l_cleanup;
     }
 
     if ((uint32_t)g_node_id == dst_node_id) {
