@@ -30,10 +30,9 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `src/logging.c` - Logging implementation
 - `src/network.c` - Socket management, accept loop, reconnection logic
 - `src/session.c` - All protocol logic, routing table, broadcasts
-- `src/transport.c` - Buffer layer, recv/send protocol_msg_t
+- `src/transport.c` - Buffer layer, recv/send protocol_msg_t, connection abstraction
 - `src/protocol.c` - Protocol parsing, serialization, byte order conversion
 - `src/routing.c` - Routing table implementation
-- `src/connection.c` - Connection abstraction
 
 ### C Header Files
 
@@ -41,11 +40,10 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `include/common.h` - Common macros (FAIL_IF, FAIL, BREAK_IF, CONTINUE_IF, FREE, VALIDATE_ARGS)
 - `include/logging.h` - Logging macros (LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE)
 - `include/args.h` - Argument parsing, addr_t struct, args_t config
-- `include/connection.h` - Connection struct (node_id, fd, client info)
 - `include/network.h` - Network initialization, callbacks, send functions
 - `include/protocol.h` - Protocol message structs, macros, parsing/serialization functions
 - `include/session.h` - Session protocol handling (SESSION__on_message, SESSION__on_connected, etc.)
-- `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_msg, TRANSPORT__send_msg)
+- `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_msg, TRANSPORT__send_msg, peer metadata)
 - `include/routing.h` - Routing table (routing_table_t, route_entry_t, route_type_t)
 
 ## Architecture
@@ -68,10 +66,11 @@ The architecture is separated into four distinct layers:
    - Calls transport callbacks with raw bytes
    - Does NOT know about node IDs or protocol logic
 
-2. **Transport Layer** (`transport.c/h`): Buffer between logic and network
+ 2. **Transport Layer** (`transport.c/h`): Buffer between logic and network
    - `TRANSPORT__recv_msg()` - receives a complete protocol_msg_t using transport
    - `TRANSPORT__send_msg()` - sends a complete protocol_msg_t
    - Plugs into send()/recv() syscalls
+   - Owns connection abstraction (fd, node_id, client_ip, port, etc.)
 
 3. **Protocol Layer** (`protocol.c/h`): Byte order and validation
    - `PROTOCOL__parse_header()` - validates magic, converts network byte order to host
@@ -96,9 +95,9 @@ The architecture is separated into four distinct layers:
 
 **main.c wires everything together:**
 ```c
-static void on_connected(void *ctx, connection_t *conn);
-static void on_message(void *ctx, connection_t *conn, const uint8_t *buf, size_t len);
-static void on_disconnected(void *ctx, connection_t *conn);
+static void on_connected(void *ctx, transport_t *t);
+static void on_message(void *ctx, transport_t *t, const uint8_t *buf, size_t len);
+static void on_disconnected(void *ctx, transport_t *t);
 
 NETWORK__init(&net, &args, node_id, on_message, on_disconnected, on_connected, &session);
 SESSION__set_network(&session, &net);
@@ -362,6 +361,11 @@ struct network_t {
 ```c
 struct transport {
     int fd;
+    int is_incoming;
+    char client_ip[INET_ADDRSTRLEN];
+    int client_port;
+    uint32_t node_id;
+    void *ctx;
     ssize_t (*recv)(int fd, uint8_t *buf, size_t len);
     ssize_t (*send)(int fd, const uint8_t *buf, size_t len);
 };
@@ -370,9 +374,9 @@ struct transport {
 ## Network Callbacks
 
 ```c
-typedef void (*network_message_cb_t)(void *session_ctx, connection_t *conn, const uint8_t *buf, size_t len);
-typedef void (*network_disconnected_cb_t)(void *session_ctx, connection_t *conn);
-typedef void (*network_connected_cb_t)(void *session_ctx, connection_t *conn);
+typedef void (*network_message_cb_t)(void *session_ctx, transport_t *t, const uint8_t *buf, size_t len);
+typedef void (*network_disconnected_cb_t)(void *session_ctx, transport_t *t);
+typedef void (*network_connected_cb_t)(void *session_ctx, transport_t *t);
 typedef void (*network_send_fn_t)(uint32_t node_id, const uint8_t *buf, size_t len, void *ctx);
 ```
 

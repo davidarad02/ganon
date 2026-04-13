@@ -4,9 +4,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "connection.h"
 #include "protocol.h"
 #include "routing.h"
+#include "transport.h"
 
 typedef struct network_t network_t;
 
@@ -24,8 +24,8 @@ void SESSION__destroy(session_t *s);
 void SESSION__set_network(session_t *s, network_t *net);
 network_t *SESSION__get_network(session_t *s);
 
-void SESSION__on_connected(session_t *s, connection_t *conn);
-void SESSION__on_message(session_t *s, connection_t *conn, const uint8_t *buf, size_t len);
+void SESSION__on_connected(session_t *s, transport_t *t);
+void SESSION__on_message(session_t *s, transport_t *t, const uint8_t *buf, size_t len);
 void SESSION__on_disconnected(session_t *s, uint32_t node_id);
 
 int SESSION__get_node_id(session_t *s);

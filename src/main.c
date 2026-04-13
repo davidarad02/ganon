@@ -8,6 +8,7 @@
 #include "args.h"
 #include "network.h"
 #include "session.h"
+#include "transport.h"
 
 static volatile sig_atomic_t g_shutdown_requested = 0;
 
@@ -19,19 +20,19 @@ static void signal_handler(int sig) {
 static network_t g_network;
 static session_t g_session;
 
-static void on_connected(void *ctx, connection_t *conn) {
+static void on_connected(void *ctx, transport_t *t) {
     (void)ctx;
-    SESSION__on_connected(&g_session, conn);
+    SESSION__on_connected(&g_session, t);
 }
 
-static void on_message(void *ctx, connection_t *conn, const uint8_t *buf, size_t len) {
+static void on_message(void *ctx, transport_t *t, const uint8_t *buf, size_t len) {
     (void)ctx;
-    SESSION__on_message(&g_session, conn, buf, len);
+    SESSION__on_message(&g_session, t, buf, len);
 }
 
-static void on_disconnected(void *ctx, connection_t *conn) {
+static void on_disconnected(void *ctx, transport_t *t) {
     (void)ctx;
-    SESSION__on_disconnected(&g_session, CONNECTION__get_node_id(conn));
+    SESSION__on_disconnected(&g_session, TRANSPORT__get_node_id(t));
 }
 
 static void session_send_wrapper(uint32_t node_id, const uint8_t *buf, size_t len, void *ctx) {

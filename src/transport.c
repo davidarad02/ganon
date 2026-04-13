@@ -24,6 +24,11 @@ transport_t *TRANSPORT__create(int fd) {
     }
 
     t->fd = fd;
+    t->is_incoming = 0;
+    t->client_ip[0] = '\0';
+    t->client_port = 0;
+    t->node_id = 0;
+    t->ctx = NULL;
     t->recv = TRANSPORT__recv;
     t->send = TRANSPORT__send;
 
@@ -31,6 +36,14 @@ transport_t *TRANSPORT__create(int fd) {
 }
 
 void TRANSPORT__destroy(transport_t *t) {
+    if (NULL == t) {
+        return;
+    }
+    if (t->fd >= 0) {
+        shutdown(t->fd, SHUT_RDWR);
+        close(t->fd);
+        t->fd = -1;
+    }
     FREE(t);
 }
 
@@ -39,6 +52,20 @@ int TRANSPORT__get_fd(transport_t *t) {
         return -1;
     }
     return t->fd;
+}
+
+uint32_t TRANSPORT__get_node_id(transport_t *t) {
+    if (NULL == t) {
+        return 0;
+    }
+    return t->node_id;
+}
+
+void TRANSPORT__set_node_id(transport_t *t, uint32_t node_id) {
+    if (NULL == t) {
+        return;
+    }
+    t->node_id = node_id;
 }
 
 err_t TRANSPORT__recv_all(transport_t *t, uint8_t *buf, size_t len, ssize_t *bytes_read) {
@@ -154,7 +181,7 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
     rc = TRANSPORT__send_all(t, (const uint8_t *)msg, PROTOCOL_HEADER_SIZE, NULL);
     FAIL_IF(E__SUCCESS != rc, rc);
 
-    uint32_t data_length = PROTOCOL_FIELD_FROM_NETWORK(msg->data_length);
+    uint32_t data_length = msg->data_length;
     if (NULL != data && data_length > 0) {
         rc = TRANSPORT__send_all(t, data, data_length, NULL);
         FAIL_IF(E__SUCCESS != rc, rc);

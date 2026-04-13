@@ -2,12 +2,12 @@
 #include <string.h>
 
 #include "common.h"
-#include "connection.h"
 #include "logging.h"
 #include "network.h"
 #include "protocol.h"
 #include "routing.h"
 #include "session.h"
+#include "transport.h"
 
 static void log_received_packet(const protocol_msg_t *msg, uint32_t data_len) {
     LOG_TRACE("Received packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u",
@@ -271,7 +271,7 @@ l_cleanup:
     return rc;
 }
 
-static err_t handle_node_init(session_t *s, connection_t *conn, uint32_t orig_src, uint32_t src, uint32_t ttl, uint32_t data_len) {
+static err_t handle_node_init(session_t *s, transport_t *t, uint32_t orig_src, uint32_t src, uint32_t ttl, uint32_t data_len) {
     err_t rc = E__SUCCESS;
 
     (void)ttl;
@@ -284,8 +284,8 @@ static err_t handle_node_init(session_t *s, connection_t *conn, uint32_t orig_sr
             LOG_WARNING("Node %u is already connected, rejecting", src);
             FAIL(E__SESSION__CONNECTION_REJECTED);
         }
-        rc = ROUTING__add_direct(&s->routing_table, src, conn->fd);
-        CONNECTION__set_node_id(conn, src);
+        rc = ROUTING__add_direct(&s->routing_table, src, t->fd);
+        TRANSPORT__set_node_id(t, src);
         LOG_INFO("Node %u connected (direct)", src);
     } else {
         LOG_DEBUG("NODE_INIT via relay (src=%u, orig_src=%u), adding as via_hop", src, orig_src);
@@ -406,20 +406,20 @@ routing_table_t *SESSION__get_routing_table(session_t *s) {
     return &s->routing_table;
 }
 
-void SESSION__on_connected(session_t *s, connection_t *conn) {
-    if (NULL == s || NULL == conn) {
+void SESSION__on_connected(session_t *s, transport_t *t) {
+    if (NULL == s || NULL == t) {
         return;
     }
 
-    LOG_INFO("Connection established with %s:%d", conn->client_ip, conn->client_port);
+    LOG_INFO("Connection established with %s:%d", t->client_ip, t->client_port);
 
-    if (!conn->is_incoming) {
+    if (!t->is_incoming) {
         send_node_init(s, 0);
     }
 }
 
-void SESSION__on_message(session_t *s, connection_t *conn, const uint8_t *buf, size_t len) {
-    if (NULL == s || NULL == conn || NULL == buf || len < PROTOCOL_HEADER_SIZE) {
+void SESSION__on_message(session_t *s, transport_t *t, const uint8_t *buf, size_t len) {
+    if (NULL == s || NULL == t || NULL == buf || len < PROTOCOL_HEADER_SIZE) {
         return;
     }
 
@@ -428,7 +428,7 @@ void SESSION__on_message(session_t *s, connection_t *conn, const uint8_t *buf, s
     size_t data_len = 0;
 
     if (!PROTOCOL__validate_magic(msg->magic)) {
-        LOG_WARNING("Invalid magic from %s:%d", conn->client_ip, conn->client_port);
+        LOG_WARNING("Invalid magic from %s:%d", t->client_ip, t->client_port);
         return;
     }
 
@@ -450,7 +450,7 @@ void SESSION__on_message(session_t *s, connection_t *conn, const uint8_t *buf, s
 
     switch (type) {
     case MSG__NODE_INIT:
-        rc = handle_node_init(s, conn, orig_src, src, ttl, data_length);
+        rc = handle_node_init(s, t, orig_src, src, ttl, data_length);
         if (E__SUCCESS == rc && orig_src == src) {
             send_peer_info(s, src);
         }

@@ -12,7 +12,6 @@
 #include <pthread.h>
 
 #include "common.h"
-#include "connection.h"
 #include "logging.h"
 #include "network.h"
 #include "transport.h"
@@ -199,30 +198,16 @@ err_t NETWORK__send_to(network_t *net, uint32_t node_id, const uint8_t *buf, siz
 static void *socket_thread_func(void *arg) {
     socket_entry_t *entry = (socket_entry_t *)arg;
     network_t *net = entry->net;
-    connection_t *conn = &entry->conn;
+    transport_t *t = entry->t;
 
-    if (entry->conn.is_incoming) {
-        LOG_INFO("Connection from %s:%d (fd=%d)", conn->client_ip, conn->client_port, conn->fd);
+    if (t->is_incoming) {
+        LOG_INFO("Connection from %s:%d (fd=%d)", t->client_ip, t->client_port, t->fd);
     } else {
-        LOG_INFO("Connected to %s:%d (fd=%d)", conn->client_ip, conn->client_port, conn->fd);
+        LOG_INFO("Connected to %s:%d (fd=%d)", t->client_ip, t->client_port, t->fd);
     }
 
     if (NULL != net->connected_cb) {
-        net->connected_cb(net->session_ctx, conn);
-    }
-
-    transport_t *t = TRANSPORT__create(conn->fd);
-    if (NULL == t) {
-        LOG_ERROR("Failed to create transport for fd %d", conn->fd);
-        CONNECTION__close(conn);
-        pthread_mutex_lock(&net->clients_mutex);
-        socket_entry_remove_locked(net, entry);
-        pthread_mutex_unlock(&net->clients_mutex);
-        if (NULL != net->disconnected_cb) {
-            net->disconnected_cb(net->session_ctx, conn);
-        }
-        FREE(entry);
-        return NULL;
+        net->connected_cb(net->session_ctx, t);
     }
 
     while (true) {
@@ -234,14 +219,14 @@ static void *socket_thread_func(void *arg) {
         }
 
         if (NULL != net->message_cb) {
-            size_t total_len = PROTOCOL_HEADER_SIZE + PROTOCOL_FIELD_FROM_NETWORK(msg.data_length);
+            size_t total_len = PROTOCOL_HEADER_SIZE + msg.data_length;
             uint8_t *buf = malloc(total_len);
             if (NULL != buf) {
                 memcpy(buf, &msg, PROTOCOL_HEADER_SIZE);
-                if (NULL != data && PROTOCOL_FIELD_FROM_NETWORK(msg.data_length) > 0) {
-                    memcpy(buf + PROTOCOL_HEADER_SIZE, data, PROTOCOL_FIELD_FROM_NETWORK(msg.data_length));
+                if (NULL != data && msg.data_length > 0) {
+                    memcpy(buf + PROTOCOL_HEADER_SIZE, data, msg.data_length);
                 }
-                net->message_cb(net->session_ctx, conn, buf, total_len);
+                net->message_cb(net->session_ctx, t, buf, total_len);
                 free(buf);
             }
         }
@@ -249,15 +234,13 @@ static void *socket_thread_func(void *arg) {
         free(data);
     }
 
-    TRANSPORT__destroy(t);
-    CONNECTION__close(conn);
-
-    LOG_INFO("Connection %s:%d closed", conn->client_ip, conn->client_port);
+    LOG_INFO("Connection %s:%d closed", t->client_ip, t->client_port);
 
     if (NULL != net->disconnected_cb) {
-        net->disconnected_cb(net->session_ctx, conn);
+        net->disconnected_cb(net->session_ctx, t);
     }
 
+    TRANSPORT__destroy(t);
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_remove_locked(net, entry);
     pthread_mutex_unlock(&net->clients_mutex);
@@ -315,10 +298,16 @@ static void *accept_thread_func(void *arg) {
             continue;
         }
 
-        CONNECTION__init(&entry->conn, client_fd);
-        entry->conn.is_incoming = 1;
-        inet_ntop(AF_INET, &client_addr.sin_addr, entry->conn.client_ip, INET_ADDRSTRLEN);
-        entry->conn.client_port = ntohs(client_addr.sin_port);
+        entry->t = TRANSPORT__create(client_fd);
+        if (NULL == entry->t) {
+            LOG_ERROR("Failed to create transport for fd %d", client_fd);
+            close(client_fd);
+            FREE(entry);
+            continue;
+        }
+        entry->t->is_incoming = 1;
+        inet_ntop(AF_INET, &client_addr.sin_addr, entry->t->client_ip, INET_ADDRSTRLEN);
+        entry->t->client_port = ntohs(client_addr.sin_port);
         entry->net = net;
         entry->next = NULL;
 
@@ -389,11 +378,18 @@ static void *connect_thread_func(void *arg) {
             return NULL;
         }
 
-        CONNECTION__init(&entry->conn, fd);
-        entry->conn.is_incoming = 0;
-        strncpy(entry->conn.client_ip, addr->ip, INET_ADDRSTRLEN - 1);
-        entry->conn.client_ip[INET_ADDRSTRLEN - 1] = '\0';
-        entry->conn.client_port = addr->port;
+        entry->t = TRANSPORT__create(fd);
+        if (NULL == entry->t) {
+            LOG_ERROR("Failed to create transport for fd %d", fd);
+            close(fd);
+            FREE(entry);
+            FREE(arg);
+            return NULL;
+        }
+        entry->t->is_incoming = 0;
+        strncpy(entry->t->client_ip, addr->ip, INET_ADDRSTRLEN - 1);
+        entry->t->client_ip[INET_ADDRSTRLEN - 1] = '\0';
+        entry->t->client_port = addr->port;
         entry->net = net;
         entry->next = NULL;
 
@@ -539,7 +535,7 @@ err_t NETWORK__shutdown(network_t *net) {
 
     while (NULL != iter) {
         socket_entry_t *next = iter->next;
-        CONNECTION__close(&iter->conn);
+        TRANSPORT__destroy(iter->t);
         iter = next;
     }
 
@@ -568,7 +564,7 @@ l_cleanup:
     return rc;
 }
 
-connection_t *NETWORK__get_connection(network_t *net, uint32_t node_id) {
+transport_t *NETWORK__get_transport(network_t *net, uint32_t node_id) {
     if (NULL == net) {
         return NULL;
     }
@@ -576,9 +572,9 @@ connection_t *NETWORK__get_connection(network_t *net, uint32_t node_id) {
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_t *entry = net->clients;
     while (NULL != entry) {
-        if (entry->conn.node_id == node_id) {
+        if (entry->t->node_id == node_id) {
             pthread_mutex_unlock(&net->clients_mutex);
-            return &entry->conn;
+            return entry->t;
         }
         entry = entry->next;
     }
@@ -586,12 +582,16 @@ connection_t *NETWORK__get_connection(network_t *net, uint32_t node_id) {
     return NULL;
 }
 
-void NETWORK__close_connection(network_t *net, connection_t *conn) {
+void NETWORK__close_transport(network_t *net, transport_t *t) {
     (void)net;
-    if (NULL == conn) {
+    if (NULL == t) {
         return;
     }
-    CONNECTION__close(conn);
+    if (t->fd >= 0) {
+        shutdown(t->fd, SHUT_RDWR);
+        close(t->fd);
+        t->fd = -1;
+    }
 }
 
 void NETWORK__broadcast_to_all(network_t *net, const uint8_t *buf, size_t len, uint32_t exclude_node_id) {
@@ -602,8 +602,8 @@ void NETWORK__broadcast_to_all(network_t *net, const uint8_t *buf, size_t len, u
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_t *entry = net->clients;
     while (NULL != entry) {
-        if (entry->conn.node_id != 0 && entry->conn.node_id != exclude_node_id) {
-            send_raw(entry->conn.fd, buf, len);
+        if (entry->t->node_id != 0 && entry->t->node_id != exclude_node_id) {
+            send_raw(entry->t->fd, buf, len);
         }
         entry = entry->next;
     }
