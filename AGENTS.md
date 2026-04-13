@@ -249,7 +249,7 @@ typedef enum {
 #### Protocol Header Size
 
 ```c
-#define PROTOCOL_HEADER_SIZE 24
+#define PROTOCOL_HEADER_SIZE 28
 ```
 
 ## Routing Table
