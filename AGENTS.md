@@ -24,7 +24,7 @@ This is the Ganon project - a mesh-style network tunneler in C built with CMake.
 
 - `include/err.h` - Error codes enum
 - `include/common.h` - Common macros (FAIL_IF, BREAK_IF, CONTINUE_IF)
-- `include/logging.h` - Logging macros (LOG_ERROR, LOG_WARNING, LOG_INFO, LOG_DEBUG, LOG_TRACE)
+- `include/logging.h` - Logging macros (LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE)
 - `include/args.h` - Argument parsing, addr_t struct, args_t config
 - `include/network.h` - Network types, socket_entry_t, g_node_id global
 
@@ -241,6 +241,9 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - `pthread_join` for client threads
 
 ## Python Client Development
+
+Dependencies are specified in `ganon_client/pyproject.toml`:
+- `construct>=2.10` - Struct parsing for protocol messages
 
 After any change to `ganon_client/`, reinstall it in the venv:
 ```bash
