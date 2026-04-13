@@ -8,6 +8,7 @@ DEFAULT_TTL = 16
 class MsgType(IntEnum):
     NODE_INIT = 0
     PEER_INFO = 1
+    NODE_DISCONNECT = 2
 
 
 ProtocolHeader = ct.Struct(

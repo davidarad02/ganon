@@ -292,14 +292,16 @@ class GanonClient:
         if self._sock is None:
             return
         
-        header = b'GNN\x00'
-        header += struct.pack(">I", self.node_id)  # orig_src_node_id
-        header += struct.pack(">I", self.node_id)  # src_node_id
-        header += struct.pack(">I", 0)              # dst_node_id (0 for broadcast)
-        header += struct.pack(">I", 0)              # message_id
-        header += struct.pack(">I", 0)              # type (NODE_INIT = 0)
-        header += struct.pack(">I", 0)              # data_length
-        header += struct.pack(">I", DEFAULT_TTL)   # ttl
+        header = ProtocolHeader.build({
+            "magic": "GNN",
+            "orig_src_node_id": self.node_id,
+            "src_node_id": self.node_id,
+            "dst_node_id": 0,
+            "message_id": 0,
+            "type": MsgType.NODE_INIT,
+            "data_length": 0,
+            "ttl": DEFAULT_TTL,
+        })
         
         self._sock.sendall(header)
 

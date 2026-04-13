@@ -12,6 +12,7 @@
 typedef enum {
     MSG__NODE_INIT = 0,
     MSG__PEER_INFO = 1,
+    MSG__NODE_DISCONNECT = 2,
 } msg_type_t;
 
 typedef struct {

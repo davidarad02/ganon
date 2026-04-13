@@ -86,6 +86,10 @@ static err_t SESSION__handle_message(routing_table_t *rt, int fd, uint32_t orig_
 
     (void)orig_src_node_id;
     (void)dst_node_id;
+    (void)message_id;
+    (void)ttl;
+    (void)data_length;
+    (void)data;
 
     LOG_INFO("Protocol: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u", orig_src_node_id, src_node_id, dst_node_id, message_id, type, ttl, data_length);
 
@@ -97,6 +101,11 @@ static err_t SESSION__handle_message(routing_table_t *rt, int fd, uint32_t orig_
     case MSG__PEER_INFO:
         rc = SESSION__handle_peer_info(rt, orig_src_node_id, src_node_id, message_id, ttl, data_length, data, out_node_id, out_peer_list, out_peer_count);
         FAIL_IF(E__SUCCESS != rc, E__SESSION__HANDLE_MESSAGE_FAILED);
+        break;
+    case MSG__NODE_DISCONNECT:
+        LOG_INFO("Node %u disconnected, removing from routing tables", src_node_id);
+        ROUTING__remove(rt, src_node_id);
+        ROUTING__remove_via_node(rt, src_node_id);
         break;
     default:
         LOG_WARNING("Unknown message type: %d", type);
