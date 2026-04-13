@@ -120,6 +120,15 @@ Log levels (in order of severity):
 
 Use appropriate log levels for each message.
 
+## Network Constants
+
+```c
+#define NETWORK_BUFFER_SIZE 4096
+#define NETWORK_CONNECT_TIMEOUT_SEC 5
+#define NETWORK_RETRY_COUNT 5
+#define NETWORK_RETRY_DELAY_SEC 5
+```
+
 ## Data Structures
 
 ### addr_t
@@ -135,12 +144,13 @@ typedef struct {
 Connected socket tracking:
 ```c
 typedef struct socket_entry {
-    int fd;                      // Socket file descriptor
-    pthread_t thread;            // Thread handling this socket
-    struct socket_entry *next;  // Next entry in linked list
-    network_t *net;             // Parent network
-    char client_ip[INET_ADDRSTRLEN];  // Remote IP
-    int client_port;            // Remote port
+    int fd;                           // Socket file descriptor
+    pthread_t thread;                  // Thread handling this socket
+    struct socket_entry *next;         // Next entry in linked list
+    network_t *net;                    // Parent network
+    char client_ip[INET_ADDRSTRLEN]; // Remote IP
+    int client_port;                   // Remote port
+    int is_incoming;                  // 1 for incoming, 0 for outgoing
 } socket_entry_t;
 ```
 
@@ -148,11 +158,11 @@ typedef struct socket_entry {
 Command line configuration:
 ```c
 typedef struct {
-    addr_t listen_addr;              // Listen IP and port
-    log_level_t log_level;           // Log level (debug builds only)
-    addr_t connect_addrs[64];        // Connection targets
-    int connect_count;               // Number of connection targets
-    int node_id;                     // This node's ID (mandatory)
+    addr_t listen_addr;               // Listen IP and port
+    log_level_t log_level;            // Log level (debug builds only)
+    addr_t connect_addrs[64];         // Connection targets
+    int connect_count;                // Number of connection targets
+    int node_id;                      // This node's ID (mandatory)
 } args_t;
 ```
 
@@ -160,12 +170,12 @@ typedef struct {
 Network state:
 ```c
 struct network_t {
-    int listen_fd;                   // Listening socket
-    pthread_t accept_thread;          // Accept loop thread
+    int listen_fd;                    // Listening socket
+    pthread_t accept_thread;           // Accept loop thread
     socket_entry_t *clients;          // Connected clients list
     pthread_mutex_t clients_mutex;    // Mutex for clients list
     int running;                      // Shutdown flag
-    addr_t listen_addr;               // Listen address
+    addr_t listen_addr;              // Listen address
     addr_t *connect_addrs;           // Outgoing connection targets
     int connect_count;                // Number of targets
     pthread_t *connect_threads;       // Outgoing connection threads
@@ -186,21 +196,30 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - Runs in `accept_thread_func`
 - Uses `select()` with 1-second timeout for responsive shutdown
 - Accepts incoming client connections
-- Creates `socket_entry_t` for each client
+- Creates `socket_entry_t` for each client with `is_incoming=1`
 - Spawns `socket_thread_func` thread per client
 
-### Client Threads
+### Client Threads (Socket Handler)
 - Each connected socket runs in its own thread (`socket_thread_func`)
 - Unified handling for both incoming clients and outgoing connections
+- Echo functionality: received data is sent back on the same socket
+- Logs connection as "from" for incoming, "to" for outgoing
 - Logs disconnection at WARN level
 - Removes itself from clients list on disconnect
-- Cleans up socket and frees entry on exit
 
 ### Outgoing Connections
 - `connect_thread_func` handles each connection target
+- Socket set to non-blocking before connect for timeout control
 - 5-second timeout for connection attempts
-- On success: creates socket_entry_t, spawns socket_thread_func
+- On success: creates socket_entry_t with `is_incoming=0`, spawns socket_thread_func
 - On failure: logs warning and continues without it
+
+### Auto-Reconnect
+- Only applies to outgoing connections
+- On disconnect, retries up to `NETWORK_RETRY_COUNT` (5) times
+- Waits `NETWORK_RETRY_DELAY_SEC` (5) seconds between retries
+- Logs each attempt and success/failure
+- If all retries fail, gives up and cleans up
 
 ### Shutdown Behavior
 - SIGINT/SIGTERM signals set shutdown flag

@@ -198,7 +198,7 @@ static void *socket_thread_func(void *arg) {
     shutdown(fd, SHUT_RDWR);
     close(fd);
 
-    if (!entry->is_incoming) {
+    if (0 == entry->is_incoming) {
         int reconnected = 0;
         for (int retry = 0; retry < NETWORK_RETRY_COUNT; retry++) {
             LOG_INFO("Reconnecting to %s:%d (attempt %d/%d)...", entry->client_ip, entry->client_port,
