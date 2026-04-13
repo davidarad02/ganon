@@ -37,6 +37,7 @@ typedef enum {
     /* session.c */
     E__SESSION__HANDLE_NODE_INIT_FAILED = 0x401,
     E__SESSION__HANDLE_MESSAGE_FAILED,
+    E__SESSION__CONNECTION_REJECTED,
 
     /* routing.c */
     E__ROUTING__NODE_NOT_FOUND = 0x501,

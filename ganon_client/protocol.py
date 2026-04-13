@@ -9,6 +9,7 @@ class MsgType(IntEnum):
     NODE_INIT = 0
     PEER_INFO = 1
     NODE_DISCONNECT = 2
+    CONNECTION_REJECTED = 3
 
 
 ProtocolHeader = ct.Struct(

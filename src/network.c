@@ -290,6 +290,28 @@ static void send_node_init(int fd, uint32_t node_id) {
     }
 }
 
+static void send_connection_rejected(int fd, uint32_t node_id) {
+    uint8_t header[PROTOCOL_HEADER_SIZE];
+    memset(header, 0, sizeof(header));
+
+    protocol_msg_t *msg = (protocol_msg_t *)header;
+    memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
+    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK(node_id);
+    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK(node_id);
+    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__CONNECTION_REJECTED);
+    msg->data_length = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
+
+    ssize_t sent = send(fd, header, sizeof(header), 0);
+    if (0 > sent) {
+        LOG_WARNING("Failed to send CONNECTION_REJECTED to fd %d", fd);
+    } else {
+        LOG_DEBUG("Sent CONNECTION_REJECTED to fd %d (node_id=%u)", fd, node_id);
+    }
+}
+
 static int create_listen_socket(const char *ip, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (0 > fd) {
@@ -462,6 +484,10 @@ static void *socket_thread_func(void *arg) {
             size_t data_len = 0;
             err_t rc = SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, header_buffer, sizeof(header_buffer), &learned_peers, &learned_count, &data, &data_len);
             if (E__SUCCESS != rc) {
+                if (E__SESSION__CONNECTION_REJECTED == rc) {
+                    LOG_WARNING("Rejecting duplicate connection from node %u", entry->peer_node_id);
+                    send_connection_rejected(entry->fd, (uint32_t)g_node_id);
+                }
                 break;
             }
 
@@ -535,6 +561,15 @@ static void *socket_thread_func(void *arg) {
             TRANSPORT__destroy(t);
             shutdown(entry->fd, SHUT_RDWR);
             close(entry->fd);
+
+            if (E__SESSION__CONNECTION_REJECTED == session_rc) {
+                LOG_WARNING("Connection rejected, abandoning");
+                pthread_mutex_lock(&net->clients_mutex);
+                socket_entry_remove_locked(net, entry);
+                pthread_mutex_unlock(&net->clients_mutex);
+                FREE(entry);
+                return NULL;
+            }
 
             int reconnected = 0;
             int retry = 0;

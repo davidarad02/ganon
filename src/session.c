@@ -19,6 +19,11 @@ static err_t SESSION__handle_node_init(routing_table_t *rt, int fd, uint32_t ori
 
     LOG_DEBUG("Received NODE_INIT from node %u (orig_src=%u, msg_id=%u, ttl=%u, data_len=%u)", src_node_id, orig_src_node_id, message_id, ttl, data_length);
 
+    if (ROUTING__is_direct(rt, src_node_id)) {
+        LOG_WARNING("Node %u is already connected, rejecting", src_node_id);
+        FAIL(E__SESSION__CONNECTION_REJECTED);
+    }
+
     rc = ROUTING__add_direct(rt, src_node_id, fd);
     if (E__SUCCESS != rc) {
         LOG_WARNING("Failed to add node %u to routing table", src_node_id);
@@ -106,6 +111,10 @@ static err_t SESSION__handle_message(routing_table_t *rt, int fd, uint32_t orig_
         LOG_INFO("Node %u disconnected, removing from routing tables", src_node_id);
         ROUTING__remove(rt, src_node_id);
         ROUTING__remove_via_node(rt, src_node_id);
+        break;
+    case MSG__CONNECTION_REJECTED:
+        LOG_WARNING("Connection rejected by node %u", src_node_id);
+        FAIL(E__SESSION__CONNECTION_REJECTED);
         break;
     default:
         LOG_WARNING("Unknown message type: %d", type);
