@@ -212,7 +212,7 @@ static void *socket_thread_func(void *arg) {
 
             LOG_INFO("Reconnected to %s:%d (fd=%d)", entry->client_ip, entry->client_port, new_fd);
             entry->fd = new_fd;
-            continue;
+            break;
         }
         LOG_WARNING("All reconnect attempts failed, giving up on %s:%d", entry->client_ip, entry->client_port);
     }
