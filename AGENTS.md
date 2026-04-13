@@ -390,6 +390,7 @@ The architecture is separated into three layers for future extensibility:
 - `forward_message()` forwards non-protocol messages to the next hop when `dst_node_id` is not local
 - `broadcast_peer_info_to_others()` propagates PEER_INFO to all peers except sender
 - `broadcast_node_disconnect()` notifies all peers when a node disconnects (sets orig_src=disconnected_node, src=g_node_id)
+- Broadcast messages (dst=0) are forwarded to all directly connected peers except the original sender (src_node_id), ensuring NODE_DISCONNECT propagates through the network
 
 ## Data Structures
 
