@@ -200,14 +200,14 @@ static void *socket_thread_func(void *arg) {
 
     if (0 == entry->is_incoming) {
         int reconnected = 0;
-        for (int retry = 0; retry < NETWORK_RETRY_COUNT; retry++) {
+        for (int retry = 0; retry < net->reconnect_retries; retry++) {
             LOG_INFO("Reconnecting to %s:%d (attempt %d/%d)...", entry->client_ip, entry->client_port,
-                     retry + 1, NETWORK_RETRY_COUNT);
-            sleep(NETWORK_RETRY_DELAY_SEC);
+                     retry + 1, net->reconnect_retries);
+            sleep((unsigned int)net->reconnect_delay);
 
-            int new_fd = connect_to_addr(entry->client_ip, entry->client_port, NETWORK_CONNECT_TIMEOUT_SEC);
+            int new_fd = connect_to_addr(entry->client_ip, entry->client_port, net->connect_timeout);
             if (0 > new_fd) {
-                LOG_WARNING("Reconnect attempt %d/%d failed", retry + 1, NETWORK_RETRY_COUNT);
+                LOG_WARNING("Reconnect attempt %d/%d failed", retry + 1, net->reconnect_retries);
                 continue;
             }
 
@@ -319,7 +319,7 @@ static void *connect_thread_func(void *arg) {
     network_t *net = (network_t *)arg;
     addr_t *addr = net->connect_addrs;
 
-    int fd = connect_to_addr(addr->ip, addr->port, NETWORK_CONNECT_TIMEOUT_SEC);
+    int fd = connect_to_addr(addr->ip, addr->port, net->connect_timeout);
     if (0 > fd) {
         LOG_WARNING("Failed to connect to %s:%d, continuing without it", addr->ip, addr->port);
         free(arg);
@@ -391,6 +391,9 @@ err_t NETWORK__init(network_t *net, const args_t *args) {
     net->listen_addr = args->listen_addr;
     net->connect_addrs = (addr_t *)args->connect_addrs;
     net->connect_count = args->connect_count;
+    net->connect_timeout = args->connect_timeout;
+    net->reconnect_retries = args->reconnect_retries;
+    net->reconnect_delay = args->reconnect_delay;
 
     if (0 != pthread_mutex_init(&net->clients_mutex, NULL)) {
         LOG_ERROR("Failed to initialize mutex");

@@ -49,6 +49,9 @@ Options:
   -p, --port N    Listen port number (1-65535, default: 5555)
   -c, --connect   Comma-separated list of IP:port to connect (default port: 5555)
   -i, --node-id N Node ID (0 or greater, mandatory)
+  -w, --connect-timeout N  Connect timeout in seconds (default: 5)
+  --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable)
+  --reconnect-delay N       Delay between reconnect attempts (default: 5 seconds)
   -h, --help      Show this help message
 
 Environment variables:
@@ -56,6 +59,9 @@ Environment variables:
   LISTEN_PORT     Listen port number (alternative to -p/--port)
   CONNECT         Comma-separated list of IP:port (alternative to -c/--connect)
   NODE_ID         Node ID (alternative to -i/--node-id)
+  CONNECT_TIMEOUT  Connect timeout in seconds (alternative to -w/--connect-timeout)
+  RECONNECT_RETRIES   Reconnect retries (alternative to --reconnect-retries)
+  RECONNECT_DELAY     Delay between reconnect attempts (alternative to --reconnect-delay)
   LOG_LEVEL       Log level: info, debug, or trace (alternative to -v flags)
 ```
 
@@ -119,15 +125,6 @@ Log levels (in order of severity):
 - **TRACE** - Detailed tracing data (argument parsing details, etc.)
 
 Use appropriate log levels for each message.
-
-## Network Constants
-
-```c
-#define NETWORK_BUFFER_SIZE 4096
-#define NETWORK_CONNECT_TIMEOUT_SEC 5
-#define NETWORK_RETRY_COUNT 5
-#define NETWORK_RETRY_DELAY_SEC 5
-```
 
 ## Data Structures
 

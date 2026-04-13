@@ -24,6 +24,9 @@ void args_print_help(const char *prog_name) {
     printf("  -p, --port N    Listen port number (1-65535)\n");
     printf("  -c, --connect   Comma-separated list of IP:port to connect (default port: 5555)\n");
     printf("  -i, --node-id N Node ID (0 or greater)\n");
+    printf("  -w, --connect-timeout N  Connect timeout in seconds (default: 5)\n");
+    printf("  --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable)\n");
+    printf("  --reconnect-delay N       Delay between reconnect attempts (default: 5 seconds)\n");
     printf("  -h, --help      Show this help message\n");
     printf("\n");
     printf("Environment variables:\n");
@@ -31,6 +34,9 @@ void args_print_help(const char *prog_name) {
     printf("  LISTEN_PORT     Listen port number (alternative to -p/--port)\n");
     printf("  CONNECT         Comma-separated list of IP:port to connect (alternative to -c/--connect)\n");
     printf("  NODE_ID         Node ID (alternative to -i/--node-id)\n");
+    printf("  CONNECT_TIMEOUT  Connect timeout in seconds (alternative to -w/--connect-timeout)\n");
+    printf("  RECONNECT_RETRIES   Reconnect retries (alternative to --reconnect-retries)\n");
+    printf("  RECONNECT_DELAY     Delay between reconnect attempts (alternative to --reconnect-delay)\n");
 }
 
 static int is_help_flag(const char *arg) {
@@ -116,6 +122,21 @@ static int parse_node_id(const char *value) {
         return -1;
     }
     return (int)id;
+}
+
+static int parse_int(const char *value) {
+    if (NULL == value) {
+        return -1;
+    }
+    char *endptr = NULL;
+    long val = strtol(value, &endptr, 10);
+    if (NULL != endptr && '\0' != endptr[0]) {
+        return -1;
+    }
+    if (0 > val) {
+        return -1;
+    }
+    return (int)val;
 }
 
 static int validate_ip(const char *ip) {
@@ -294,6 +315,12 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
     int port_set = 0;
     int node_id = -1;
     int node_id_set = 0;
+    int connect_timeout = ARGS_CONNECT_TIMEOUT_DEFAULT;
+    int connect_timeout_set = 0;
+    int reconnect_retries = ARGS_RECONNECT_RETRIES_DEFAULT;
+    int reconnect_retries_set = 0;
+    int reconnect_delay = ARGS_RECONNECT_DELAY_DEFAULT;
+    int reconnect_delay_set = 0;
 
     if (NULL == args_out) {
         rc = E__INVALID_ARG_NULL_POINTER;
@@ -301,6 +328,9 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
     }
     args_out->connect_count = 0;
     args_out->node_id = -1;
+    args_out->connect_timeout = ARGS_CONNECT_TIMEOUT_DEFAULT;
+    args_out->reconnect_retries = ARGS_RECONNECT_RETRIES_DEFAULT;
+    args_out->reconnect_delay = ARGS_RECONNECT_DELAY_DEFAULT;
 
 #ifdef __DEBUG__
     for (int i = 1; i < argc; i++) {
@@ -389,6 +419,42 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
         node_id = id;
         node_id_set = 1;
     }
+    char *env_connect_timeout = get_env(ARGS_ENV_CONNECT_TIMEOUT);
+    if (NULL != env_connect_timeout) {
+        LOG_TRACE("Using CONNECT_TIMEOUT from environment: %s", env_connect_timeout);
+        FAIL_IF(0 != connect_timeout_set, E__ARGS__CONFLICTING_ARGUMENTS);
+        int t = parse_int(env_connect_timeout);
+        if (1 > t) {
+            LOG_ERROR("Invalid CONNECT_TIMEOUT value: %s (must be 1 or greater)", env_connect_timeout);
+            FAIL(E__ARGS__INVALID_CONNECT_TIMEOUT);
+        }
+        connect_timeout = t;
+        connect_timeout_set = 1;
+    }
+    char *env_reconnect_retries = get_env(ARGS_ENV_RECONNECT_RETRIES);
+    if (NULL != env_reconnect_retries) {
+        LOG_TRACE("Using RECONNECT_RETRIES from environment: %s", env_reconnect_retries);
+        FAIL_IF(0 != reconnect_retries_set, E__ARGS__CONFLICTING_ARGUMENTS);
+        int r = parse_int(env_reconnect_retries);
+        if (0 > r) {
+            LOG_ERROR("Invalid RECONNECT_RETRIES value: %s (must be 0 or greater)", env_reconnect_retries);
+            FAIL(E__ARGS__INVALID_RECONNECT_RETRIES);
+        }
+        reconnect_retries = r;
+        reconnect_retries_set = 1;
+    }
+    char *env_reconnect_delay = get_env(ARGS_ENV_RECONNECT_DELAY);
+    if (NULL != env_reconnect_delay) {
+        LOG_TRACE("Using RECONNECT_DELAY from environment: %s", env_reconnect_delay);
+        FAIL_IF(0 != reconnect_delay_set, E__ARGS__CONFLICTING_ARGUMENTS);
+        int d = parse_int(env_reconnect_delay);
+        if (1 > d) {
+            LOG_ERROR("Invalid RECONNECT_DELAY value: %s (must be 1 or greater)", env_reconnect_delay);
+            FAIL(E__ARGS__INVALID_RECONNECT_DELAY);
+        }
+        reconnect_delay = d;
+        reconnect_delay_set = 1;
+    }
 
     for (int i = 1; i < argc; i++) {
         const char *arg = argv[i];
@@ -467,6 +533,69 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 LOG_TRACE("Using node ID from CLI argument: %d", id);
                 node_id = id;
                 node_id_set = 1;
+            } else if (0 == strcmp(arg, ARGS_FLAG_CONNECT_TIMEOUT_SHORT) || 0 == strcmp(arg, ARGS_FLAG_CONNECT_TIMEOUT_LONG)) {
+                LOG_TRACE("Connect timeout flag detected: %s", arg);
+                if (i >= argc - 1) {
+#ifdef __DEBUG__
+                    args_print_usage(argv[0]);
+#endif /* #ifdef __DEBUG__ */
+                    FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+                }
+                if (connect_timeout_set) {
+                    LOG_ERROR("Connect timeout already set via CONNECT_TIMEOUT env, cannot override with CLI -w/--connect-timeout");
+                    FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
+                }
+                i++;
+                int t = parse_int(argv[i]);
+                if (1 > t) {
+                    LOG_ERROR("Invalid connect timeout value: %s (must be 1 or greater)", argv[i]);
+                    FAIL(E__ARGS__INVALID_CONNECT_TIMEOUT);
+                }
+                LOG_TRACE("Using connect timeout from CLI argument: %d", t);
+                connect_timeout = t;
+                connect_timeout_set = 1;
+            } else if (0 == strcmp(arg, ARGS_FLAG_RECONNECT_RETRIES_LONG)) {
+                LOG_TRACE("Reconnect retries flag detected: %s", arg);
+                if (i >= argc - 1) {
+#ifdef __DEBUG__
+                    args_print_usage(argv[0]);
+#endif /* #ifdef __DEBUG__ */
+                    FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+                }
+                if (reconnect_retries_set) {
+                    LOG_ERROR("Reconnect retries already set via RECONNECT_RETRIES env, cannot override with CLI --reconnect-retries");
+                    FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
+                }
+                i++;
+                int r = parse_int(argv[i]);
+                if (0 > r) {
+                    LOG_ERROR("Invalid reconnect retries value: %s (must be 0 or greater)", argv[i]);
+                    FAIL(E__ARGS__INVALID_RECONNECT_RETRIES);
+                }
+                LOG_TRACE("Using reconnect retries from CLI argument: %d", r);
+                reconnect_retries = r;
+                reconnect_retries_set = 1;
+            } else if (0 == strcmp(arg, ARGS_FLAG_RECONNECT_DELAY_LONG)) {
+                LOG_TRACE("Reconnect delay flag detected: %s", arg);
+                if (i >= argc - 1) {
+#ifdef __DEBUG__
+                    args_print_usage(argv[0]);
+#endif /* #ifdef __DEBUG__ */
+                    FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+                }
+                if (reconnect_delay_set) {
+                    LOG_ERROR("Reconnect delay already set via RECONNECT_DELAY env, cannot override with CLI --reconnect-delay");
+                    FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
+                }
+                i++;
+                int d = parse_int(argv[i]);
+                if (1 > d) {
+                    LOG_ERROR("Invalid reconnect delay value: %s (must be 1 or greater)", argv[i]);
+                    FAIL(E__ARGS__INVALID_RECONNECT_DELAY);
+                }
+                LOG_TRACE("Using reconnect delay from CLI argument: %d", d);
+                reconnect_delay = d;
+                reconnect_delay_set = 1;
 #ifdef __DEBUG__
             } else if (count_v_flags(arg) > 0) {
                 continue;
@@ -498,6 +627,9 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
     args_out->listen_addr.ip = listen_ip;
     args_out->listen_addr.port = listen_port;
     args_out->node_id = node_id;
+    args_out->connect_timeout = connect_timeout;
+    args_out->reconnect_retries = reconnect_retries;
+    args_out->reconnect_delay = reconnect_delay;
 
 l_cleanup:
     return rc;
