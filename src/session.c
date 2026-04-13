@@ -8,6 +8,49 @@
 #include "session.h"
 #include "transport.h"
 
+static void log_sent_packet(const uint8_t *header, int fd) {
+    protocol_msg_t *msg = (protocol_msg_t *)header;
+    uint32_t orig_src = PROTOCOL_FIELD_FROM_NETWORK(msg->orig_src_node_id);
+    uint32_t src = PROTOCOL_FIELD_FROM_NETWORK(msg->src_node_id);
+    uint32_t dst = PROTOCOL_FIELD_FROM_NETWORK(msg->dst_node_id);
+    uint32_t msg_id = PROTOCOL_FIELD_FROM_NETWORK(msg->message_id);
+    uint32_t type = PROTOCOL_FIELD_FROM_NETWORK(msg->type);
+    uint32_t data_len = PROTOCOL_FIELD_FROM_NETWORK(msg->data_length);
+    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
+    LOG_TRACE("Sent packet: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%d, ttl=%u, data_len=%u, fd=%d", orig_src, src, dst, msg_id, type, ttl, data_len, fd);
+}
+
+err_t SESSION__send_packet(transport_t *t, uint32_t src_node_id, uint32_t dst_node_id, msg_type_t type, const uint8_t *data, size_t data_len) {
+    err_t rc = E__SUCCESS;
+
+    VALIDATE_ARGS(t);
+
+    uint8_t header[PROTOCOL_HEADER_SIZE];
+    memset(header, 0, sizeof(header));
+
+    protocol_msg_t *msg = (protocol_msg_t *)header;
+    memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
+    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK(src_node_id);
+    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK(src_node_id);
+    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(dst_node_id);
+    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->type = PROTOCOL_FIELD_TO_NETWORK((uint32_t)type);
+    msg->data_length = PROTOCOL_FIELD_TO_NETWORK((uint32_t)data_len);
+    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
+
+    rc = TRANSPORT__send_one(t, header, sizeof(header));
+    FAIL_IF(E__SUCCESS != rc, rc);
+    log_sent_packet(header, t->fd);
+
+    if (NULL != data && data_len > 0) {
+        rc = TRANSPORT__send_one(t, data, data_len);
+        FAIL_IF(E__SUCCESS != rc, rc);
+    }
+
+l_cleanup:
+    return rc;
+}
+
 static err_t SESSION__handle_node_init(routing_table_t *rt, int fd, uint32_t orig_src_node_id, uint32_t src_node_id, uint32_t message_id, uint32_t ttl, uint32_t data_length, uint8_t *data, uint32_t *out_node_id) {
     err_t rc = E__SUCCESS;
 

@@ -16,6 +16,28 @@ ssize_t TRANSPORT__send(int fd, const uint8_t *buf, size_t len) {
     return send(fd, buf, len, 0);
 }
 
+err_t TRANSPORT__send_one(transport_t *t, const uint8_t *buf, size_t len) {
+    err_t rc = E__SUCCESS;
+
+    if (NULL == t || NULL == buf) {
+        rc = E__INVALID_ARG_NULL_POINTER;
+        goto l_cleanup;
+    }
+
+    ssize_t n = t->send(t->fd, buf, len);
+    if (0 > n) {
+        LOG_WARNING("send failed on fd %d: %s", t->fd, strerror(errno));
+        FAIL(E__NET__SOCKET_CONNECT_FAILED);
+    }
+    if ((size_t)n < len) {
+        LOG_WARNING("partial send on fd %d: sent %zd of %zu", t->fd, n, len);
+        FAIL(E__NET__SOCKET_CONNECT_FAILED);
+    }
+
+l_cleanup:
+    return rc;
+}
+
 transport_t *TRANSPORT__create(int fd) {
     transport_t *t = malloc(sizeof(transport_t));
     if (NULL == t) {

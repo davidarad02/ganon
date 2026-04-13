@@ -18,6 +18,8 @@ struct transport {
 ssize_t TRANSPORT__recv(int fd, uint8_t *buf, size_t len);
 ssize_t TRANSPORT__send(int fd, const uint8_t *buf, size_t len);
 
+err_t TRANSPORT__send_one(transport_t *t, const uint8_t *buf, size_t len);
+
 transport_t *TRANSPORT__create(int fd);
 void TRANSPORT__destroy(transport_t *t);
 
