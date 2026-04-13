@@ -22,12 +22,12 @@ void log_init_from_env(void);
 #define LOG_WARN(msg, ...) log_message("WARN", __FILE__, __LINE__, msg, ##__VA_ARGS__)
 #define LOG_ERROR(msg, ...) log_message("ERROR", __FILE__, __LINE__, msg, ##__VA_ARGS__)
 #else
-#define LOG_INFO(msg, ...)  do { if (LOG_LEVEL_INFO >= log_get_level()) log_message("INFO", __FILE__, __LINE__, msg, ##__VA_ARGS__); } while (0)
+#define LOG_INFO(msg, ...)  ((void)0)
 #define LOG_DEBUG(msg, ...)  ((void)0)
 #define LOG_TRACE(msg, ...) ((void)0)
-#define LOG_WARNING(msg, ...) log_message("WARN", __FILE__, __LINE__, msg, ##__VA_ARGS__)
-#define LOG_WARN(msg, ...) log_message("WARN", __FILE__, __LINE__, msg, ##__VA_ARGS__)
-#define LOG_ERROR(msg, ...) log_message("ERROR", __FILE__, __LINE__, msg, ##__VA_ARGS__)
+#define LOG_WARNING(msg, ...) ((void)0)
+#define LOG_WARN(msg, ...) ((void)0)
+#define LOG_ERROR(msg, ...) ((void)0)
 #endif
 
 #endif
