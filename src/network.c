@@ -68,7 +68,6 @@ static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_
     protocol_msg_t *msg = (protocol_msg_t *)header;
     uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
     if (ttl == 0) {
-        LOG_DEBUG("TTL 0, skipping broadcast from node %u", sender_node_id);
         return;
     }
 
@@ -473,7 +472,7 @@ static void *socket_thread_func(void *arg) {
     }
 
     if (0 != entry->is_incoming) {
-        uint32_t prev_peer_node_id = entry->peer_node_id;
+        uint32_t prev_peer_node_id = 0;
         uint8_t header_buffer[PROTOCOL_HEADER_SIZE];
         memset(header_buffer, 0, sizeof(header_buffer));
         while (true) {
