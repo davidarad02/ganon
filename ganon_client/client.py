@@ -170,24 +170,25 @@ class GanonClient:
         while self._running:
             header_data = transport.recv_all(header_size)
             if header_data is None:
-                return False
+                self._handle_disconnect()
+                return
 
             header = ProtocolHeader.parse(header_data)
 
             if header.magic != "GNN\x00":
                 self._warning("Invalid magic: expected %s, got %.4s", GANON_PROTOCOL_MAGIC, header.magic)
-                return False
+                self._handle_disconnect()
+                return
 
             data_length = header.data_length
             data = b""
             if data_length > 0:
                 data = transport.recv_all(data_length)
                 if data is None:
-                    return False
+                    self._handle_disconnect()
+                    return
 
             self._process(header, data)
-
-        return True
 
     def _handle_disconnect(self):
         with self._lock:
