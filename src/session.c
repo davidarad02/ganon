@@ -157,9 +157,9 @@ static err_t SESSION__handle_message(routing_table_t *rt, int fd, uint32_t orig_
         FAIL_IF(E__SUCCESS != rc, E__SESSION__HANDLE_MESSAGE_FAILED);
         break;
     case MSG__NODE_DISCONNECT:
-        LOG_INFO("Node %u disconnected, removing from routing tables", src_node_id);
-        ROUTING__remove(rt, src_node_id);
-        ROUTING__remove_via_node(rt, src_node_id);
+        LOG_INFO("Node %u disconnected, removing from routing tables", orig_src_node_id);
+        ROUTING__remove(rt, orig_src_node_id);
+        ROUTING__remove_via_node(rt, orig_src_node_id);
         break;
     case MSG__CONNECTION_REJECTED:
         LOG_DEBUG("Received CONNECTION_REJECTED from node %u", src_node_id);
