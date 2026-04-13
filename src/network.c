@@ -342,7 +342,7 @@ static void *connect_thread_func(void *arg) {
     return NULL;
 }
 
-err_t network_init(network_t *net, const args_t *args) {
+err_t NETWORK__init(network_t *net, const args_t *args) {
     err_t rc = E__SUCCESS;
 
     if (NULL == net || NULL == args) {
@@ -416,7 +416,7 @@ l_cleanup:
     return rc;
 }
 
-err_t network_shutdown(network_t *net) {
+err_t NETWORK__shutdown(network_t *net) {
     err_t rc = E__SUCCESS;
 
     if (NULL == net) {

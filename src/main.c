@@ -20,7 +20,7 @@ int main(int argc, char *argv[]) {
     args_t args;
     network_t network;
 
-    rc = args_parse(&args, argc, argv);
+    rc = ARGS__parse(&args, argc, argv);
     FAIL_IF(E__SUCCESS != rc, rc);
 
     g_node_id = args.node_id;
@@ -33,7 +33,7 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    rc = network_init(&network, &args);
+    rc = NETWORK__init(&network, &args);
     FAIL_IF(E__SUCCESS != rc, rc);
 
     LOG_INFO("Network initialized");
@@ -48,7 +48,7 @@ int main(int argc, char *argv[]) {
     }
 
     LOG_INFO("Shutdown requested, stopping network...");
-    rc = network_shutdown(&network);
+    rc = NETWORK__shutdown(&network);
     FAIL_IF(E__SUCCESS != rc, rc);
 
     LOG_INFO("ganon stopped");

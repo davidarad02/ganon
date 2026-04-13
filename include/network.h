@@ -34,9 +34,8 @@ struct network_t {
     int connect_thread_count;
 };
 
-err_t network_init(network_t *net, const args_t *args);
-err_t network_shutdown(network_t *net);
-void network_print_status(network_t *net);
+err_t NETWORK__init(network_t *net, const args_t *args);
+err_t NETWORK__shutdown(network_t *net);
 
 extern int g_node_id;
 

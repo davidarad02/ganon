@@ -285,7 +285,7 @@ l_cleanup:
     return rc;
 }
 
-err_t args_parse(args_t *args_out, int argc, char *argv[]) {
+err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
 
     char *listen_ip = NULL;
