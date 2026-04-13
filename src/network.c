@@ -239,7 +239,7 @@ static void *socket_thread_func(void *arg) {
 
             int new_fd = connect_to_addr(entry->client_ip, entry->client_port, net->connect_timeout);
             if (0 > new_fd) {
-                LOG_WARNING("Reconnect attempt %d/%d failed", retry + 1, net->reconnect_retries);
+                LOG_WARNING("Reconnect attempt %d/%d failed, retrying in %ds", retry + 1, net->reconnect_retries, net->reconnect_delay);
                 continue;
             }
 
