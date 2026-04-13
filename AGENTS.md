@@ -15,8 +15,8 @@ This is the Ganon project - a mesh-style network tunneler in C built with CMake.
 ### Python Client Library
 
 - `ganon_client/` - Python package
-- `ganon_client/ganon_client/__init__.py` - Package init
-- `ganon_client/ganon_client/client.py` - GanonClient class
+- `ganon_client/__init__.py` - Package init, exports GanonClient
+- `ganon_client/client.py` - GanonClient class
 - `ganon_client/pyproject.toml` - Build configuration
 - `venv/` - Python virtual environment
 
@@ -252,3 +252,79 @@ Test the client:
 /home/arad/projects/ganon/venv/bin/ipython
 from ganon_client import GanonClient
 ```
+
+### GanonClient Class
+
+```python
+from ganon_client import GanonClient
+
+client = GanonClient(
+    ip="127.0.0.1",
+    port=5555,
+    connect_timeout=5,      # Connection attempt timeout (seconds)
+    reconnect_retries=5,    # Retries on disconnect (-1 for unlimited)
+    reconnect_delay=5,      # Delay between reconnect attempts (seconds)
+    log_level=LOG_LEVEL_INFO,
+)
+```
+
+#### Constructor Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `ip` | str | (required) | Server IP address |
+| `port` | int | (required) | Server port |
+| `connect_timeout` | int | 5 | Socket connection timeout (seconds) |
+| `reconnect_retries` | int | 5 | Reconnect attempts (-1 = unlimited, 0 = disabled) |
+| `reconnect_delay` | int | 5 | Seconds between reconnect attempts |
+| `log_level` | int | LOG_LEVEL_INFO | Minimum log level to output |
+
+#### Log Levels
+
+```python
+LOG_LEVEL_TRACE = 0  # Detailed tracing
+LOG_LEVEL_DEBUG = 1  # Debug messages
+LOG_LEVEL_INFO = 2   # Informational messages
+```
+
+#### Methods
+
+| Method | Description |
+|--------|-------------|
+| `connect() -> bool` | Connect to server. Returns True on success. |
+| `disconnect()` | Disconnect from server gracefully. |
+| `reconnect() -> bool` | Force reconnect. Returns True if reconnected. |
+| `is_connected() -> bool` | Check if connected. |
+| `send(data: bytes) -> int` | Send raw bytes to server. |
+| `recv(bufsize: int = 4096) -> bytes` | Receive raw bytes (blocking). |
+
+#### Context Manager
+
+```python
+with GanonClient("127.0.0.1", 5555) as client:
+    client.send(b"hello")
+    data = client.recv()
+```
+
+#### Callbacks
+
+Set callbacks to handle events asynchronously:
+
+```python
+client.set_on_data_received(lambda data: print("Received:", data))
+client.set_on_disconnected(lambda: print("Disconnected!"))
+client.set_on_reconnected(lambda: print("Reconnected!"))
+```
+
+| Callback | Signature | Triggered When |
+|----------|-----------|----------------|
+| `on_data_received` | `(data: bytes) -> None` | Data received from server |
+| `on_disconnected` | `() -> None` | Connection lost |
+| `on_reconnected` | `() -> None` | Successfully reconnected |
+
+#### Architecture
+
+- **Receive Thread**: Background thread monitors socket for incoming data and disconnection
+- **Auto-Reconnect**: On unexpected disconnect, automatically attempts reconnection
+- **Thread Safety**: All public methods use locks for thread-safe access
+- **Logging**: Follows ganon C logging conventions (ERROR/WARN always logged, INFO/DEBUG/TRACE conditional)
