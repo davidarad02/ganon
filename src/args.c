@@ -25,7 +25,7 @@ void args_print_help(const char *prog_name) {
     printf("  -c, --connect   Comma-separated list of IP:port to connect (default port: 5555)\n");
     printf("  -i, --node-id N Node ID (0 or greater)\n");
     printf("  -w, --connect-timeout N  Connect timeout in seconds (default: 5)\n");
-    printf("  --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable)\n");
+    printf("  --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable, max/always for unlimited)\n");
     printf("  --reconnect-delay N       Delay between reconnect attempts (default: 5 seconds)\n");
     printf("  -h, --help      Show this help message\n");
     printf("\n");
