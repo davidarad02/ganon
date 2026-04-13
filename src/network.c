@@ -21,6 +21,8 @@ int g_node_id = -1;
 static err_t send_raw(int fd, const uint8_t *buf, size_t len) {
     err_t rc = E__SUCCESS;
 
+    LOG_TRACE("send_raw called: fd=%d, len=%zu", fd, len);
+
     size_t total_sent = 0;
     while (total_sent < len) {
         ssize_t n = send(fd, buf + total_sent, len - total_sent, 0);
@@ -31,6 +33,7 @@ static err_t send_raw(int fd, const uint8_t *buf, size_t len) {
             LOG_WARNING("send failed on fd %d: %s", fd, strerror(errno));
             FAIL(E__NET__SOCKET_CONNECT_FAILED);
         }
+        LOG_TRACE("send returned %zd on fd %d", n, fd);
         total_sent += (size_t)n;
     }
 
@@ -189,10 +192,33 @@ err_t NETWORK__send_to(network_t *net, uint32_t node_id, const uint8_t *buf, siz
     if (NULL == net || NULL == buf) {
         return E__INVALID_ARG_NULL_POINTER;
     }
-    if (NULL != net->send_fn) {
-        net->send_fn(node_id, buf, len, net->send_ctx);
+
+    pthread_mutex_lock(&net->clients_mutex);
+    socket_entry_t *entry = net->clients;
+
+    if (node_id == 0) {
+        while (NULL != entry) {
+            if (entry->t->fd >= 0) {
+                send_raw(entry->t->fd, buf, len);
+            }
+            entry = entry->next;
+        }
+        pthread_mutex_unlock(&net->clients_mutex);
+        return E__SUCCESS;
     }
-    return E__SUCCESS;
+
+    while (NULL != entry) {
+        if (entry->t->node_id == node_id) {
+            err_t rc = send_raw(entry->t->fd, buf, len);
+            pthread_mutex_unlock(&net->clients_mutex);
+            return rc;
+        }
+        entry = entry->next;
+    }
+    pthread_mutex_unlock(&net->clients_mutex);
+
+    LOG_WARNING("NETWORK__send_to: no transport found for node_id=%u", node_id);
+    return E__NET__SOCKET_CONNECT_FAILED;
 }
 
 static void *socket_thread_func(void *arg) {
@@ -206,15 +232,21 @@ static void *socket_thread_func(void *arg) {
         LOG_INFO("Connected to %s:%d (fd=%d)", t->client_ip, t->client_port, t->fd);
     }
 
+    LOG_DEBUG("Calling connected_cb for fd=%d", t->fd);
+
     if (NULL != net->connected_cb) {
         net->connected_cb(net->session_ctx, t);
     }
 
+    LOG_DEBUG("Starting recv loop for fd=%d", t->fd);
+
     while (true) {
+        LOG_TRACE("About to call TRANSPORT__recv_msg on fd=%d", t->fd);
         protocol_msg_t msg;
         uint8_t *data = NULL;
         err_t rc = TRANSPORT__recv_msg(t, &msg, &data);
         if (E__SUCCESS != rc) {
+            LOG_DEBUG("TRANSPORT__recv_msg returned error on fd=%d, closing connection", t->fd);
             break;
         }
 
