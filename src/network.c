@@ -141,7 +141,7 @@ static int connect_to_addr(const char *ip, int port, int timeout_sec) {
         }
     }
 
-    LOG_INFO("Connected to %s:%d", ip, port);
+    LOG_INFO("Socket connected (fd=%d) to %s:%d", fd, ip, port);
     return fd;
 }
 
