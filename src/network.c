@@ -499,7 +499,6 @@ static void *socket_thread_func(void *arg) {
             if (prev_peer_node_id != entry->peer_node_id && 0 != entry->peer_node_id) {
                 LOG_INFO("Node %u connected (fd=%d), broadcasting to network and sending peer info", entry->peer_node_id, entry->fd);
                 broadcast_to_others(net, entry->fd, entry->peer_node_id, header_buffer, NULL, 0);
-                send_node_init(entry->fd, (uint32_t)g_node_id);
                 send_peer_info(net, entry->fd, (uint32_t)g_node_id, entry->peer_node_id);
                 prev_peer_node_id = entry->peer_node_id;
                 memset(header_buffer, 0, sizeof(header_buffer));

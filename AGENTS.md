@@ -264,18 +264,16 @@ typedef enum {
 **When node A connects to server S:**
 1. A sends NODE_INIT to S (I am node A)
 2. S adds direct route to A
-3. S sends NODE_INIT back to A (so A can add S as direct route)
-4. S broadcasts NODE_INIT to all OTHER connected peers (excluding A) with TTL-1
-5. S sends PEER_INFO to A listing all peers reachable through S
+3. S broadcasts NODE_INIT to all OTHER connected peers (excluding A) with TTL-1
+4. S sends PEER_INFO to A listing all peers reachable through S
 
 **When node B connects to server S:**
 1. B sends NODE_INIT to S (I am node B)
 2. S adds direct route to B
-3. S sends NODE_INIT back to B (so B can add S as direct route)
-4. S broadcasts NODE_INIT to all OTHER connected peers (A) with TTL-1
-5. A receives broadcast, adds route to B via S
-6. S sends PEER_INFO to B listing all peers (including A)
-7. B adds route to A via S
+3. S broadcasts NODE_INIT to all OTHER connected peers (A) with TTL-1
+4. A receives broadcast, adds route to B via S
+5. S sends PEER_INFO to B listing all peers (including A)
+6. B adds route to A via S
 
 **PEER_INFO Propagation (route learning):**
 When a node receives PEER_INFO, it extracts the peer list and broadcasts a NEW PEER_INFO to all its OTHER direct peers (excluding the sender). This propagates learned routes through the network.
