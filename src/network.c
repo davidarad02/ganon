@@ -306,9 +306,9 @@ static void send_connection_rejected(int fd, uint32_t node_id) {
 
     ssize_t sent = send(fd, header, sizeof(header), 0);
     if (0 > sent) {
-        LOG_WARNING("Failed to send CONNECTION_REJECTED to fd %d", fd);
+        LOG_ERROR("Failed to send CONNECTION_REJECTED to fd %d", fd);
     } else {
-        LOG_DEBUG("Sent CONNECTION_REJECTED to fd %d (node_id=%u)", fd, node_id);
+        LOG_INFO(">>> SENT CONNECTION_REJECTED to fd %d (node_id=%u) <<<", fd, node_id);
     }
 
     struct timespec ts = {0, 100000};
