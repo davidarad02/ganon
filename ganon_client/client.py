@@ -2,13 +2,12 @@ import logging
 import socket
 import struct
 import threading
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 LOG_LEVEL_TRACE = 0
 LOG_LEVEL_DEBUG = 1
 LOG_LEVEL_INFO = 2
-
-g_log_level = LOG_LEVEL_INFO
 
 
 class GanonClient:
@@ -31,6 +30,11 @@ class GanonClient:
         self._sock: Optional[socket.socket] = None
         self._running = False
         self._lock = threading.Lock()
+        self._recv_thread: Optional[threading.Thread] = None
+
+        self._on_data_received: Optional[Callable[[bytes], None]] = None
+        self._on_disconnected: Optional[Callable[[], None]] = None
+        self._on_reconnected: Optional[Callable[[], None]] = None
 
         self._logger = logging.getLogger("ganon_client")
         self._logger.setLevel(logging.DEBUG)
@@ -69,6 +73,15 @@ class GanonClient:
     def _error(self, msg: str, *args, **kwargs):
         self._logger.error(msg, *args, **kwargs)
 
+    def set_on_data_received(self, callback: Callable[[bytes], None]):
+        self._on_data_received = callback
+
+    def set_on_disconnected(self, callback: Callable[[], None]):
+        self._on_disconnected = callback
+
+    def set_on_reconnected(self, callback: Callable[[], None]):
+        self._on_reconnected = callback
+
     def _connect(self) -> Optional[socket.socket]:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(self.connect_timeout)
@@ -87,6 +100,89 @@ class GanonClient:
             sock.close()
             return None
 
+    def _recv_loop(self):
+        while self._running:
+            try:
+                data = self._sock.recv(4096)
+                if not data:
+                    self._warning("Socket disconnected (fd=%d)", self._sock.fileno())
+                    break
+                self._trace("Received %d bytes from fd %d", len(data), self._sock.fileno())
+                if self._on_data_received:
+                    self._on_data_received(data)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+
+        if self._running:
+            self._warning("Connection lost to %s:%d", self.ip, self.port)
+            if self._on_disconnected:
+                self._on_disconnected()
+            self._handle_disconnect()
+
+    def _handle_disconnect(self):
+        with self._lock:
+            if self._sock:
+                try:
+                    self._sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                try:
+                    self._sock.close()
+                except OSError:
+                    pass
+                self._sock = None
+
+        if self._running:
+            self._do_reconnect()
+
+    def _do_reconnect(self):
+        retry = 0
+        unlimited = self.reconnect_retries < 0
+
+        while self._running:
+            if not unlimited:
+                self._info(
+                    "Reconnecting to %s:%d (attempt %d/%d)...",
+                    self.ip,
+                    self.port,
+                    retry + 1,
+                    self.reconnect_retries,
+                )
+            else:
+                self._info(
+                    "Reconnecting to %s:%d (attempt %d)...",
+                    self.ip,
+                    self.port,
+                    retry + 1,
+                )
+
+            if self._connect() is not None:
+                with self._lock:
+                    self._sock = self._sock
+                self._info("Reconnected to %s:%d", self.ip, self.port)
+                if self._on_reconnected:
+                    self._on_reconnected()
+                self._start_recv_thread()
+                return
+
+            if not unlimited and retry >= self.reconnect_retries - 1:
+                self._warning("All reconnect attempts failed, giving up on %s:%d", self.ip, self.port)
+                return
+
+            self._warning(
+                "Reconnect attempt %d failed, retrying in %ds",
+                retry + 1,
+                self.reconnect_delay,
+            )
+            time.sleep(self.reconnect_delay)
+            retry += 1
+
+    def _start_recv_thread(self):
+        self._recv_thread = threading.Thread(target=self._recv_loop, daemon=True)
+        self._recv_thread.start()
+
     def connect(self) -> bool:
         with self._lock:
             if self._sock is not None:
@@ -99,10 +195,13 @@ class GanonClient:
 
             self._sock = sock
             self._running = True
+            self._start_recv_thread()
             return True
 
     def disconnect(self):
         with self._lock:
+            self._running = False
+
             if self._sock is not None:
                 self._info("Disconnecting from %s:%d", self.ip, self.port)
                 try:
@@ -111,61 +210,30 @@ class GanonClient:
                     pass
                 self._sock.close()
                 self._sock = None
-            self._running = False
+
+            if self._recv_thread is not None:
+                self._recv_thread.join(timeout=2)
+                self._recv_thread = None
 
     def is_connected(self) -> bool:
         with self._lock:
-            return self._sock is not None
+            return self._sock is not None and self._running
 
     def reconnect(self) -> bool:
         with self._lock:
-            self._info("Reconnecting to %s:%d...", self.ip, self.port)
+            if self._running:
+                self._running = False
+                if self._sock:
+                    try:
+                        self._sock.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    self._sock.close()
+                    self._sock = None
 
-            if self._sock is not None:
-                try:
-                    self._sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                self._sock.close()
-                self._sock = None
-
-            retry = 0
-            unlimited = self.reconnect_retries < 0
-
-            while True:
-                if not unlimited:
-                    self._info(
-                        "Reconnecting to %s:%d (attempt %d/%d)...",
-                        self.ip,
-                        self.port,
-                        retry + 1,
-                        self.reconnect_retries,
-                    )
-                else:
-                    self._info(
-                        "Reconnecting to %s:%d (attempt %d)...",
-                        self.ip,
-                        self.port,
-                        retry + 1,
-                    )
-
-                sock = self._connect()
-                if sock is not None:
-                    self._sock = sock
-                    self._running = True
-                    self._info("Reconnected to %s:%d", self.ip, self.port)
-                    return True
-
-                if not unlimited and retry >= self.reconnect_retries - 1:
-                    self._warning("All reconnect attempts failed, giving up on %s:%d", self.ip, self.port)
-                    return False
-
-                self._warning(
-                    "Reconnect attempt %d failed, retrying in %ds",
-                    retry + 1,
-                    self.reconnect_delay,
-                )
-                retry += 1
+        self._running = True
+        self._do_reconnect()
+        return self._sock is not None
 
     def send(self, data: bytes) -> int:
         with self._lock:
