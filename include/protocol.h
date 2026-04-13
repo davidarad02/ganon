@@ -21,9 +21,8 @@ typedef struct {
     uint32_t message_id;
     msg_type_t type;
     uint32_t data_length;
-    uint8_t data[];
 } protocol_msg_t;
 
-#define PROTOCOL_HEADER_SIZE 24
+#define PROTOCOL_HEADER_SIZE 28
 
 #endif /* #ifndef GANON_PROTOCOL_H */

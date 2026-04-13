@@ -21,6 +21,7 @@
 int g_node_id = -1;
 
 static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_node_id, const uint8_t *header, const uint8_t *data, size_t data_len) {
+    (void)sender_node_id;
     if (NULL == net || NULL == header) {
         return;
     }

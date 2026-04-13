@@ -175,7 +175,7 @@ class GanonClient:
             self._warning("Unknown message type: %d", header["type"])
 
     def _protocol_loop(self):
-        header_size = 24
+        header_size = 28
         transport = Transport(self._sock)
         while self._running:
             header_data = transport.recv_all(header_size)
@@ -268,6 +268,20 @@ class GanonClient:
         self._recv_thread = threading.Thread(target=self._protocol_loop, daemon=True)
         self._recv_thread.start()
 
+    def _send_node_init(self):
+        if self._sock is None:
+            return
+        
+        header = b'GNN\x00'
+        header += struct.pack(">I", self.node_id)  # orig_src_node_id
+        header += struct.pack(">I", self.node_id)  # src_node_id
+        header += struct.pack(">I", 0)              # dst_node_id (0 for broadcast)
+        header += struct.pack(">I", 0)              # message_id
+        header += struct.pack(">I", 0)              # type (NODE_INIT = 0)
+        header += struct.pack(">I", 0)              # data_length
+        
+        self._sock.sendall(header)
+
     def connect(self) -> bool:
         with self._lock:
             if self._sock is not None:
@@ -280,6 +294,7 @@ class GanonClient:
 
             self._sock = sock
             self._running = True
+            self._send_node_init()
             self._start_recv_thread()
             return True
 
