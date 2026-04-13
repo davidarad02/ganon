@@ -186,6 +186,13 @@ static void *socket_thread_func(void *arg) {
 
         buffer[bytes_read] = '\0';
         LOG_TRACE("Received %zd bytes from fd %d", bytes_read, fd);
+
+        ssize_t bytes_sent = send(fd, buffer, (size_t)bytes_read, 0);
+        if (0 > bytes_sent) {
+            LOG_WARNING("send failed on fd %d: %s", fd, strerror(errno));
+            break;
+        }
+        LOG_TRACE("Sent %zd bytes to fd %d", bytes_sent, fd);
     }
 
     shutdown(fd, SHUT_RDWR);
