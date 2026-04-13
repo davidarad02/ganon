@@ -61,6 +61,22 @@ static int is_positional(const char *arg) {
     return ('-' != arg[0]);
 }
 
+static int count_v_flags(const char *arg) {
+    if (NULL == arg || '-' != arg[0]) {
+        return 0;
+    }
+    int count = 0;
+    const char *p = arg + 1;
+    while ('v' == *p) {
+        count++;
+        p++;
+    }
+    if ('\0' != *p) {
+        return 0;
+    }
+    return count;
+}
+
 static char *get_env(const char *key) {
     if (NULL == key) {
         return NULL;
@@ -158,10 +174,12 @@ err_t args_parse(args_t *args_out, int argc, char *argv[]) {
 
     int v_count = 0;
     for (int i = 1; i < argc; i++) {
-        if (0 == strcmp(argv[i], "-v")) {
-            v_count++;
-        } else if (0 == strcmp(argv[i], "-vv")) {
-            v_count += 2;
+        int v = count_v_flags(argv[i]);
+        if (v > 0) {
+            v_count += v;
+        }
+        if (v_count >= 2) {
+            v_count = 2;
         }
     }
 
@@ -245,8 +263,10 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 LOG_TRACE("Using port from CLI argument: %d", port);
                 listen_port = port;
                 port_set = 1;
-            } else if (0 == strcmp(arg, "-v") || 0 == strcmp(arg, "-vv")) {
-            continue;
+#ifdef __DEBUG__
+            } else if (count_v_flags(arg) > 0) {
+                continue;
+#endif
         } else {
                 LOG_ERROR("Unknown argument: %s", arg);
                 FAIL(E__ARGS__UNKNOWN_FLAG);
