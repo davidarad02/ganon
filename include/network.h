@@ -2,6 +2,7 @@
 #define GANON_NETWORK_H
 
 #include <pthread.h>
+#include <netinet/in.h>
 
 #include "args.h"
 #include "err.h"
@@ -16,6 +17,8 @@ typedef struct socket_entry {
     pthread_t thread;
     struct socket_entry *next;
     network_t *net;
+    char client_ip[INET_ADDRSTRLEN];
+    int client_port;
 } socket_entry_t;
 
 struct network_t {

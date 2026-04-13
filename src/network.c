@@ -164,7 +164,7 @@ static void *client_thread_func(void *arg) {
     int fd = entry->fd;
     char buffer[NETWORK_BUFFER_SIZE];
 
-    LOG_INFO("Client connected (fd=%d)", fd);
+    LOG_INFO("Client connected (fd=%d) from %s:%d", fd, entry->client_ip, entry->client_port);
 
     while (1) {
         ssize_t bytes_read = recv(fd, buffer, sizeof(buffer) - 1, 0);
@@ -276,6 +276,8 @@ static void *accept_thread_func(void *arg) {
         entry->fd = client_fd;
         entry->net = net;
         entry->next = NULL;
+        inet_ntop(AF_INET, &client_addr.sin_addr, entry->client_ip, INET_ADDRSTRLEN);
+        entry->client_port = ntohs(client_addr.sin_port);
 
         if (0 != pthread_mutex_lock(&net->clients_mutex)) {
             LOG_ERROR("Failed to lock mutex");
