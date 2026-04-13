@@ -104,7 +104,7 @@ static void broadcast_peer_info_to_others(network_t *net, int exclude_fd, uint32
     }
 
     for (size_t i = 0; i < peer_count; i++) {
-        ((uint32_t *)peer_data)[i] = PROTOCOL_FIELD_TO_NETWORK(peer_list[i]);
+        ((uint32_t *)peer_data)[i] = peer_list[i];
     }
 
     pthread_mutex_lock(&net->clients_mutex);
