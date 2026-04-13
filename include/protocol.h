@@ -11,6 +11,7 @@
 
 typedef enum {
     MSG__NODE_INIT = 0,
+    MSG__PEER_INFO = 1,
 } msg_type_t;
 
 typedef struct {
@@ -21,8 +22,11 @@ typedef struct {
     uint32_t message_id;
     msg_type_t type;
     uint32_t data_length;
+    uint32_t ttl;
 } protocol_msg_t;
 
-#define PROTOCOL_HEADER_SIZE 28
+#define PROTOCOL_HEADER_SIZE 32
+
+#define DEFAULT_TTL 16
 
 #endif /* #ifndef GANON_PROTOCOL_H */

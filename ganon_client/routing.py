@@ -67,3 +67,12 @@ class RoutingTable:
         if entry:
             return entry.next_hop_node_id
         return None
+
+    def log_table(self):
+        with self._lock:
+            print(f"Routing table ({len(self._entries)} entries):")
+            for node_id, entry in self._entries.items():
+                if entry.route_type == RouteType.DIRECT:
+                    print(f"  -> node {node_id}: direct (fd={entry.fd})")
+                else:
+                    print(f"  -> node {node_id}: via node {entry.next_hop_node_id}")

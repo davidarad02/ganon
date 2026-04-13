@@ -20,11 +20,20 @@
 
 int g_node_id = -1;
 
-static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_node_id, const uint8_t *header, const uint8_t *data, size_t data_len) {
+static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_node_id, uint8_t *header, const uint8_t *data, size_t data_len) {
     (void)sender_node_id;
     if (NULL == net || NULL == header) {
         return;
     }
+
+    protocol_msg_t *msg = (protocol_msg_t *)header;
+    uint32_t ttl = PROTOCOL_FIELD_FROM_NETWORK(msg->ttl);
+    if (ttl == 0) {
+        LOG_DEBUG("TTL 0, skipping broadcast from node %u", sender_node_id);
+        return;
+    }
+
+    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(ttl - 1);
 
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_t *client = net->clients;
@@ -42,11 +51,79 @@ static void broadcast_to_others(network_t *net, int exclude_fd, uint32_t sender_
                     LOG_WARNING("Failed to broadcast data to fd %d", client->fd);
                 }
             }
-            LOG_DEBUG("Broadcast NODE_INIT from node %u to node %u (fd=%d)", sender_node_id, client->peer_node_id, client->fd);
+            LOG_DEBUG("Broadcast from node %u to node %u (fd=%d, ttl=%u)", sender_node_id, client->peer_node_id, client->fd, ttl - 1);
         }
         client = client->next;
     }
     pthread_mutex_unlock(&net->clients_mutex);
+}
+
+static err_t send_peer_info(network_t *net, int fd, uint32_t src_node_id, uint32_t dst_node_id) {
+    err_t rc = E__SUCCESS;
+
+    pthread_mutex_lock(&net->clients_mutex);
+
+    size_t peer_count = 0;
+    socket_entry_t *client = net->clients;
+    while (NULL != client) {
+        if (client->fd != fd && 0 != client->peer_node_id) {
+            peer_count++;
+        }
+        client = client->next;
+    }
+
+    uint8_t header[PROTOCOL_HEADER_SIZE];
+    memset(header, 0, sizeof(header));
+
+    protocol_msg_t *msg = (protocol_msg_t *)header;
+    memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
+    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK(src_node_id);
+    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK(src_node_id);
+    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(dst_node_id);
+    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->type = (msg_type_t)PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__PEER_INFO);
+    msg->data_length = PROTOCOL_FIELD_TO_NETWORK((uint32_t)(peer_count * sizeof(uint32_t)));
+    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
+
+    ssize_t sent = send(fd, header, sizeof(header), 0);
+    if (0 > sent) {
+        LOG_WARNING("Failed to send PEER_INFO header to fd %d", fd);
+        pthread_mutex_unlock(&net->clients_mutex);
+        FAIL(E__NET__SOCKET_CONNECT_FAILED);
+    }
+
+    if (peer_count > 0) {
+        uint8_t *peer_data = malloc(peer_count * sizeof(uint32_t));
+        if (NULL == peer_data) {
+            LOG_ERROR("Failed to allocate peer data");
+            pthread_mutex_unlock(&net->clients_mutex);
+            FAIL(E__INVALID_ARG_NULL_POINTER);
+        }
+
+        peer_count = 0;
+        client = net->clients;
+        while (NULL != client) {
+            if (client->fd != fd && 0 != client->peer_node_id) {
+                ((uint32_t *)peer_data)[peer_count] = PROTOCOL_FIELD_TO_NETWORK(client->peer_node_id);
+                peer_count++;
+            }
+            client = client->next;
+        }
+
+        sent = send(fd, peer_data, peer_count * sizeof(uint32_t), 0);
+        if (0 > sent) {
+            LOG_WARNING("Failed to send PEER_INFO data to fd %d", fd);
+        } else {
+            LOG_DEBUG("Sent PEER_INFO to node %u with %zu peers", src_node_id, peer_count);
+        }
+
+        free(peer_data);
+    }
+
+    pthread_mutex_unlock(&net->clients_mutex);
+
+l_cleanup:
+    return rc;
 }
 
 static int create_listen_socket(const char *ip, int port) {
@@ -216,8 +293,9 @@ static void *socket_thread_func(void *arg) {
         memset(header_buffer, 0, sizeof(header_buffer));
         while (E__SUCCESS == SESSION__process(&net->routing_table, entry->fd, t, &entry->peer_node_id, header_buffer, sizeof(header_buffer))) {
             if (prev_peer_node_id != entry->peer_node_id && 0 != entry->peer_node_id) {
-                LOG_INFO("Node %u connected (fd=%d), broadcasting to network", entry->peer_node_id, entry->fd);
+                LOG_INFO("Node %u connected (fd=%d), broadcasting to network and sending peer info", entry->peer_node_id, entry->fd);
                 broadcast_to_others(net, entry->fd, entry->peer_node_id, header_buffer, NULL, 0);
+                send_peer_info(net, entry->fd, (uint32_t)g_node_id, entry->peer_node_id);
                 prev_peer_node_id = entry->peer_node_id;
                 memset(header_buffer, 0, sizeof(header_buffer));
             }

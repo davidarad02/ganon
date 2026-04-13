@@ -5,6 +5,20 @@
 #include "logging.h"
 #include "routing.h"
 
+static void ROUTING__log_table(routing_table_t *rt) {
+    if (NULL == rt) {
+        return;
+    }
+    LOG_DEBUG("Routing table (%zu entries):", rt->entry_count);
+    for (size_t i = 0; i < rt->entry_count; i++) {
+        if (rt->entries[i].route_type == ROUTE__DIRECT) {
+            LOG_DEBUG("  -> node %u: direct (fd=%d)", rt->entries[i].node_id, rt->entries[i].fd);
+        } else {
+            LOG_DEBUG("  -> node %u: via node %u", rt->entries[i].node_id, rt->entries[i].next_hop_node_id);
+        }
+    }
+}
+
 err_t ROUTING__init(routing_table_t *rt) {
     err_t rc = E__SUCCESS;
 
@@ -63,6 +77,7 @@ err_t ROUTING__add_direct(routing_table_t *rt, uint32_t node_id, int fd) {
     rt->entry_count++;
 
     LOG_DEBUG("Routing: added route to node %u (direct, fd=%d)", node_id, fd);
+    ROUTING__log_table(rt);
 
     pthread_mutex_unlock(&rt->mutex);
 
@@ -87,6 +102,7 @@ err_t ROUTING__add_via_hop(routing_table_t *rt, uint32_t node_id, uint32_t next_
             rt->entries[i].fd = -1;
             pthread_mutex_unlock(&rt->mutex);
             LOG_INFO("Updated route to node %u via node %u", node_id, next_hop_node_id);
+            ROUTING__log_table(rt);
             goto l_cleanup;
         }
     }
@@ -104,6 +120,7 @@ err_t ROUTING__add_via_hop(routing_table_t *rt, uint32_t node_id, uint32_t next_
     rt->entry_count++;
 
     LOG_INFO("Added route to node %u via node %u", node_id, next_hop_node_id);
+    ROUTING__log_table(rt);
 
     pthread_mutex_unlock(&rt->mutex);
 
@@ -129,6 +146,7 @@ err_t ROUTING__remove(routing_table_t *rt, uint32_t node_id) {
                 rt->entries[i] = rt->entries[rt->entry_count];
             }
             pthread_mutex_unlock(&rt->mutex);
+            ROUTING__log_table(rt);
             goto l_cleanup;
         }
     }
@@ -167,6 +185,7 @@ err_t ROUTING__remove_via_node(routing_table_t *rt, uint32_t via_node_id) {
 
     if (removed > 0) {
         LOG_INFO("Removed %zu routes via node %u", removed, via_node_id);
+        ROUTING__log_table(rt);
     }
 
 l_cleanup:

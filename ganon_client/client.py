@@ -6,7 +6,7 @@ import time
 from datetime import datetime
 from typing import Callable, Optional
 
-from ganon_client.protocol import GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader
+from ganon_client.protocol import DEFAULT_TTL, GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader
 from ganon_client.routing import RoutingTable
 from ganon_client.transport import Transport
 
@@ -156,8 +156,25 @@ class GanonClient:
             sock.close()
             return None
 
-    def _handle_node_init(self, orig_src_node_id: int, src_node_id: int, message_id: int, data: bytes):
-        self._debug("Received NODE_INIT from node %d (orig_src=%d, msg_id=%d, data_len=%d)", src_node_id, orig_src_node_id, message_id, len(data))
+    def _handle_node_init(self, orig_src_node_id: int, src_node_id: int, message_id: int, ttl: int, data: bytes):
+        self._debug("Received NODE_INIT from node %d (orig_src=%d, msg_id=%d, ttl=%d, data_len=%d)", src_node_id, orig_src_node_id, message_id, ttl, len(data))
+
+    def _handle_peer_info(self, orig_src_node_id: int, src_node_id: int, message_id: int, ttl: int, data: bytes):
+        self._debug("Received PEER_INFO from node %d (orig_src=%d, msg_id=%d, ttl=%d, data_len=%d)", src_node_id, orig_src_node_id, message_id, ttl, len(data))
+
+        self._peer_node_id = src_node_id
+        self._debug("Set peer_node_id to %d (direct connection)", src_node_id)
+
+        peer_count = len(data) // 4
+        peer_list = []
+        for i in range(peer_count):
+            peer_id = struct.unpack(">I", data[i*4:(i+1)*4])[0]
+            peer_list.append(peer_id)
+            self._routing_table.add_via_hop(peer_id, src_node_id)
+            self._debug("  - peer %d: node %d", i, peer_id)
+
+        self._debug("Routing table after PEER_INFO:")
+        self._routing_table.log_table()
 
     def _process(self, header: dict, data: bytes):
         orig_src_node_id = header["orig_src_node_id"]
@@ -166,16 +183,19 @@ class GanonClient:
         message_id = header["message_id"]
         msg_type = MsgType(header["type"])
         data_length = header["data_length"]
+        ttl = header["ttl"]
 
-        self._info("Protocol: orig_src=%d, src=%d, dst=%d, msg_id=%d, type=%s, data_len=%d", orig_src_node_id, src_node_id, dst_node_id, message_id, msg_type.name, data_length)
+        self._info("Protocol: orig_src=%d, src=%d, dst=%d, msg_id=%d, type=%s, ttl=%d, data_len=%d", orig_src_node_id, src_node_id, dst_node_id, message_id, msg_type.name, ttl, data_length)
 
         if msg_type == MsgType.NODE_INIT:
-            self._handle_node_init(orig_src_node_id, src_node_id, message_id, data)
+            self._handle_node_init(orig_src_node_id, src_node_id, message_id, ttl, data)
+        elif msg_type == MsgType.PEER_INFO:
+            self._handle_peer_info(orig_src_node_id, src_node_id, message_id, ttl, data)
         else:
             self._warning("Unknown message type: %d", header["type"])
 
     def _protocol_loop(self):
-        header_size = 28
+        header_size = 32
         transport = Transport(self._sock)
         while self._running:
             header_data = transport.recv_all(header_size)
@@ -185,7 +205,7 @@ class GanonClient:
 
             header = ProtocolHeader.parse(header_data)
 
-            if header.magic != "GNN\x00":
+            if header.magic != "GNN":
                 self._warning("Invalid magic: expected %s, got %.4s", GANON_PROTOCOL_MAGIC, header.magic)
                 self._handle_disconnect()
                 return
@@ -279,6 +299,7 @@ class GanonClient:
         header += struct.pack(">I", 0)              # message_id
         header += struct.pack(">I", 0)              # type (NODE_INIT = 0)
         header += struct.pack(">I", 0)              # data_length
+        header += struct.pack(">I", DEFAULT_TTL)   # ttl
         
         self._sock.sendall(header)
 

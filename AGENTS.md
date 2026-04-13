@@ -210,7 +210,7 @@ Use appropriate log levels for each message.
 
 All multi-byte integers use network byte order (big-endian) for cross-architecture compatibility.
 
-#### protocol_msg_t (24 bytes total)
+#### protocol_msg_t (32 bytes total)
 
 ```
 +--------+--------+--------+--------+
@@ -228,6 +228,8 @@ All multi-byte integers use network byte order (big-endian) for cross-architectu
 +--------+--------+--------+--------+
 |       Data Length (4 bytes)      |
 +--------+--------+--------+--------+
+|       TTL (4 bytes)              |
++--------+--------+--------+--------+
 |       Data (variable)            |
 +---------------------------------+
 ```
@@ -237,6 +239,7 @@ All multi-byte integers use network byte order (big-endian) for cross-architectu
 ```c
 typedef enum {
     MSG__NODE_INIT = 0,
+    MSG__PEER_INFO = 1,
 } msg_type_t;
 ```
 
@@ -245,12 +248,30 @@ typedef enum {
 - **orig_src_node_id**: Original sender of the message (for tracking path)
 - **src_node_id**: Previous hop (the node that forwarded this message)
 - **dst_node_id**: Destination node (0 for broadcast)
+- **ttl**: Time-to-live for broadcast messages (decremented each hop)
 
 #### Protocol Header Size
 
 ```c
-#define PROTOCOL_HEADER_SIZE 28
+#define PROTOCOL_HEADER_SIZE 32
+#define DEFAULT_TTL 16
 ```
+
+#### Message Flow
+
+**When node A connects to server S:**
+1. A sends NODE_INIT to S (I am node A)
+2. S adds direct route to A
+3. S broadcasts NODE_INIT to all OTHER connected peers (excluding A) with TTL-1
+4. S sends PEER_INFO to A listing all peers reachable through S
+
+**When node B connects to server S:**
+1. B sends NODE_INIT to S (I am node B)
+2. S adds direct route to B
+3. S broadcasts NODE_INIT to all OTHER connected peers (A) with TTL-1
+4. A receives broadcast, adds route to B via S
+5. S sends PEER_INFO to B listing all peers (including A)
+6. B adds route to A via S
 
 ## Routing Table
 
