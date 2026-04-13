@@ -101,7 +101,9 @@ static err_t SESSION__handle_message(routing_table_t *rt, int fd, uint32_t orig_
     switch (type) {
     case MSG__NODE_INIT:
         rc = SESSION__handle_node_init(rt, fd, orig_src_node_id, src_node_id, message_id, ttl, data_length, data, out_node_id);
-        FAIL_IF(E__SUCCESS != rc, E__SESSION__HANDLE_NODE_INIT_FAILED);
+        if (E__SUCCESS != rc && E__SESSION__CONNECTION_REJECTED != rc) {
+            goto l_cleanup;
+        }
         break;
     case MSG__PEER_INFO:
         rc = SESSION__handle_peer_info(rt, orig_src_node_id, src_node_id, message_id, ttl, data_length, data, out_node_id, out_peer_list, out_peer_count);
