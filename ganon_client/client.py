@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Callable, Optional
 
 from protocol import GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader
+from transport import Transport
 
 LOG_LEVEL_TRACE = 0
 LOG_LEVEL_DEBUG = 1
@@ -147,31 +148,10 @@ class GanonClient:
             sock.close()
             return None
 
-    def _recv_loop(self):
-        while self._running:
-            try:
-                data = self._sock.recv(4096)
-                if not data:
-                    self._warning("Socket disconnected (fd=%d)", self._sock.fileno())
-                    break
-                self._trace("Received %d bytes from fd %d", len(data), self._sock.fileno())
-                if self._on_data_received:
-                    self._on_data_received(data)
-            except socket.timeout:
-                continue
-            except OSError:
-                break
-
-        if self._running:
-            self._warning("Connection lost to %s:%d", self.ip, self.port)
-            if self._on_disconnected:
-                self._on_disconnected()
-            self._handle_disconnect()
-
     def _handle_ping(self, node_id: int, message_id: int, data: bytes):
         self._debug("Received PING from node %d (msg_id=%d, data_len=%d)", node_id, message_id, len(data))
 
-    def _handle_message(self, header: dict, data: bytes):
+    def _process(self, header: dict, data: bytes):
         node_id = header["node_id"]
         message_id = header["message_id"]
         msg_type = MsgType(header["type"])
@@ -186,35 +166,26 @@ class GanonClient:
 
     def _protocol_loop(self):
         header_size = 20
+        transport = Transport(self._sock)
         while self._running:
-            try:
-                header_data = b""
-                while len(header_data) < header_size:
-                    chunk = self._sock.recv(header_size - len(header_data))
-                    if not chunk:
-                        return False
-                    header_data += chunk
+            header_data = transport.recv_all(header_size)
+            if header_data is None:
+                return False
 
-                header = ProtocolHeader.parse(header_data)
+            header = ProtocolHeader.parse(header_data)
 
-                if header.magic != "GNN\x00":
-                    self._warning("Invalid magic: expected %s, got %.4s", GANON_PROTOCOL_MAGIC, header.magic)
+            if header.magic != "GNN\x00":
+                self._warning("Invalid magic: expected %s, got %.4s", GANON_PROTOCOL_MAGIC, header.magic)
+                return False
+
+            data_length = header.data_length
+            data = b""
+            if data_length > 0:
+                data = transport.recv_all(data_length)
+                if data is None:
                     return False
 
-                data_length = header.data_length
-                data = b""
-                while len(data) < data_length:
-                    chunk = self._sock.recv(data_length - len(data))
-                    if not chunk:
-                        return False
-                    data += chunk
-
-                self._handle_message(header, data)
-
-            except socket.timeout:
-                continue
-            except OSError:
-                return False
+            self._process(header, data)
 
         return True
 

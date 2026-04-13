@@ -15,6 +15,7 @@
 #include "logging.h"
 #include "network.h"
 #include "session.h"
+#include "transport.h"
 
 int g_node_id = -1;
 
@@ -170,8 +171,22 @@ static void *socket_thread_func(void *arg) {
         LOG_INFO("Socket connected (fd=%d) to %s:%d", entry->fd, entry->client_ip, entry->client_port);
     }
 
+    transport_t *t = TRANSPORT__create(entry->fd);
+    if (NULL == t) {
+        LOG_ERROR("Failed to create transport for fd %d", entry->fd);
+        shutdown(entry->fd, SHUT_RDWR);
+        close(entry->fd);
+        pthread_mutex_lock(&net->clients_mutex);
+        socket_entry_remove_locked(net, entry);
+        pthread_mutex_unlock(&net->clients_mutex);
+        free(entry);
+        return NULL;
+    }
+
     if (0 != entry->is_incoming) {
-        SESSION__protocol_loop(entry->fd);
+        while (E__SUCCESS == SESSION__process(t)) {
+        }
+        TRANSPORT__destroy(t);
         shutdown(entry->fd, SHUT_RDWR);
         close(entry->fd);
         pthread_mutex_lock(&net->clients_mutex);
@@ -182,11 +197,12 @@ static void *socket_thread_func(void *arg) {
     }
 
     while (true) {
-        err_t session_rc = SESSION__protocol_loop(entry->fd);
+        err_t session_rc = SESSION__process(t);
         if (E__SUCCESS != session_rc) {
             LOG_WARNING("Session ended for %s:%d", entry->client_ip, entry->client_port);
         }
 
+        TRANSPORT__destroy(t);
         shutdown(entry->fd, SHUT_RDWR);
         close(entry->fd);
 
@@ -228,6 +244,12 @@ static void *socket_thread_func(void *arg) {
         }
         if (0 == reconnected) {
             LOG_WARNING("All reconnect attempts failed, giving up on %s:%d", entry->client_ip, entry->client_port);
+            break;
+        }
+
+        t = TRANSPORT__create(entry->fd);
+        if (NULL == t) {
+            LOG_ERROR("Failed to create transport for fd %d", entry->fd);
             break;
         }
     }
