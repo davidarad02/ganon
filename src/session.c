@@ -21,6 +21,9 @@ static err_t SESSION__handle_node_init(routing_table_t *rt, int fd, uint32_t ori
 
     if (ROUTING__is_direct(rt, src_node_id)) {
         LOG_WARNING("Node %u is already connected, rejecting", src_node_id);
+        if (NULL != out_node_id) {
+            *out_node_id = src_node_id;
+        }
         FAIL(E__SESSION__CONNECTION_REJECTED);
     }
 
