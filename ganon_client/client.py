@@ -3,11 +3,51 @@ import socket
 import struct
 import threading
 import time
+from datetime import datetime
 from typing import Callable, Optional
 
 LOG_LEVEL_TRACE = 0
 LOG_LEVEL_DEBUG = 1
 LOG_LEVEL_INFO = 2
+
+COLOR_RESET = "\033[0m"
+COLOR_RED = "\033[31m"
+COLOR_YELLOW = "\033[33m"
+COLOR_CYAN = "\033[36m"
+COLOR_WHITE = "\033[37m"
+COLOR_BOLD = "\033[1m"
+
+LEVEL_COLORS = {
+    "ERROR": COLOR_RED,
+    "WARN": COLOR_YELLOW,
+    "WARNING": COLOR_YELLOW,
+    "INFO": COLOR_CYAN,
+    "DEBUG": COLOR_WHITE,
+    "TRACE": COLOR_RESET,
+}
+
+
+class GanonFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        level = record.levelname
+        color = LEVEL_COLORS.get(level, COLOR_RESET)
+
+        timestamp = datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S")
+        microseconds = int(record.created % 1 * 1000000)
+
+        level_pad = " " if level in ("INFO", "WARNING", "WARN") else ""
+
+        if record.exc_info:
+            exc_text = self.formatException(record.exc_info)
+            message = record.getMessage() + "\n" + exc_text
+        else:
+            message = record.getMessage()
+
+        return (
+            f"{COLOR_BOLD}{timestamp}.{microseconds:06d}{COLOR_RESET} "
+            f"[{COLOR_BOLD}{color}{level}{level_pad}{COLOR_RESET}] "
+            f"{message}"
+        )
 
 
 class GanonClient:
@@ -41,12 +81,7 @@ class GanonClient:
 
         if not self._logger.handlers:
             handler = logging.StreamHandler()
-            handler.setFormatter(
-                logging.Formatter(
-                    "%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-                    datefmt="%Y-%m-%d %H:%M:%S",
-                )
-            )
+            handler.setFormatter(GanonFormatter())
             self._logger.addHandler(handler)
 
     def _log(self, level: int, msg: str, *args, **kwargs):
