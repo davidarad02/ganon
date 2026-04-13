@@ -219,15 +219,18 @@ l_cleanup:
 static err_t send_peer_info(network_t *net, int fd, uint32_t src_node_id, uint32_t dst_node_id) {
     err_t rc = E__SUCCESS;
 
-    pthread_mutex_lock(&net->clients_mutex);
+    routing_table_t *rt = &net->routing_table;
+
+    if (0 != pthread_mutex_lock(&rt->mutex)) {
+        LOG_ERROR("Failed to lock routing table mutex");
+        FAIL(E__NET__THREAD_CREATE_FAILED);
+    }
 
     size_t peer_count = 0;
-    socket_entry_t *client = net->clients;
-    while (NULL != client) {
-        if (client->fd != fd && 0 != client->peer_node_id) {
+    for (size_t i = 0; i < rt->entry_count; i++) {
+        if (rt->entries[i].node_id != dst_node_id && rt->entries[i].node_id != src_node_id) {
             peer_count++;
         }
-        client = client->next;
     }
 
     uint8_t *peer_data = NULL;
@@ -235,22 +238,20 @@ static err_t send_peer_info(network_t *net, int fd, uint32_t src_node_id, uint32
         peer_data = malloc(peer_count * sizeof(uint32_t));
         if (NULL == peer_data) {
             LOG_ERROR("Failed to allocate peer data");
-            pthread_mutex_unlock(&net->clients_mutex);
+            pthread_mutex_unlock(&rt->mutex);
             FAIL(E__INVALID_ARG_NULL_POINTER);
         }
 
         peer_count = 0;
-        client = net->clients;
-        while (NULL != client) {
-            if (client->fd != fd && 0 != client->peer_node_id) {
-                ((uint32_t *)peer_data)[peer_count] = PROTOCOL_FIELD_TO_NETWORK(client->peer_node_id);
+        for (size_t i = 0; i < rt->entry_count; i++) {
+            if (rt->entries[i].node_id != dst_node_id && rt->entries[i].node_id != src_node_id) {
+                ((uint32_t *)peer_data)[peer_count] = PROTOCOL_FIELD_TO_NETWORK(rt->entries[i].node_id);
                 peer_count++;
             }
-            client = client->next;
         }
     }
 
-    pthread_mutex_unlock(&net->clients_mutex);
+    pthread_mutex_unlock(&rt->mutex);
 
     transport_t *t = TRANSPORT__create(fd);
     if (NULL == t) {
