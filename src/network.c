@@ -126,6 +126,28 @@ l_cleanup:
     return rc;
 }
 
+static void send_node_init(int fd, uint32_t node_id) {
+    uint8_t header[PROTOCOL_HEADER_SIZE];
+    memset(header, 0, sizeof(header));
+
+    protocol_msg_t *msg = (protocol_msg_t *)header;
+    memcpy(msg->magic, GANON_PROTOCOL_MAGIC, 4);
+    msg->orig_src_node_id = PROTOCOL_FIELD_TO_NETWORK(node_id);
+    msg->src_node_id = PROTOCOL_FIELD_TO_NETWORK(node_id);
+    msg->dst_node_id = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->message_id = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->type = (msg_type_t)PROTOCOL_FIELD_TO_NETWORK((uint32_t)MSG__NODE_INIT);
+    msg->data_length = PROTOCOL_FIELD_TO_NETWORK(0);
+    msg->ttl = PROTOCOL_FIELD_TO_NETWORK(DEFAULT_TTL);
+
+    ssize_t sent = send(fd, header, sizeof(header), 0);
+    if (0 > sent) {
+        LOG_WARNING("Failed to send NODE_INIT to fd %d", fd);
+    } else {
+        LOG_DEBUG("Sent NODE_INIT to fd %d (node_id=%u)", fd, node_id);
+    }
+}
+
 static int create_listen_socket(const char *ip, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (0 > fd) {
@@ -529,6 +551,8 @@ static void *connect_thread_func(void *arg) {
     }
 
     pthread_mutex_unlock(&net->clients_mutex);
+
+    send_node_init(fd, (uint32_t)g_node_id);
 
     if (0 != pthread_create(&entry->thread, NULL, socket_thread_func, entry)) {
         LOG_ERROR("Failed to create socket thread");

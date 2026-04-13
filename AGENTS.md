@@ -637,5 +637,23 @@ client.set_on_reconnected(lambda: print("Reconnected!"))
 ## TODO
 
 - [ ] Implement forwarding of non-direct messages via `ROUTING__send_to_node()`
+## TODO
+
+- [ ] Implement PEER_INFO propagation: when a node receives PEER_INFO, it should broadcast the learned routes to its OTHER direct peers
+- [ ] Test multi-node mesh topology with various connection patterns
 - [ ] Update Python client with disconnect routing cleanup
 - [ ] Build and test with multiple nodes
+
+### Known Mesh Networking Edge Cases
+
+**Scenario: Node 1 ↔ Node 2, Node 3 ↔ Node 4, Node 2 connects to Node 3**
+
+1. Node 2→Node 3: NODE_INIT
+2. Node 3 broadcasts to Node 4: "Node 2 available via Node 3"
+3. Node 3→Node 2: PEER_INFO (listing Node 4)
+4. Node 2 adds route to Node 4 via Node 3
+
+**What's missing:**
+- Node 2 should broadcast the newly learned routes (Node 4) to its OTHER peers (Node 1)
+- Node 1 should then learn it can reach Node 3 and Node 4 via Node 2
+- This requires propagating PEER_INFO data further into the network
