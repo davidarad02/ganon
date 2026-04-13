@@ -356,11 +356,23 @@ static void *accept_thread_func(void *arg) {
     return NULL;
 }
 
-static void *connect_thread_func(void *arg) {
-    network_t *net = (network_t *)arg;
-    addr_t *addr = net->connect_addrs;
+typedef struct connect_thread_arg {
+    addr_t addr;
+    int connect_timeout;
+    int reconnect_retries;
+    int reconnect_delay;
+    network_t *net;
+} connect_thread_arg_t;
 
-    int fd = connect_to_addr(addr->ip, addr->port, net->connect_timeout);
+static void *connect_thread_func(void *arg) {
+    connect_thread_arg_t *targ = (connect_thread_arg_t *)arg;
+    addr_t *addr = &targ->addr;
+    int connect_timeout = targ->connect_timeout;
+    int reconnect_retries = targ->reconnect_retries;
+    int reconnect_delay = targ->reconnect_delay;
+    network_t *net = targ->net;
+
+    int fd = connect_to_addr(addr->ip, addr->port, connect_timeout);
     if (0 > fd) {
         LOG_WARNING("Failed to connect to %s:%d, continuing without it", addr->ip, addr->port);
         free(arg);
@@ -468,26 +480,21 @@ err_t NETWORK__init(network_t *net, const args_t *args) {
         }
 
         for (int i = 0; i < net->connect_count; i++) {
-            addr_t *addr_copy = malloc(sizeof(addr_t));
-            if (NULL == addr_copy) {
-                LOG_ERROR("Failed to allocate addr copy for connect thread");
+            connect_thread_arg_t *targ = malloc(sizeof(connect_thread_arg_t));
+            if (NULL == targ) {
+                LOG_ERROR("Failed to allocate connect thread arg");
                 continue;
             }
-            *addr_copy = net->connect_addrs[i];
+            targ->addr = net->connect_addrs[i];
+            targ->connect_timeout = net->connect_timeout;
+            targ->reconnect_retries = net->reconnect_retries;
+            targ->reconnect_delay = net->reconnect_delay;
+            targ->net = net;
 
-            network_t *net_copy = malloc(sizeof(network_t));
-            if (NULL == net_copy) {
-                LOG_ERROR("Failed to allocate network copy for connect thread");
-                free(addr_copy);
-                continue;
-            }
-            memcpy(net_copy, net, sizeof(network_t));
-
-            if (0 != pthread_create(&net->connect_threads[i], NULL, connect_thread_func, net_copy)) {
+            if (0 != pthread_create(&net->connect_threads[i], NULL, connect_thread_func, targ)) {
                 LOG_ERROR("Failed to create connect thread for %s:%d",
-                          addr_copy->ip, addr_copy->port);
-                free(addr_copy);
-                free(net_copy);
+                          targ->addr.ip, targ->addr.port);
+                free(targ);
                 continue;
             }
             net->connect_thread_count++;
