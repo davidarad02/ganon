@@ -135,6 +135,11 @@ static int connect_to_addr(const char *ip, int port, int timeout_sec) {
         }
     }
 
+    if (-1 == fcntl(fd, F_SETFL, flags)) {
+        close(fd);
+        return -1;
+    }
+
     return fd;
 }
 
