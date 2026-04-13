@@ -162,43 +162,75 @@ static void socket_entry_remove_locked(network_t *net, socket_entry_t *entry) {
 static void *socket_thread_func(void *arg) {
     socket_entry_t *entry = (socket_entry_t *)arg;
     network_t *net = entry->net;
-    int fd = entry->fd;
     char buffer[NETWORK_BUFFER_SIZE];
 
     if (entry->is_incoming) {
-        LOG_INFO("Socket connected (fd=%d) from %s:%d", fd, entry->client_ip, entry->client_port);
+        LOG_INFO("Socket connected (fd=%d) from %s:%d", entry->fd, entry->client_ip, entry->client_port);
     } else {
-        LOG_INFO("Socket connected (fd=%d) to %s:%d", fd, entry->client_ip, entry->client_port);
+        LOG_INFO("Socket connected (fd=%d) to %s:%d", entry->fd, entry->client_ip, entry->client_port);
+    }
+
+    if (0 != entry->is_incoming) {
+        while (1) {
+            ssize_t bytes_read = recv(entry->fd, buffer, sizeof(buffer) - 1, 0);
+            if (0 > bytes_read) {
+                if (EAGAIN == errno || EWOULDBLOCK == errno) {
+                    continue;
+                }
+                LOG_WARNING("recv failed on fd %d: %s", entry->fd, strerror(errno));
+                break;
+            } else if (0 == bytes_read) {
+                LOG_WARNING("Socket disconnected (fd=%d)", entry->fd);
+                break;
+            }
+
+            buffer[bytes_read] = '\0';
+            LOG_TRACE("Received %zd bytes from fd %d", bytes_read, entry->fd);
+
+            ssize_t bytes_sent = send(entry->fd, buffer, (size_t)bytes_read, 0);
+            if (0 > bytes_sent) {
+                LOG_WARNING("send failed on fd %d: %s", entry->fd, strerror(errno));
+                break;
+            }
+            LOG_TRACE("Sent %zd bytes to fd %d", bytes_sent, entry->fd);
+        }
+        shutdown(entry->fd, SHUT_RDWR);
+        close(entry->fd);
+        pthread_mutex_lock(&net->clients_mutex);
+        socket_entry_remove_locked(net, entry);
+        pthread_mutex_unlock(&net->clients_mutex);
+        free(entry);
+        return NULL;
     }
 
     while (1) {
-        ssize_t bytes_read = recv(fd, buffer, sizeof(buffer) - 1, 0);
-        if (0 > bytes_read) {
-            if (EAGAIN == errno || EWOULDBLOCK == errno) {
-                continue;
+        while (1) {
+            ssize_t bytes_read = recv(entry->fd, buffer, sizeof(buffer) - 1, 0);
+            if (0 > bytes_read) {
+                if (EAGAIN == errno || EWOULDBLOCK == errno) {
+                    continue;
+                }
+                LOG_WARNING("recv failed on fd %d: %s", entry->fd, strerror(errno));
+                break;
+            } else if (0 == bytes_read) {
+                LOG_WARNING("Socket disconnected (fd=%d)", entry->fd);
+                break;
             }
-            LOG_WARNING("recv failed on fd %d: %s", fd, strerror(errno));
-            break;
-        } else if (0 == bytes_read) {
-            LOG_WARNING("Socket disconnected (fd=%d)", fd);
-            break;
+
+            buffer[bytes_read] = '\0';
+            LOG_TRACE("Received %zd bytes from fd %d", bytes_read, entry->fd);
+
+            ssize_t bytes_sent = send(entry->fd, buffer, (size_t)bytes_read, 0);
+            if (0 > bytes_sent) {
+                LOG_WARNING("send failed on fd %d: %s", entry->fd, strerror(errno));
+                break;
+            }
+            LOG_TRACE("Sent %zd bytes to fd %d", bytes_sent, entry->fd);
         }
 
-        buffer[bytes_read] = '\0';
-        LOG_TRACE("Received %zd bytes from fd %d", bytes_read, fd);
+        shutdown(entry->fd, SHUT_RDWR);
+        close(entry->fd);
 
-        ssize_t bytes_sent = send(fd, buffer, (size_t)bytes_read, 0);
-        if (0 > bytes_sent) {
-            LOG_WARNING("send failed on fd %d: %s", fd, strerror(errno));
-            break;
-        }
-        LOG_TRACE("Sent %zd bytes to fd %d", bytes_sent, fd);
-    }
-
-    shutdown(fd, SHUT_RDWR);
-    close(fd);
-
-    if (0 == entry->is_incoming) {
         int reconnected = 0;
         for (int retry = 0; retry < net->reconnect_retries; retry++) {
             LOG_INFO("Reconnecting to %s:%d (attempt %d/%d)...", entry->client_ip, entry->client_port,
@@ -216,10 +248,12 @@ static void *socket_thread_func(void *arg) {
             reconnected = 1;
             break;
         }
-        if (!reconnected) {
+        if (0 == reconnected) {
             LOG_WARNING("All reconnect attempts failed, giving up on %s:%d", entry->client_ip, entry->client_port);
+            break;
         }
     }
+
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_remove_locked(net, entry);
     pthread_mutex_unlock(&net->clients_mutex);
