@@ -462,7 +462,7 @@ err_t network_shutdown(network_t *net) {
 
     for (int i = 0; i < net->connect_thread_count; i++) {
         if (0 != net->connect_threads[i]) {
-            pthread_join(net->connect_threads[i], NULL);
+            pthread_detach(net->connect_threads[i]);
         }
     }
     free(net->connect_threads);
