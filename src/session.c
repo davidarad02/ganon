@@ -24,7 +24,12 @@ static err_t SESSION__handle_node_init(routing_table_t *rt, int fd, uint32_t ori
         FAIL(E__SESSION__CONNECTION_REJECTED);
     }
 
-    rc = ROUTING__add_direct(rt, src_node_id, fd);
+    if (src_node_id == orig_src_node_id) {
+        rc = ROUTING__add_direct(rt, src_node_id, fd);
+    } else {
+        LOG_DEBUG("NODE_INIT via broadcast (src=%u, orig_src=%u), adding as via_hop", src_node_id, orig_src_node_id);
+        rc = ROUTING__add_via_hop(rt, orig_src_node_id, src_node_id);
+    }
     if (E__SUCCESS != rc) {
         LOG_WARNING("Failed to add node %u to routing table", src_node_id);
         goto l_cleanup;
