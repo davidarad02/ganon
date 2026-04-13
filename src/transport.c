@@ -151,6 +151,10 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 
+    LOG_TRACE("RECV msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u, fd=%d",
+              msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
+              msg->message_id, msg->type, msg->data_length, msg->ttl, t->fd);
+
     uint32_t data_length = msg->data_length;
     if (data_length > 0) {
         *data = malloc(data_length);
@@ -177,6 +181,10 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
     err_t rc = E__SUCCESS;
 
     VALIDATE_ARGS(t, msg);
+
+    LOG_TRACE("SEND msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u, fd=%d",
+              msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
+              msg->message_id, msg->type, msg->data_length, msg->ttl, t->fd);
 
     rc = TRANSPORT__send_all(t, (const uint8_t *)msg, PROTOCOL_HEADER_SIZE, NULL);
     FAIL_IF(E__SUCCESS != rc, rc);
