@@ -450,5 +450,6 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Add IN/OUT/INOUT parameter direction macros
 - [x] NODE_DISCONNECT carries list of unreachable nodes
 - [x] Add ROUTING__get_via_nodes function
+- [x] Reconnection logic: connect_and_run_thread handles reconnect loop per peer
 - [ ] Update Python client to match new architecture
 - [ ] Test multi-node mesh topology

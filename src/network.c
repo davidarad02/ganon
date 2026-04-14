@@ -304,22 +304,29 @@ typedef struct connect_thread_arg {
     network_t *net;
 } connect_thread_arg_t;
 
-static void *connect_thread_func(void *arg) {
+static void *connect_and_run_thread(void *arg) {
     connect_thread_arg_t *targ = (connect_thread_arg_t *)arg;
-    addr_t *addr = &targ->addr;
+    char *ip = targ->addr.ip;
+    int port = targ->addr.port;
     int connect_timeout = targ->connect_timeout;
+    int reconnect_retries = targ->reconnect_retries;
+    int reconnect_delay = targ->reconnect_delay;
     network_t *net = targ->net;
+    int retries_remaining = reconnect_retries;
 
     while (true) {
-        int fd = connect_to_addr(addr->ip, addr->port, connect_timeout);
+        int fd = connect_to_addr(ip, port, connect_timeout);
         if (0 > fd) {
-            if (targ->reconnect_retries >= 0) {
-                LOG_WARNING("Failed to connect to %s:%d, giving up", addr->ip, addr->port);
+            if (retries_remaining == 0) {
+                LOG_WARNING("Failed to connect to %s:%d, giving up", ip, port);
                 FREE(arg);
                 return NULL;
             }
-            LOG_WARNING("Failed to connect to %s:%d, retrying in %ds...", addr->ip, addr->port, targ->reconnect_delay);
-            sleep((unsigned int)targ->reconnect_delay);
+            if (retries_remaining > 0) {
+                retries_remaining--;
+            }
+            LOG_WARNING("Failed to connect to %s:%d, retrying in %ds...", ip, port, reconnect_delay);
+            sleep((unsigned int)reconnect_delay);
             continue;
         }
 
@@ -340,9 +347,9 @@ static void *connect_thread_func(void *arg) {
             return NULL;
         }
         entry->t->is_incoming = 0;
-        strncpy(entry->t->client_ip, addr->ip, INET_ADDRSTRLEN - 1);
+        strncpy(entry->t->client_ip, ip, INET_ADDRSTRLEN - 1);
         entry->t->client_ip[INET_ADDRSTRLEN - 1] = '\0';
-        entry->t->client_port = addr->port;
+        entry->t->client_port = port;
         entry->net = net;
         entry->next = NULL;
 
@@ -366,7 +373,8 @@ static void *connect_thread_func(void *arg) {
 
         pthread_mutex_unlock(&net->clients_mutex);
 
-        if (0 != pthread_create(&entry->thread, NULL, socket_thread_func, entry)) {
+        pthread_t socket_thread;
+        if (0 != pthread_create(&socket_thread, NULL, socket_thread_func, entry)) {
             LOG_ERROR("Failed to create socket thread");
             pthread_mutex_lock(&net->clients_mutex);
             socket_entry_remove_locked(net, entry);
@@ -377,9 +385,18 @@ static void *connect_thread_func(void *arg) {
             return NULL;
         }
 
-        pthread_detach(entry->thread);
-        FREE(arg);
-        return NULL;
+        pthread_join(socket_thread, NULL);
+
+        LOG_INFO("Connection to %s:%d closed, reconnecting...", ip, port);
+
+        if (retries_remaining == 0) {
+            LOG_WARNING("Reconnect retries exhausted for %s:%d", ip, port);
+            FREE(arg);
+            return NULL;
+        }
+        if (retries_remaining > 0) {
+            retries_remaining--;
+        }
     }
 }
 
@@ -445,7 +462,7 @@ err_t NETWORK__init(OUT network_t *net, IN const args_t *args, IN int node_id, I
             targ->reconnect_delay = net->reconnect_delay;
             targ->net = net;
 
-            if (0 != pthread_create(&net->connect_threads[i], NULL, connect_thread_func, targ)) {
+            if (0 != pthread_create(&net->connect_threads[i], NULL, connect_and_run_thread, targ)) {
                 LOG_ERROR("Failed to create connect thread for %s:%d", targ->addr.ip, targ->addr.port);
                 FREE(targ);
                 continue;
