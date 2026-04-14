@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 
+#include "common.h"
 #include "err.h"
 #include "logging.h"
 
@@ -49,8 +50,8 @@ typedef struct {
     int reconnect_delay;
 } args_t;
 
-err_t ARGS__parse(args_t *args_out, int argc, char *argv[]);
-void args_print_usage(const char *prog_name);
-void args_print_help(const char *prog_name);
+err_t ARGS__parse(OUT args_t *args_out, IN int argc, IN char *argv[]);
+void args_print_usage(IN const char *prog_name);
+void args_print_help(IN const char *prog_name);
 
 #endif /* #ifndef GANON_ARGS_H */

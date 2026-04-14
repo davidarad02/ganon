@@ -8,17 +8,17 @@
 
 #ifdef __DEBUG__
 void args_print_usage(const char *prog_name) {
-    printf("Usage: %s <LISTEN IP> [OPTIONS]\n", prog_name);
+    printf("Usage: %s [OPTIONS]\n", prog_name);
     printf("       %s [OPTIONS]\n", prog_name);
     printf("Try '%s --help' for more information.\n", prog_name);
 }
 
 void args_print_help(const char *prog_name) {
-    printf("Usage: %s <LISTEN IP> [OPTIONS]\n", prog_name);
+    printf("Usage: %s [OPTIONS]\n", prog_name);
     printf("       %s [OPTIONS]\n", prog_name);
     printf("\n");
     printf("Arguments:\n");
-    printf("  LISTEN IP       Listen IP address (IPv4 format: 0-255.0-255.0-255.0-255)\n");
+    printf("  LISTEN IP       Listen IP address (IPv4 format, default: 0.0.0.0)\n");
     printf("\n");
     printf("Options:\n");
     printf("  -p, --port N    Listen port number (1-65535)\n");
@@ -618,10 +618,8 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
     }
 
     if (NULL == listen_ip) {
-#ifdef __DEBUG__
-        args_print_usage(argv[0]);
-#endif /* #ifdef __DEBUG__ */
-        FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+        LOG_TRACE("No listen IP specified, using default: 0.0.0.0");
+        listen_ip = "0.0.0.0";
     }
 
     if (!validate_listen_ip(listen_ip)) {

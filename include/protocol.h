@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "common.h"
 #include "err.h"
 
 #define GANON_PROTOCOL_MAGIC "GNN\0"
@@ -29,9 +30,9 @@ typedef struct {
     uint32_t ttl;
 } protocol_msg_t;
 
-bool PROTOCOL__validate_magic(const uint8_t *buf);
+bool PROTOCOL__validate_magic(IN const uint8_t *buf);
 
-err_t PROTOCOL__unserialize(const uint8_t *buf, size_t len, protocol_msg_t *msg, uint8_t **data, size_t *data_len);
-err_t PROTOCOL__serialize(const protocol_msg_t *msg, const uint8_t *data, uint8_t *buf, size_t buf_len, size_t *bytes_written);
+err_t PROTOCOL__unserialize(IN const uint8_t *buf, IN size_t len, OUT protocol_msg_t *msg, OUT uint8_t **data, OUT size_t *data_len);
+err_t PROTOCOL__serialize(IN const protocol_msg_t *msg, IN const uint8_t *data, OUT uint8_t *buf, IN size_t buf_len, OUT size_t *bytes_written);
 
 #endif /* #ifndef GANON_PROTOCOL_H */

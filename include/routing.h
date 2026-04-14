@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <sys/types.h>
 
+#include "common.h"
 #include "err.h"
 
 #define ROUTING_TABLE_MAX_ENTRIES 256
@@ -28,16 +29,24 @@ typedef struct {
     pthread_mutex_t mutex;
 } routing_table_t;
 
-err_t ROUTING__init(routing_table_t *rt);
-void ROUTING__destroy(routing_table_t *rt);
+err_t ROUTING__init(OUT routing_table_t *rt);
+void ROUTING__destroy(IN routing_table_t *rt);
 
-err_t ROUTING__add_direct(routing_table_t *rt, uint32_t node_id, int fd);
-err_t ROUTING__add_via_hop(routing_table_t *rt, uint32_t node_id, uint32_t next_hop_node_id);
-err_t ROUTING__remove(routing_table_t *rt, uint32_t node_id);
-err_t ROUTING__remove_via_node(routing_table_t *rt, uint32_t via_node_id);
-err_t ROUTING__get_route(routing_table_t *rt, uint32_t node_id, route_entry_t *entry);
-err_t ROUTING__get_next_hop(routing_table_t *rt, uint32_t node_id, uint32_t *next_hop);
-int ROUTING__is_direct(routing_table_t *rt, uint32_t node_id);
-err_t ROUTING__send_to_node(routing_table_t *rt, uint32_t node_id, const uint8_t *buf, size_t len, ssize_t (*send_fn)(int, const uint8_t *, size_t));
+err_t ROUTING__add_direct(IN routing_table_t *rt, IN uint32_t node_id, IN int fd);
+err_t ROUTING__add_via_hop(IN routing_table_t *rt, IN uint32_t node_id, IN uint32_t next_hop_node_id);
+err_t ROUTING__remove(IN routing_table_t *rt, IN uint32_t node_id);
+err_t ROUTING__remove_via_node(IN routing_table_t *rt, IN uint32_t via_node_id);
+uint32_t *ROUTING__get_via_nodes(IN routing_table_t *rt, IN uint32_t via_node_id, OUT size_t *count);
+err_t ROUTING__get_route(IN routing_table_t *rt, IN uint32_t node_id, OUT route_entry_t *entry);
+err_t ROUTING__get_next_hop(IN routing_table_t *rt, IN uint32_t node_id, OUT uint32_t *next_hop);
+int ROUTING__is_direct(IN routing_table_t *rt, IN uint32_t node_id);
+err_t ROUTING__send_to_node(IN routing_table_t *rt, IN uint32_t node_id, IN const uint8_t *buf, IN size_t len, IN ssize_t (*send_fn)(IN int, IN const uint8_t *, IN size_t));
+
+typedef void (*routing_message_cb_t)(IN transport_t *t, IN const protocol_msg_t *msg, IN const uint8_t *data, IN size_t data_len);
+void ROUTING__init_globals(IN routing_table_t *rt, IN routing_message_cb_t session_cb);
+void ROUTING__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN const uint8_t *data, IN size_t data_len);
+void ROUTING__broadcast(IN routing_table_t *rt, IN uint32_t exclude_node_id, IN uint32_t src_node_id, IN const protocol_msg_t *msg, IN const uint8_t *data);
+
+extern int g_node_id;
 
 #endif /* #ifndef GANON_ROUTING_H */

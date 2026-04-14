@@ -102,12 +102,14 @@ l_cleanup:
 err_t TRANSPORT__send_all(transport_t *t, const uint8_t *buf, size_t len, ssize_t *bytes_sent) {
     err_t rc = E__SUCCESS;
 
-    if (NULL == t || NULL == buf || NULL == bytes_sent) {
+    if (NULL == t || NULL == buf) {
         rc = E__INVALID_ARG_NULL_POINTER;
         goto l_cleanup;
     }
 
-    *bytes_sent = 0;
+    if (NULL != bytes_sent) {
+        *bytes_sent = 0;
+    }
 
     size_t total_sent = 0;
     while (total_sent < len) {
@@ -122,7 +124,9 @@ err_t TRANSPORT__send_all(transport_t *t, const uint8_t *buf, size_t len, ssize_
         total_sent += (size_t)n;
     }
 
-    *bytes_sent = (ssize_t)total_sent;
+    if (NULL != bytes_sent) {
+        *bytes_sent = (ssize_t)total_sent;
+    }
 
 l_cleanup:
     return rc;
@@ -147,10 +151,35 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 
-    size_t data_len = 0;
-    rc = PROTOCOL__unserialize(header, PROTOCOL_HEADER_SIZE, msg, data, &data_len);
+    protocol_msg_t tmp_msg;
+    memcpy(&tmp_msg, header, sizeof(tmp_msg));
+    uint32_t data_len = ntohl(tmp_msg.data_length);
+
+    size_t total_len = PROTOCOL_HEADER_SIZE + data_len;
+    uint8_t *full_msg = malloc(total_len);
+    if (NULL == full_msg) {
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+
+    memcpy(full_msg, header, PROTOCOL_HEADER_SIZE);
+    if (data_len > 0) {
+        rc = TRANSPORT__recv_all(t, full_msg + PROTOCOL_HEADER_SIZE, data_len, &bytes_read);
+        if (E__SUCCESS != rc) {
+            FREE(full_msg);
+            goto l_cleanup;
+        }
+        if ((size_t)bytes_read < data_len) {
+            LOG_WARNING("Incomplete message data on fd %d: got %zd, expected %u", t->fd, bytes_read, data_len);
+            FREE(full_msg);
+            FAIL(E__NET__SOCKET_CONNECT_FAILED);
+        }
+    }
+
+    size_t unserialize_data_len = 0;
+    rc = PROTOCOL__unserialize(full_msg, total_len, msg, data, &unserialize_data_len);
     if (E__SUCCESS != rc) {
         LOG_WARNING("Failed to unserialize message from fd %d", t->fd);
+        FREE(full_msg);
         goto l_cleanup;
     }
 
@@ -158,6 +187,7 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
               msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
               msg->message_id, msg->type, msg->data_length, msg->ttl, t->fd);
 
+    FREE(full_msg);
 l_cleanup:
     return rc;
 }
@@ -171,14 +201,24 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
               msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
               msg->message_id, msg->type, msg->data_length, msg->ttl, t->fd);
 
-    uint8_t buf[PROTOCOL_HEADER_SIZE];
+    size_t buf_len = PROTOCOL_HEADER_SIZE;
+    if (NULL != data && msg->data_length > 0) {
+        buf_len += msg->data_length;
+    }
+    uint8_t *buf = malloc(buf_len);
+    if (NULL == buf) {
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+
     size_t bytes_written = 0;
-    rc = PROTOCOL__serialize(msg, data, buf, sizeof(buf), &bytes_written);
+    rc = PROTOCOL__serialize(msg, data, buf, buf_len, &bytes_written);
     if (E__SUCCESS != rc) {
+        FREE(buf);
         goto l_cleanup;
     }
 
     rc = TRANSPORT__send_all(t, buf, bytes_written, NULL);
+    FREE(buf);
     FAIL_IF(E__SUCCESS != rc, rc);
 
 l_cleanup:

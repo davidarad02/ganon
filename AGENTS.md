@@ -28,23 +28,23 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `src/main.c` - Main entry point, signal handling, wires network and session
 - `src/args.c` - Argument parsing implementation
 - `src/logging.c` - Logging implementation
-- `src/network.c` - Socket management, accept loop, reconnection logic
-- `src/session.c` - All protocol logic, routing table, broadcasts
+- `src/network.c` - Socket management, accept loop, reconnection logic, global singleton `g_network`
+- `src/session.c` - Protocol logic (NODE_INIT, PEER_INFO, NODE_DISCONNECT, CONNECTION_REJECTED handlers)
 - `src/transport.c` - Buffer layer, recv/send protocol_msg_t, connection abstraction
 - `src/protocol.c` - Protocol parsing, serialization, byte order conversion
-- `src/routing.c` - Routing table implementation
+- `src/routing.c` - Routing table, ROUTING__on_message for broadcast/forward logic, global singleton `g_node_id`
 
 ### C Header Files
 
 - `include/err.h` - Error codes enum
-- `include/common.h` - Common macros (FAIL_IF, FAIL, BREAK_IF, CONTINUE_IF, FREE, VALIDATE_ARGS)
+- `include/common.h` - Common macros (FAIL_IF, FAIL, BREAK_IF, CONTINUE_IF, FREE, VALIDATE_ARGS, IN, OUT, INOUT)
 - `include/logging.h` - Logging macros (LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE)
 - `include/args.h` - Argument parsing, addr_t struct, args_t config
-- `include/network.h` - Network initialization, callbacks, send functions
+- `include/network.h` - Network initialization, `g_network` global singleton, callbacks
 - `include/protocol.h` - Protocol message structs, macros, parsing/serialization functions
 - `include/session.h` - Session protocol handling (SESSION__on_message, SESSION__on_connected, etc.)
 - `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_msg, TRANSPORT__send_msg, peer metadata)
-- `include/routing.h` - Routing table (routing_table_t, route_entry_t, route_type_t)
+- `include/routing.h` - Routing table (routing_table_t, route_entry_t, route_type_t), `g_node_id` global singleton
 
 ## Architecture
 
@@ -56,19 +56,25 @@ The architecture is separated into four distinct layers:
 +-------------------+     +-------------------+     +-------------------+     +-------------------+
 |      Network      | --> |     Transport     | --> |     Protocol       | --> |     Session       |
 | (socket mgmt,    |     |  (buffer layer,   |     | (byte order,      |     | (protocol logic,  |
-|  reconnection)    |     |   recv/send msg) |     |  validation)       |     |  routing table)   |
+|  accept/reconnect)|     |   recv/send msg) |     |  validation)       |     |  handle messages) |
 +-------------------+     +-------------------+     +-------------------+     +-------------------+
+
+                        +-------------------+
+                        |     Routing       |
+                        | (broadcast/forward|
+                        |  routing table)   |
+                        +-------------------+
 ```
 
 1. **Network Layer** (`network.c/h`): Socket management only
    - Creates listening socket, accepts connections
    - Manages client threads and reconnection logic
+   - Owns global `g_network` singleton
    - Does NOT know about node IDs or protocol logic
 
- 2. **Transport Layer** (`transport.c/h`): Buffer between logic and network
+2. **Transport Layer** (`transport.c/h`): Buffer between logic and network
    - `TRANSPORT__recv_msg()` - receives a complete protocol_msg_t, calls `PROTOCOL__unserialize()`
    - `TRANSPORT__send_msg()` - sends a complete protocol_msg_t, calls `PROTOCOL__serialize()`
-   - `TRANSPORT__send_to_node_id()` - looks up transport by node_id and sends
    - Plugs into send()/recv() syscalls
    - Owns connection abstraction (fd, node_id, client_ip, port, etc.)
 
@@ -77,12 +83,19 @@ The architecture is separated into four distinct layers:
    - `PROTOCOL__serialize()` - converts host byte order to network, adds magic
    - Session works with host byte order protocol_msg_t
 
-4. **Session Layer** (`session.c/h`): All protocol logic
-   - Handles all message types (NODE_INIT, PEER_INFO, NODE_DISCONNECT, etc.)
-   - Maintains routing table
-   - Implements broadcast propagation
-   - Sends via `TRANSPORT__send_msg()` or `TRANSPORT__send_to_node_id()` - never raw sockets
-   - For initial connection setup (NODE_INIT), uses `TRANSPORT__send_msg()` directly with transport
+4. **Session Layer** (`session.c/h`): Protocol-specific logic only
+   - Handles all message types (NODE_INIT, PEER_INFO, NODE_DISCONNECT, CONNECTION_REJECTED)
+   - Does NOT handle broadcast/forward logic - this is in routing layer
+   - Sends via `TRANSPORT__send_msg()` - never raw sockets
+
+5. **Routing Layer** (`routing.c/h`): Message routing
+   - `ROUTING__on_message()` - handles all routing decisions
+   - If dst == this node: calls session callback
+   - If dst == 0 (broadcast): calls session callback AND broadcasts to all direct peers except src
+   - If dst != this node and != 0: forwards to next hop
+   - Drops messages with TTL == 0
+   - Owns global `g_node_id` and `g_rt` (routing table pointer) singletons
+   - `ROUTING__broadcast()` - iterates direct routes, sends to each via transport
 
 ### Key Design Principles
 
@@ -90,26 +103,37 @@ The architecture is separated into four distinct layers:
 - **Session knows nothing about sockets** - it handles protocol logic only
 - **Transport is the ONLY place that calls send()/recv()** - all network I/O goes through transport
 - **All byte order conversion happens in protocol.c** - serialize/unserialize
-- **Session sends messages via TRANSPORT__send_msg() (direct) or TRANSPORT__send_to_node_id() (by node_id lookup)** - never raw
+- **Routing handles broadcast/forward logic** - session only handles protocol-specific logic
+- **Global singletons**: `g_network` (network module), `g_node_id` (routing module), `g_rt` (routing module)
+
+### Global Singletons
+
+```c
+// network.h - the one network instance
+extern network_t g_network;
+
+// routing.h - this node's ID and routing table pointer
+extern int g_node_id;
+```
 
 ### Interface
 
 **main.c wires everything together:**
 ```c
-SESSION__init(SESSION__get_session(), node_id);
-SESSION__set_network(SESSION__get_session(), &net);
-
-NETWORK__init(&net, &args, node_id, SESSION__on_message, SESSION__on_disconnected, SESSION__on_connected);
-```
+g_node_id = args.node_id;
+SESSION__init(SESSION__get_session(), g_node_id);
+SESSION__set_network(SESSION__get_session(), &g_network);
+ROUTING__init_globals(SESSION__get_routing_table(SESSION__get_session()), SESSION__on_message);
+NETWORK__init(&g_network, &args, g_node_id, ROUTING__on_message, SESSION__on_disconnected, SESSION__on_connected);
 ```
 
 ## Usage
 
 ```
-./bin/ganon <LISTEN IP> [OPTIONS]
+./bin/ganon [OPTIONS]
 
 Arguments:
-  LISTEN IP       Listen IP address (0.0.0.0 for any interface)
+  LISTEN IP       Listen IP address (IPv4 format, default: 0.0.0.0)
 
 Options:
   -p, --port N    Listen port number (1-65535, default: 5555)
@@ -197,7 +221,7 @@ Toolchain files are in `cmake/`:
 - Use C11 standard
 - Use meaningful function and variable names
 - Maximum line length: 100 characters
-- Global variables always start with `g_` (e.g., `g_log_level`, `g_node_id`)
+- Global variables always start with `g_` (e.g., `g_log_level`, `g_node_id`, `g_network`)
 
 ## Function Conventions (C)
 
@@ -243,6 +267,25 @@ Every function (except `main`) must:
 ```
 
 Comparison convention: static values first (e.g., `NULL != ptr`, `E__SUCCESS != rc`, `0 > value`)
+
+### Parameter Direction Macros
+
+Use `IN`, `OUT`, and `INOUT` macros to document parameter intent in function signatures:
+
+```c
+#define IN
+#define OUT
+#define INOUT
+```
+
+- `IN` - Input parameter (passed to the function, not modified)
+- `OUT` - Output parameter (returned via pointer)
+- `INOUT` - Parameter that is both input and output
+
+Example:
+```c
+err_t ROUTING__get_route(IN routing_table_t *rt, IN uint32_t node_id, OUT route_entry_t *entry);
+```
 
 Preprocessor convention: `#endif` should have a comment indicating which `#ifdef` it closes
 
@@ -303,29 +346,31 @@ typedef enum {
 - **dst_node_id**: Destination node (0 for broadcast)
 - **ttl**: Time-to-live for broadcast messages (decremented each hop)
 
+#### Message Data
+
+**NODE_DISCONNECT**: data contains list of nodes that were reachable via the disconnected node (unreachable nodes due to this disconnect). Each node ID is a 4-byte network-order integer.
+
 ## Data Structures
 
-### connection_t
+### route_entry_t
 
 ```c
-struct connection {
+typedef struct route_entry {
     uint32_t node_id;
+    uint32_t next_hop_node_id;
+    route_type_t route_type;
     int fd;
-    int is_incoming;
-    char client_ip[INET_ADDRSTRLEN];
-    int client_port;
-    void *ctx;
-};
+} route_entry_t;
 ```
 
-### session_t
+### routing_table_t
 
 ```c
-struct session_t {
-    int node_id;
-    routing_table_t routing_table;
-    network_t *net;
-};
+typedef struct {
+    route_entry_t entries[ROUTING_TABLE_MAX_ENTRIES];
+    size_t entry_count;
+    pthread_mutex_t mutex;
+} routing_table_t;
 ```
 
 ### network_t
@@ -346,12 +391,9 @@ struct network_t {
     int reconnect_retries;
     int reconnect_delay;
     int node_id;
-    void *session_ctx;
     network_message_cb_t message_cb;
     network_disconnected_cb_t disconnected_cb;
     network_connected_cb_t connected_cb;
-    network_send_fn_t send_fn;
-    void *send_ctx;
 };
 ```
 
@@ -370,14 +412,23 @@ struct transport {
 };
 ```
 
-## Network Callbacks
+## Routing Functions
 
-```c
-typedef void (*network_message_cb_t)(void *session_ctx, transport_t *t, const uint8_t *buf, size_t len);
-typedef void (*network_disconnected_cb_t)(void *session_ctx, transport_t *t);
-typedef void (*network_connected_cb_t)(void *session_ctx, transport_t *t);
-typedef void (*network_send_fn_t)(uint32_t node_id, const uint8_t *buf, size_t len, void *ctx);
-```
+### ROUTING__on_message
+
+Main routing handler - called for every received message:
+- If dst == this node: calls session callback (message for us)
+- If dst == 0 (broadcast): calls session callback AND broadcasts to all direct peers except src
+- If dst != this node and != 0: forwards to next hop (ttl decremented, src updated to this node)
+- Drops messages with TTL == 0
+
+### ROUTING__broadcast
+
+Sends message to all direct peers except one:
+- Iterates routing table for DIRECT routes
+- Excludes specified node_id from broadcast
+- Decrements TTL and updates src_node_id before sending
+- Uses NETWORK__get_transport + TRANSPORT__send_msg internally
 
 ## Error Codes
 
@@ -395,5 +446,9 @@ Errors are defined in `include/err.h` as enum `err_t`:
 
 - [x] Major refactor: separate network/session/transport layers
 - [x] Fix byte order conversion - session works in host order, transport serializes
+- [x] Move broadcast/forward logic to routing layer (ROUTING__on_message)
+- [x] Add IN/OUT/INOUT parameter direction macros
+- [x] NODE_DISCONNECT carries list of unreachable nodes
+- [x] Add ROUTING__get_via_nodes function
 - [ ] Update Python client to match new architecture
 - [ ] Test multi-node mesh topology

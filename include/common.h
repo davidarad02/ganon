@@ -52,4 +52,8 @@ typedef int bool_t;
         } \
     } while (0)
 
+#define IN
+#define OUT
+#define INOUT
+
 #endif /* #ifndef GANON_COMMON_H */

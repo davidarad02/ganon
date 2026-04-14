@@ -5,6 +5,7 @@
 #include <netinet/in.h>
 
 #include "args.h"
+#include "common.h"
 #include "err.h"
 #include "transport.h"
 
@@ -44,12 +45,12 @@ struct network_t {
     network_connected_cb_t connected_cb;
 };
 
-err_t NETWORK__init(network_t *net, const args_t *args, int node_id, network_message_cb_t msg_cb, network_disconnected_cb_t disc_cb, network_connected_cb_t conn_cb);
-err_t NETWORK__shutdown(network_t *net);
+err_t NETWORK__init(OUT network_t *net, IN const args_t *args, IN int node_id, IN network_message_cb_t msg_cb, IN network_disconnected_cb_t disc_cb, IN network_connected_cb_t conn_cb);
+err_t NETWORK__shutdown(IN network_t *net);
 
-transport_t *NETWORK__get_transport(network_t *net, uint32_t node_id);
-void NETWORK__close_transport(network_t *net, transport_t *t);
+transport_t *NETWORK__get_transport(IN network_t *net, IN uint32_t node_id);
+void NETWORK__close_transport(IN network_t *net, IN transport_t *t);
 
-extern int g_node_id;
+extern network_t g_network;
 
 #endif /* #ifndef GANON_NETWORK_H */

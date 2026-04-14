@@ -7,6 +7,7 @@
 #include "logging.h"
 #include "args.h"
 #include "network.h"
+#include "routing.h"
 #include "session.h"
 #include "transport.h"
 
@@ -16,8 +17,6 @@ static void signal_handler(int sig) {
     (void)sig;
     g_shutdown_requested = 1;
 }
-
-static network_t g_network;
 
 int main(int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
@@ -41,7 +40,9 @@ int main(int argc, char *argv[]) {
 
     SESSION__set_network(SESSION__get_session(), &g_network);
 
-    rc = NETWORK__init(&g_network, &args, g_node_id, SESSION__on_message, SESSION__on_disconnected, SESSION__on_connected);
+    ROUTING__init_globals(SESSION__get_routing_table(SESSION__get_session()), SESSION__on_message);
+
+    rc = NETWORK__init(&g_network, &args, g_node_id, ROUTING__on_message, SESSION__on_disconnected, SESSION__on_connected);
     FAIL_IF(E__SUCCESS != rc, rc);
 
     LOG_INFO("Network initialized");

@@ -3,7 +3,76 @@
 
 #include "common.h"
 #include "logging.h"
+#include "network.h"
+#include "protocol.h"
 #include "routing.h"
+#include "transport.h"
+
+static routing_table_t *g_rt = NULL;
+static routing_message_cb_t g_session_cb = NULL;
+int g_node_id = 0;
+
+void ROUTING__init_globals(IN routing_table_t *rt, IN routing_message_cb_t session_cb) {
+    g_rt = rt;
+    g_session_cb = session_cb;
+}
+
+static err_t ROUTING__send_to_node_id(IN uint32_t node_id, IN const protocol_msg_t *msg, IN const uint8_t *data) {
+    err_t rc = E__SUCCESS;
+    transport_t *t = NETWORK__get_transport(&g_network, node_id);
+    if (NULL == t) {
+        LOG_WARNING("No transport for node %u", node_id);
+        FAIL(E__ROUTING__NODE_NOT_FOUND);
+    }
+    protocol_msg_t fwd_msg = *msg;
+    fwd_msg.src_node_id = (uint32_t)g_node_id;
+    if (fwd_msg.ttl > 0) {
+        fwd_msg.ttl--;
+    }
+    rc = TRANSPORT__send_msg(t, &fwd_msg, data);
+    FAIL_IF(E__SUCCESS != rc, rc);
+l_cleanup:
+    return rc;
+}
+
+void ROUTING__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN const uint8_t *data, IN size_t data_len) {
+    if (NULL == g_rt || NULL == msg) {
+        return;
+    }
+
+    (void)data_len;
+
+    uint32_t dst = msg->dst_node_id;
+    uint32_t src = msg->src_node_id;
+    uint32_t ttl = msg->ttl;
+
+    if (ttl == 0) {
+        LOG_DEBUG("Dropping message with TTL 0");
+        return;
+    }
+
+    if (dst == (uint32_t)g_node_id) {
+        if (NULL != g_session_cb) {
+            g_session_cb(t, msg, data, data_len);
+        }
+        return;
+    }
+
+    if (dst == 0) {
+        if (NULL != g_session_cb) {
+            g_session_cb(t, msg, data, data_len);
+        }
+        ROUTING__broadcast(g_rt, src, (uint32_t)g_node_id, msg, data);
+        return;
+    }
+
+    if (dst != (uint32_t)g_node_id && dst != 0) {
+        route_entry_t entry;
+        if (E__SUCCESS == ROUTING__get_route(g_rt, dst, &entry)) {
+            ROUTING__send_to_node_id(entry.next_hop_node_id, msg, data);
+        }
+    }
+}
 
 static void ROUTING__log_table(routing_table_t *rt) {
     if (NULL == rt) {
@@ -19,7 +88,7 @@ static void ROUTING__log_table(routing_table_t *rt) {
     }
 }
 
-err_t ROUTING__init(routing_table_t *rt) {
+err_t ROUTING__init(OUT routing_table_t *rt) {
     err_t rc = E__SUCCESS;
 
     if (NULL == rt) {
@@ -36,14 +105,14 @@ l_cleanup:
     return rc;
 }
 
-void ROUTING__destroy(routing_table_t *rt) {
+void ROUTING__destroy(IN routing_table_t *rt) {
     if (NULL != rt) {
         pthread_mutex_destroy(&rt->mutex);
         memset(rt, 0, sizeof(routing_table_t));
     }
 }
 
-err_t ROUTING__add_direct(routing_table_t *rt, uint32_t node_id, int fd) {
+err_t ROUTING__add_direct(IN routing_table_t *rt, IN uint32_t node_id, IN int fd) {
     err_t rc = E__SUCCESS;
 
     VALIDATE_ARGS(rt);
@@ -85,7 +154,7 @@ l_cleanup:
     return rc;
 }
 
-err_t ROUTING__add_via_hop(routing_table_t *rt, uint32_t node_id, uint32_t next_hop_node_id) {
+err_t ROUTING__add_via_hop(IN routing_table_t *rt, IN uint32_t node_id, IN uint32_t next_hop_node_id) {
     err_t rc = E__SUCCESS;
 
     VALIDATE_ARGS(rt);
@@ -128,7 +197,7 @@ l_cleanup:
     return rc;
 }
 
-err_t ROUTING__remove(routing_table_t *rt, uint32_t node_id) {
+err_t ROUTING__remove(IN routing_table_t *rt, IN uint32_t node_id) {
     err_t rc = E__SUCCESS;
 
     VALIDATE_ARGS(rt);
@@ -158,7 +227,7 @@ l_cleanup:
     return rc;
 }
 
-err_t ROUTING__remove_via_node(routing_table_t *rt, uint32_t via_node_id) {
+err_t ROUTING__remove_via_node(IN routing_table_t *rt, IN uint32_t via_node_id) {
     err_t rc = E__SUCCESS;
     size_t removed = 0;
 
@@ -192,7 +261,39 @@ l_cleanup:
     return rc;
 }
 
-err_t ROUTING__get_route(routing_table_t *rt, uint32_t node_id, route_entry_t *entry) {
+uint32_t *ROUTING__get_via_nodes(IN routing_table_t *rt, IN uint32_t via_node_id, OUT size_t *count) {
+    uint32_t *result = NULL;
+    *count = 0;
+
+    if (NULL == rt || NULL == count) {
+        return NULL;
+    }
+
+    if (0 != pthread_mutex_lock(&rt->mutex)) {
+        LOG_ERROR("Failed to lock routing table mutex");
+        return NULL;
+    }
+
+    for (size_t i = 0; i < rt->entry_count; i++) {
+        if (rt->entries[i].route_type == ROUTE__VIA_HOP && rt->entries[i].next_hop_node_id == via_node_id) {
+            uint32_t *new_result = realloc(result, (*count + 1) * sizeof(uint32_t));
+            if (NULL == new_result) {
+                pthread_mutex_unlock(&rt->mutex);
+                free(result);
+                *count = 0;
+                return NULL;
+            }
+            result = new_result;
+            result[*count] = rt->entries[i].node_id;
+            (*count)++;
+        }
+    }
+
+    pthread_mutex_unlock(&rt->mutex);
+    return result;
+}
+
+err_t ROUTING__get_route(IN routing_table_t *rt, IN uint32_t node_id, OUT route_entry_t *entry) {
     err_t rc = E__SUCCESS;
 
     VALIDATE_ARGS(rt, entry);
@@ -217,7 +318,7 @@ l_cleanup:
     return rc;
 }
 
-err_t ROUTING__get_next_hop(routing_table_t *rt, uint32_t node_id, uint32_t *next_hop) {
+err_t ROUTING__get_next_hop(IN routing_table_t *rt, IN uint32_t node_id, OUT uint32_t *next_hop) {
     err_t rc = E__SUCCESS;
     route_entry_t entry;
 
@@ -234,7 +335,7 @@ l_cleanup:
     return rc;
 }
 
-int ROUTING__is_direct(routing_table_t *rt, uint32_t node_id) {
+int ROUTING__is_direct(IN routing_table_t *rt, IN uint32_t node_id) {
     route_entry_t entry;
     if (E__SUCCESS == ROUTING__get_route(rt, node_id, &entry)) {
         return entry.route_type == ROUTE__DIRECT;
@@ -242,7 +343,7 @@ int ROUTING__is_direct(routing_table_t *rt, uint32_t node_id) {
     return 0;
 }
 
-err_t ROUTING__send_to_node(routing_table_t *rt, uint32_t node_id, const uint8_t *buf, size_t len, ssize_t (*send_fn)(int, const uint8_t *, size_t)) {
+err_t ROUTING__send_to_node(IN routing_table_t *rt, IN uint32_t node_id, IN const uint8_t *buf, IN size_t len, IN ssize_t (*send_fn)(IN int, IN const uint8_t *, IN size_t)) {
     err_t rc = E__SUCCESS;
     route_entry_t entry;
 
@@ -274,4 +375,32 @@ err_t ROUTING__send_to_node(routing_table_t *rt, uint32_t node_id, const uint8_t
 
 l_cleanup:
     return rc;
+}
+
+void ROUTING__broadcast(IN routing_table_t *rt, IN uint32_t exclude_node_id, IN uint32_t src_node_id, IN const protocol_msg_t *msg, IN const uint8_t *data) {
+    if (NULL == rt || NULL == msg) {
+        return;
+    }
+
+    if (0 != pthread_mutex_lock(&rt->mutex)) {
+        LOG_ERROR("Failed to lock routing table mutex");
+        return;
+    }
+
+    for (size_t i = 0; i < rt->entry_count; i++) {
+        uint32_t node_id = rt->entries[i].node_id;
+        if (node_id != exclude_node_id && rt->entries[i].route_type == ROUTE__DIRECT) {
+            transport_t *t = NETWORK__get_transport(&g_network, node_id);
+            if (NULL != t) {
+                protocol_msg_t broadcast_msg = *msg;
+                broadcast_msg.src_node_id = src_node_id;
+                if (broadcast_msg.ttl > 0) {
+                    broadcast_msg.ttl--;
+                }
+                TRANSPORT__send_msg(t, &broadcast_msg, data);
+            }
+        }
+    }
+
+    pthread_mutex_unlock(&rt->mutex);
 }

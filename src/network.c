@@ -16,7 +16,7 @@
 #include "network.h"
 #include "transport.h"
 
-int g_node_id = -1;
+network_t g_network;
 
 static int create_listen_socket(const char *ip, int port) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -383,7 +383,7 @@ static void *connect_thread_func(void *arg) {
     }
 }
 
-err_t NETWORK__init(network_t *net, const args_t *args, int node_id, network_message_cb_t msg_cb, network_disconnected_cb_t disc_cb, network_connected_cb_t conn_cb) {
+err_t NETWORK__init(OUT network_t *net, IN const args_t *args, IN int node_id, IN network_message_cb_t msg_cb, IN network_disconnected_cb_t disc_cb, IN network_connected_cb_t conn_cb) {
     err_t rc = E__SUCCESS;
 
     if (NULL == net || NULL == args) {

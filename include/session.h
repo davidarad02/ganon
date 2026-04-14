@@ -4,6 +4,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "common.h"
 #include "protocol.h"
 #include "routing.h"
 #include "transport.h"
@@ -18,18 +19,18 @@ struct session_t {
     network_t *net;
 };
 
-err_t SESSION__init(session_t *s, int node_id);
-void SESSION__destroy(session_t *s);
+err_t SESSION__init(OUT session_t *s, IN int node_id);
+void SESSION__destroy(IN session_t *s);
 
-void SESSION__set_network(session_t *s, network_t *net);
-network_t *SESSION__get_network(session_t *s);
+void SESSION__set_network(IN session_t *s, IN network_t *net);
+network_t *SESSION__get_network(IN session_t *s);
 session_t *SESSION__get_session(void);
 
-void SESSION__on_connected(transport_t *t);
-void SESSION__on_message(transport_t *t, const protocol_msg_t *msg, const uint8_t *data, size_t data_len);
-void SESSION__on_disconnected(transport_t *t);
+void SESSION__on_connected(IN transport_t *t);
+void SESSION__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN const uint8_t *data, IN size_t data_len);
+void SESSION__on_disconnected(IN transport_t *t);
 
-int SESSION__get_node_id(session_t *s);
-routing_table_t *SESSION__get_routing_table(session_t *s);
+int SESSION__get_node_id(IN session_t *s);
+routing_table_t *SESSION__get_routing_table(IN session_t *s);
 
 #endif /* #ifndef GANON_SESSION_H */
