@@ -33,6 +33,7 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `src/transport.c` - Buffer layer, recv/send protocol_msg_t, connection abstraction
 - `src/protocol.c` - Protocol parsing, serialization, byte order conversion
 - `src/routing.c` - Routing table, ROUTING__on_message for broadcast/forward logic, global singleton `g_node_id`
+- `src/loadbalancer.c` - Multi-route load balancing strategies (round-robin) and reordering buffer logic
 
 ### C Header Files
 
@@ -45,6 +46,7 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `include/session.h` - Session protocol handling (SESSION__on_message, SESSION__on_connected, etc.)
 - `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_msg, TRANSPORT__send_msg, peer metadata)
 - `include/routing.h` - Routing table (routing_table_t, route_entry_t, route_type_t), `g_node_id` global singleton
+- `include/loadbalancer.h` - Load balancer interface and strategy enums
 
 ## Architecture
 
@@ -84,16 +86,14 @@ The architecture is separated into four distinct layers:
    - Session works with host byte order protocol_msg_t
 
 4. **Session Layer** (`session.c/h`): Protocol-specific logic only
-   - Handles all message types (NODE_INIT, PEER_INFO, NODE_DISCONNECT, CONNECTION_REJECTED)
+   - Handles all message types (NODE_INIT, MSG__RREQ, MSG__RREP, RERR, CONNECTION_REJECTED)
    - Does NOT handle broadcast/forward logic - this is in routing layer
    - Sends via `TRANSPORT__send_msg()` - never raw sockets
 
 5. **Routing Layer** (`routing.c/h`): Message routing
-   - `ROUTING__on_message()` - handles all routing decisions
-   - If dst == this node: calls session callback
-   - If dst == 0 (broadcast): calls session callback AND broadcasts to all direct peers except src
-   - If dst != this node and != 0: forwards to next hop
-   - Drops messages with TTL == 0
+   - Implements reactive AODV (Ad-hoc On-Demand Distance Vector) algorithm
+   - `ROUTING__on_message()` - handles all routing decisions, dynamically updating reverse paths via received message trace data.
+   - Transparently broadcast `RREQ` (Route Requests) for unmapped destinations
    - Owns global `g_node_id` and `g_rt` (routing table pointer) singletons
    - `ROUTING__broadcast()` - iterates direct routes, sends to each via transport
 
@@ -142,6 +142,8 @@ Options:
   -w, --connect-timeout N  Connect timeout in seconds (default: 5)
   --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable, max/always for unlimited)
   --reconnect-delay N       Delay between reconnect attempts (default: 5 seconds)
+  --lb-strategy STR         Load balancing strategy: 'round-robin' (default) or 'all-routes'
+  --tcp-rcvbuf N            TCP receive buffer size in bytes for tunnel connections (0 = system default)
   -h, --help      Show this help message
 ```
 
@@ -167,9 +169,9 @@ Options:
 
 ```cmake
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c protocol.c)
+    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c protocol.c loadbalancer.c)
 else()
-    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c protocol.c)
+    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c protocol.c loadbalancer.c)
 endif()
 ```
 
@@ -333,9 +335,19 @@ All multi-byte integers use network byte order (big-endian).
 ```c
 typedef enum {
     MSG__NODE_INIT = 0,
-    MSG__PEER_INFO = 1,
-    MSG__NODE_DISCONNECT = 2,
-    MSG__CONNECTION_REJECTED = 3,
+    MSG__CONNECTION_REJECTED = 1,
+    MSG__RREQ = 2,
+    MSG__RREP = 3,
+    MSG__RERR = 4,
+    MSG__USER_DATA = 5,
+    MSG__PING = 6,
+    MSG__PONG = 7,
+    MSG__TUNNEL_OPEN = 8,
+    MSG__TUNNEL_CONN_OPEN = 9,
+    MSG__TUNNEL_CONN_ACK = 10,
+    MSG__TUNNEL_DATA = 11,
+    MSG__TUNNEL_CONN_CLOSE = 12,
+    MSG__TUNNEL_CLOSE = 13
 } msg_type_t;
 ```
 
@@ -348,7 +360,17 @@ typedef enum {
 
 #### Message Data
 
-**NODE_DISCONNECT**: data contains list of nodes that were reachable via the disconnected node (unreachable nodes due to this disconnect). Each node ID is a 4-byte network-order integer.
+**RERR**: data contains list of disconnected node IDs that were reachable via the disconnected node (unreachable nodes due to this disconnect). Each node ID is a 4-byte network-order integer.
+
+**TUNNEL_CLOSE**: data is a `tunnel_id_payload_t` structure:
+```c
+typedef struct __attribute__((packed)) {
+    uint32_t tunnel_id;  /* Tunnel to close */
+    uint32_t flags;      /* 0 = soft close (default), 1 = force close */
+} tunnel_id_payload_t;
+```
+- **Soft close** (flags=0): Closes the listening port to stop accepting new connections, but keeps existing connections alive until they close naturally.
+- **Force close** (flags=1): Immediately closes the listening port and terminates all existing connections.
 
 ## Data Structures
 
@@ -360,6 +382,8 @@ typedef struct route_entry {
     uint32_t next_hop_node_id;
     route_type_t route_type;
     int fd;
+    time_t last_updated;
+    uint8_t hop_count;
 } route_entry_t;
 ```
 
@@ -452,4 +476,20 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Add ROUTING__get_via_nodes function
 - [x] Reconnection logic: connect_and_run_thread handles reconnect loop per peer
 - [ ] Update Python client to match new architecture
-- [ ] Test multi-node mesh topology
+- [x] Test multi-node mesh topology
+- [x] Migrated routing to reactive AODV mesh logic
+- [ ] Implement AODV message structs into Python Client
+- [x] Implement multi-path Load Balancing (Round-Robin, All-Routes)
+- [x] Implement sequential msg_id tracking, deduplication, and reordering buffer (C & Python)
+- [x] Fix protocol mismatch between C and Python client
+- [x] Improve RERR logic for multi-path mesh reachability
+- [x] Created Docker test environment for multi-node testing
+- [x] Fix tunnel close race condition - set listen socket to non-blocking so accept() can be interrupted by close()
+- [x] Fix tunnel creation without existing AODV route - buffer messages and trigger RREQ in ROUTING__route_message when no route exists
+- [x] Implement tunnel soft close - `t.close()` stops accepting new connections but keeps existing ones alive; `t.close(force=True)` for immediate termination
+- [x] Fix tunnel multi-connection channel isolation - use unique channel_id per connection (conn_id) for proper load balancer sequencing, master channel (tunnel_id) for control messages
+- [x] Fix UDP tunnel support - create SOCK_DGRAM sockets for UDP, use recvfrom/sendto instead of accept/send/recv, track UDP clients by address
+- [x] Fix UDP tunnel destination-side forwarding - properly track UDP connections in dst_conn_t and use sendto() with correct remote address
+- [x] Implement tunnel connection persistence during route outages - TCP connections enter "stalled" state with backpressure when no route exists, resume when route is restored (UDP packets are lost as expected)
+- [x] Add --tcp-rcvbuf CLI option and TCP_RCVBUF env variable to configure TCP receive buffer size for tunnel connections
+- [ ] Add encryption at the transport layer

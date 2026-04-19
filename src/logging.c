@@ -4,6 +4,7 @@
 #include <sys/time.h>
 #include <string.h>
 #include <stdlib.h>
+#include <pthread.h>
 
 #include "logging.h"
 
@@ -15,6 +16,8 @@
 #define COLOR_BOLD    "\033[1m"
 
 log_level_t g_log_level = LOG_LEVEL_INFO;
+
+static pthread_mutex_t g_log_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static const char *get_level_color(const char *level) {
     if ('I' == level[0]) {
@@ -66,6 +69,7 @@ void LOGGING__message(const char *level, const char *file, int line, const char 
     va_list args;
     va_start(args, msg);
 
+    pthread_mutex_lock(&g_log_mutex);
     printf(COLOR_BOLD);
     printf("%s.%06ld ", timestamp, tv.tv_usec);
     printf(COLOR_RESET "[");
@@ -76,5 +80,7 @@ void LOGGING__message(const char *level, const char *file, int line, const char 
     printf(" [");
     printf(COLOR_BOLD "%s:%d", filename, line);
     printf(COLOR_RESET "]\n");
+    fflush(stdout);
+    pthread_mutex_unlock(&g_log_mutex);
     va_end(args);
 }

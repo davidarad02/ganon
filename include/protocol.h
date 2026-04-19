@@ -14,9 +14,19 @@
 
 typedef enum {
     MSG__NODE_INIT = 0,
-    MSG__PEER_INFO = 1,
-    MSG__NODE_DISCONNECT = 2,
-    MSG__CONNECTION_REJECTED = 3,
+    MSG__CONNECTION_REJECTED = 1,
+    MSG__RREQ = 2,
+    MSG__RREP = 3,
+    MSG__RERR = 4,
+    MSG__USER_DATA = 5,
+    MSG__PING = 6,
+    MSG__PONG = 7,
+    MSG__TUNNEL_OPEN = 8,
+    MSG__TUNNEL_CONN_OPEN = 9,
+    MSG__TUNNEL_CONN_ACK = 10,
+    MSG__TUNNEL_DATA = 11,
+    MSG__TUNNEL_CONN_CLOSE = 12,
+    MSG__TUNNEL_CLOSE = 13,
 } msg_type_t;
 
 typedef struct {
@@ -28,6 +38,7 @@ typedef struct {
     uint32_t type;
     uint32_t data_length;
     uint32_t ttl;
+    uint32_t channel_id;
 } protocol_msg_t;
 
 bool PROTOCOL__validate_magic(IN const uint8_t *buf);

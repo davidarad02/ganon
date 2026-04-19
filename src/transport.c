@@ -183,9 +183,9 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
         goto l_cleanup;
     }
 
-    LOG_TRACE("RECV msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u, fd=%d",
+    LOG_TRACE("RECV msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u, channel=%u, fd=%d",
               msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
-              msg->message_id, msg->type, msg->data_length, msg->ttl, t->fd);
+              msg->message_id, msg->type, msg->data_length, msg->ttl, msg->channel_id, t->fd);
 
     FREE(full_msg);
 l_cleanup:
@@ -197,9 +197,9 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
 
     VALIDATE_ARGS(t, msg);
 
-    LOG_TRACE("SEND msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u, fd=%d",
+    LOG_TRACE("SEND msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u, channel=%u, fd=%d",
               msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
-              msg->message_id, msg->type, msg->data_length, msg->ttl, t->fd);
+              msg->message_id, msg->type, msg->data_length, msg->ttl, msg->channel_id, t->fd);
 
     size_t buf_len = PROTOCOL_HEADER_SIZE;
     if (NULL != data && msg->data_length > 0) {

@@ -1,0 +1,1 @@
+- [Keep AGENTS.md and CLAUDE.md in sync](documentation_sync.md) — Update both docs when code changes

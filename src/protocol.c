@@ -36,6 +36,7 @@ err_t PROTOCOL__unserialize(const uint8_t *buf, size_t len, protocol_msg_t *msg,
     msg->type = ntohl(msg->type);
     msg->data_length = ntohl(msg->data_length);
     msg->ttl = ntohl(msg->ttl);
+    msg->channel_id = ntohl(msg->channel_id);
 
     *data = NULL;
     *data_len = 0;
@@ -76,6 +77,7 @@ err_t PROTOCOL__serialize(const protocol_msg_t *msg, const uint8_t *data, uint8_
     net_msg.type = htonl(net_msg.type);
     net_msg.data_length = htonl(net_msg.data_length);
     net_msg.ttl = htonl(net_msg.ttl);
+    net_msg.channel_id = htonl(net_msg.channel_id);
 
     memcpy(buf, &net_msg, sizeof(net_msg));
     *bytes_written = PROTOCOL_HEADER_SIZE;

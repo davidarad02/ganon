@@ -10,6 +10,8 @@
 #include "routing.h"
 #include "session.h"
 #include "transport.h"
+#include "loadbalancer.h"
+#include "tunnel.h"
 
 static volatile sig_atomic_t g_shutdown_requested = 0;
 
@@ -35,11 +37,16 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
+    /* Ignore SIGPIPE so that writes to closed sockets return EPIPE instead of killing the process */
+    signal(SIGPIPE, SIG_IGN);
+
     rc = SESSION__init(SESSION__get_session(), g_node_id);
     FAIL_IF(E__SUCCESS != rc, rc);
 
     SESSION__set_network(SESSION__get_session(), &g_network);
 
+    TUNNEL__init(args.tcp_rcvbuf);
+    LB__init(args.lb_strategy, args.reorder_timeout, args.rr_count);
     ROUTING__init_globals(SESSION__get_routing_table(SESSION__get_session()), SESSION__on_message);
 
     rc = NETWORK__init(&g_network, &args, g_node_id, ROUTING__on_message, SESSION__on_disconnected, SESSION__on_connected);
@@ -48,6 +55,9 @@ int main(int argc, char *argv[]) {
     LOG_INFO("Network initialized");
     LOG_INFO("Node ID: %d", g_node_id);
     LOG_INFO("Listen: %s:%d", args.listen_addr.ip, args.listen_addr.port);
+    if (args.tcp_rcvbuf > 0) {
+        LOG_INFO("TCP receive buffer: %d bytes", args.tcp_rcvbuf);
+    }
     for (int i = 0; i < args.connect_count; i++) {
         LOG_INFO("Connect[%d]: %s:%d", i, args.connect_addrs[i].ip, args.connect_addrs[i].port);
     }
@@ -61,6 +71,8 @@ int main(int argc, char *argv[]) {
     FAIL_IF(E__SUCCESS != rc, rc);
 
     SESSION__destroy(SESSION__get_session());
+    LB__destroy();
+    TUNNEL__destroy();
 
     LOG_INFO("ganon stopped");
 

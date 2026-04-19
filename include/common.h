@@ -3,12 +3,10 @@
 
 #include <stddef.h>
 
+#include <stdbool.h>
 #include "err.h"
 
-typedef int bool_t;
-
-#define false ((bool_t)0)
-#define true ((bool_t)1)
+typedef bool bool_t;
 
 #define FAIL_IF(condition, error) \
     if (condition) { rc = error; goto l_cleanup; }

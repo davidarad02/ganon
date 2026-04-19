@@ -3,9 +3,9 @@ if(NOT TARGET_NAME)
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c protocol.c)
+    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c protocol.c loadbalancer.c tunnel.c)
 else()
-    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c protocol.c)
+    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c protocol.c loadbalancer.c tunnel.c)
 endif()
 
 find_package(Threads REQUIRED)

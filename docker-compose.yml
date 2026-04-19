@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  # Central node with ID 30
+  ganon-30:
+    build: .
+    ports:
+      - "5555:5555"  # Expose port for external access if needed
+    command: ["0.0.0.0", "-p", "5555", "-i", "30"]
+    networks:
+      ganon-net:
+        ipv4_address: 172.20.0.30
+
+  # Node 21 connecting to node 30
+  ganon-21:
+    build: .
+    command: ["0.0.0.0", "-p", "5556", "-i", "21", "-c", "172.20.0.30:5555"]
+    networks:
+      ganon-net:
+        ipv4_address: 172.20.0.21
+
+  # Node 22 connecting to node 30
+  ganon-22:
+    build: .
+    command: ["0.0.0.0", "-p", "5557", "-i", "22", "-c", "172.20.0.30:5555"]
+    networks:
+      ganon-net:
+        ipv4_address: 172.20.0.22
+
+  # Node 11 connecting to both nodes 21 and 22
+  ganon-11:
+    build: .
+    command: ["0.0.0.0", "-p", "5558", "-i", "11", "-c", "172.20.0.21:5556,172.20.0.22:5557"]
+    networks:
+      ganon-net:
+        ipv4_address: 172.20.0.11
+
+networks:
+  ganon-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

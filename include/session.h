@@ -25,6 +25,7 @@ void SESSION__destroy(IN session_t *s);
 void SESSION__set_network(IN session_t *s, IN network_t *net);
 network_t *SESSION__get_network(IN session_t *s);
 session_t *SESSION__get_session(void);
+uint32_t SESSION__get_next_msg_id(void);
 
 void SESSION__on_connected(IN transport_t *t);
 void SESSION__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN const uint8_t *data, IN size_t data_len);

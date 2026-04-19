@@ -27,6 +27,10 @@ void args_print_help(const char *prog_name) {
     printf("  -w, --connect-timeout N  Connect timeout in seconds (default: 5)\n");
     printf("  --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable, always for unlimited)\n");
     printf("  --reconnect-delay N       Delay between reconnect attempts (default: 5 seconds)\n");
+    printf("  --lb-strategy STR         Load balancing strategy: 'round-robin' (default), 'all-routes', or 'sticky'\n");
+    printf("  --rr-count N              Number of routes to use per round-robin step (default: 1)\n");
+    printf("  --reorder-timeout N       Out-of-order buffering timeout in milliseconds (default: 100)\n");
+    printf("  --tcp-rcvbuf N            TCP receive buffer size in bytes (0 = system default)\n");
     printf("  -h, --help      Show this help message\n");
     printf("\n");
     printf("Environment variables:\n");
@@ -37,6 +41,10 @@ void args_print_help(const char *prog_name) {
     printf("  CONNECT_TIMEOUT  Connect timeout in seconds (alternative to -w/--connect-timeout)\n");
     printf("  RECONNECT_RETRIES   Reconnect retries (alternative to --reconnect-retries)\n");
     printf("  RECONNECT_DELAY     Delay between reconnect attempts (alternative to --reconnect-delay)\n");
+    printf("  LB_STRATEGY         Load balancing strategy (alternative to --lb-strategy)\n");
+    printf("  RR_COUNT            Round-robin route count (alternative to --rr-count)\n");
+    printf("  REORDER_TIMEOUT     Out-of-order buffering timeout in MS (alternative to --reorder-timeout)\n");
+    printf("  TCP_RCVBUF          TCP receive buffer size in bytes (alternative to --tcp-rcvbuf)\n");
 }
 
 static bool_t is_help_flag(const char *arg) {
@@ -323,6 +331,12 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
     int reconnect_retries_set = 0;
     int reconnect_delay = ARGS_RECONNECT_DELAY_DEFAULT;
     int reconnect_delay_set = 0;
+    lb_strategy_t lb_strategy = LB_STRATEGY_ROUND_ROBIN;
+    int lb_strategy_set = 0;
+    int rr_count = ARGS_RR_COUNT_DEFAULT;
+    int rr_count_set = 0;
+    int tcp_rcvbuf = ARGS_TCP_RCVBUF_DEFAULT;
+    int tcp_rcvbuf_set = 0;
 
     if (NULL == args_out) {
         rc = E__INVALID_ARG_NULL_POINTER;
@@ -333,6 +347,10 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
     args_out->connect_timeout = ARGS_CONNECT_TIMEOUT_DEFAULT;
     args_out->reconnect_retries = ARGS_RECONNECT_RETRIES_DEFAULT;
     args_out->reconnect_delay = ARGS_RECONNECT_DELAY_DEFAULT;
+    args_out->reorder_timeout = ARGS_REORDER_TIMEOUT_DEFAULT;
+    args_out->lb_strategy = LB_STRATEGY_ROUND_ROBIN;
+    args_out->rr_count = ARGS_RR_COUNT_DEFAULT;
+    args_out->tcp_rcvbuf = ARGS_TCP_RCVBUF_DEFAULT;
 
 #ifdef __DEBUG__
     for (int i = 1; i < argc; i++) {
@@ -460,6 +478,56 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
         }
         reconnect_delay = d;
         reconnect_delay_set = 1;
+    }
+    char *env_lb_strategy = get_env(ARGS_ENV_LB_STRATEGY);
+    if (NULL != env_lb_strategy) {
+        LOG_TRACE("Using LB_STRATEGY from environment: %s", env_lb_strategy);
+        FAIL_IF(0 != lb_strategy_set, E__ARGS__CONFLICTING_ARGUMENTS);
+        if (0 == strcmp(env_lb_strategy, "round-robin")) {
+            lb_strategy = LB_STRATEGY_ROUND_ROBIN;
+        } else if (0 == strcmp(env_lb_strategy, "all-routes")) {
+            lb_strategy = LB_STRATEGY_ALL_ROUTES;
+        } else if (0 == strcmp(env_lb_strategy, "sticky")) {
+            lb_strategy = LB_STRATEGY_STICKY;
+        } else {
+            LOG_ERROR("Invalid LB_STRATEGY value: %s (must be 'round-robin', 'all-routes', or 'sticky')", env_lb_strategy);
+            FAIL(E__ARGS__INVALID_FORMAT);
+        }
+        lb_strategy_set = 1;
+    }
+    char *env_reorder_timeout = get_env(ARGS_ENV_REORDER_TIMEOUT);
+    if (NULL != env_reorder_timeout) {
+        LOG_TRACE("Using REORDER_TIMEOUT from environment: %s", env_reorder_timeout);
+        int t = parse_int(env_reorder_timeout);
+        if (0 > t) {
+            LOG_ERROR("Invalid REORDER_TIMEOUT value: %s (must be 0 or greater)", env_reorder_timeout);
+            FAIL(E__ARGS__INVALID_FORMAT);
+        }
+        args_out->reorder_timeout = t;
+    }
+    char *env_rr_count = get_env(ARGS_ENV_RR_COUNT);
+    if (NULL != env_rr_count) {
+        LOG_TRACE("Using RR_COUNT from environment: %s", env_rr_count);
+        FAIL_IF(0 != rr_count_set, E__ARGS__CONFLICTING_ARGUMENTS);
+        int n = parse_int(env_rr_count);
+        if (1 > n) {
+            LOG_ERROR("Invalid RR_COUNT value: %s (must be 1 or greater)", env_rr_count);
+            FAIL(E__ARGS__INVALID_FORMAT);
+        }
+        rr_count = n;
+        rr_count_set = 1;
+    }
+    char *env_tcp_rcvbuf = get_env(ARGS_ENV_TCP_RCVBUF);
+    if (NULL != env_tcp_rcvbuf) {
+        LOG_TRACE("Using TCP_RCVBUF from environment: %s", env_tcp_rcvbuf);
+        FAIL_IF(0 != tcp_rcvbuf_set, E__ARGS__CONFLICTING_ARGUMENTS);
+        int n = parse_int(env_tcp_rcvbuf);
+        if (0 > n) {
+            LOG_ERROR("Invalid TCP_RCVBUF value: %s (must be 0 or greater)", env_tcp_rcvbuf);
+            FAIL(E__ARGS__INVALID_FORMAT);
+        }
+        tcp_rcvbuf = n;
+        tcp_rcvbuf_set = 1;
     }
 
     for (int i = 1; i < argc; i++) {
@@ -606,6 +674,73 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 LOG_TRACE("Using reconnect delay from CLI argument: %d", d);
                 reconnect_delay = d;
                 reconnect_delay_set = 1;
+            } else if (0 == strcmp(arg, ARGS_FLAG_LB_STRATEGY_LONG)) {
+                LOG_TRACE("LB strategy flag detected: %s", arg);
+                if (i >= argc - 1) {
+                    FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+                }
+                if (lb_strategy_set) {
+                    LOG_ERROR("LB strategy already set, cannot override");
+                    FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
+                }
+                i++;
+                if (0 == strcmp(argv[i], "round-robin")) {
+                    lb_strategy = LB_STRATEGY_ROUND_ROBIN;
+                } else if (0 == strcmp(argv[i], "all-routes")) {
+                    lb_strategy = LB_STRATEGY_ALL_ROUTES;
+                } else if (0 == strcmp(argv[i], "sticky")) {
+                    lb_strategy = LB_STRATEGY_STICKY;
+                } else {
+                    LOG_ERROR("Invalid LB strategy: %s (must be 'round-robin', 'all-routes', or 'sticky')", argv[i]);
+                    FAIL(E__ARGS__INVALID_FORMAT);
+                }
+                lb_strategy_set = 1;
+            } else if (0 == strcmp(arg, ARGS_FLAG_REORDER_TIMEOUT_LONG)) {
+                LOG_TRACE("Reorder timeout flag detected: %s", arg);
+                if (i >= argc - 1) {
+                    FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+                }
+                i++;
+                int t = parse_int(argv[i]);
+                if (0 > t) {
+                    LOG_ERROR("Invalid reorder timeout: %s (must be 0 or greater)", argv[i]);
+                    FAIL(E__ARGS__INVALID_FORMAT);
+                }
+                args_out->reorder_timeout = t;
+            } else if (0 == strcmp(arg, ARGS_FLAG_RR_COUNT_LONG)) {
+                LOG_TRACE("RR count flag detected: %s", arg);
+                if (i >= argc - 1) {
+                    FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+                }
+                if (rr_count_set) {
+                    LOG_ERROR("RR count already set via RR_COUNT env, cannot override with CLI --rr-count");
+                    FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
+                }
+                i++;
+                int n = parse_int(argv[i]);
+                if (1 > n) {
+                    LOG_ERROR("Invalid rr-count value: %s (must be 1 or greater)", argv[i]);
+                    FAIL(E__ARGS__INVALID_FORMAT);
+                }
+                rr_count = n;
+                rr_count_set = 1;
+            } else if (0 == strcmp(arg, ARGS_FLAG_TCP_RCVBUF_LONG)) {
+                LOG_TRACE("TCP receive buffer flag detected: %s", arg);
+                if (i >= argc - 1) {
+                    FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+                }
+                if (tcp_rcvbuf_set) {
+                    LOG_ERROR("TCP receive buffer already set via TCP_RCVBUF env, cannot override with CLI --tcp-rcvbuf");
+                    FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
+                }
+                i++;
+                int n = parse_int(argv[i]);
+                if (0 > n) {
+                    LOG_ERROR("Invalid tcp-rcvbuf value: %s (must be 0 or greater)", argv[i]);
+                    FAIL(E__ARGS__INVALID_FORMAT);
+                }
+                tcp_rcvbuf = n;
+                tcp_rcvbuf_set = 1;
 #ifdef __DEBUG__
             } else if (count_v_flags(arg) > 0) {
                 continue;
@@ -638,6 +773,9 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
     args_out->connect_timeout = connect_timeout;
     args_out->reconnect_retries = reconnect_retries;
     args_out->reconnect_delay = reconnect_delay;
+    args_out->lb_strategy = lb_strategy;
+    args_out->rr_count = rr_count;
+    args_out->tcp_rcvbuf = tcp_rcvbuf;
 
 l_cleanup:
     return rc;

@@ -33,6 +33,7 @@ typedef enum {
     E__NET__SOCKET_SETOPT_FAILED,
     E__NET__THREAD_CREATE_FAILED,
     E__NET__INVALID_SOCKET,
+    E__NET__SEND_FAILED,
 
     /* session.c */
     E__SESSION__HANDLE_NODE_INIT_FAILED = 0x401,
