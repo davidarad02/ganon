@@ -20,6 +20,10 @@ class MsgType(IntEnum):
     TUNNEL_DATA = 11
     TUNNEL_CONN_CLOSE = 12
     TUNNEL_CLOSE = 13
+    CONNECT_CMD = 14
+    CONNECT_RESPONSE = 15
+    DISCONNECT_CMD = 16
+    DISCONNECT_RESPONSE = 17
 
 
 ProtocolHeader = ct.Struct(
@@ -56,4 +60,28 @@ TunnelOpenPayload = ct.Struct(
 TunnelClosePayload = ct.Struct(
     "tunnel_id" / ct.Int32ub,
     "flags" / ct.Int32ub,  # 0 = soft close (default), 1 = force close
+)
+
+# Connect command payload
+ConnectCmdPayload = ct.Struct(
+    "target_ip" / ct.PaddedString(64, "ascii"),
+    "target_port" / ct.Int32ub,
+)
+
+# Connect response payload
+ConnectResponsePayload = ct.Struct(
+    "status" / ct.Int32ub,  # 0 = success, 1 = refused, 2 = timeout, 3 = other error
+    "error_code" / ct.Int32ub,  # Implementation-specific error code
+)
+
+# Disconnect command payload
+DisconnectCmdPayload = ct.Struct(
+    "node_a" / ct.Int32ub,  # First node to disconnect (0 = use originator)
+    "node_b" / ct.Int32ub,  # Second node to disconnect (0 = target target_ip:target_port)
+)
+
+# Disconnect response payload
+DisconnectResponsePayload = ct.Struct(
+    "status" / ct.Int32ub,  # 0 = success, 1 = not connected, 2 = other error
+    "error_code" / ct.Int32ub,
 )

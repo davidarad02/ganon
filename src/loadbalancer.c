@@ -10,6 +10,7 @@
 static lb_strategy_t g_strategy = LB_STRATEGY_ROUND_ROBIN;
 static int g_reorder_timeout_ms = 100;
 static int g_rr_count = 1;
+static int g_reorder_enabled = 0;  /* 0 = disabled (process immediately), 1 = enabled */
 
 #define MAX_LB_NODES 256
 typedef struct {
@@ -65,17 +66,24 @@ static void* reorder_thread_func(void* arg) {
     return NULL;
 }
 
-void LB__init(lb_strategy_t strategy, int reorder_timeout_ms, int rr_count) {
+void LB__init(lb_strategy_t strategy, int reorder_timeout_ms, int rr_count, int reorder_enabled) {
     g_strategy = strategy;
     g_reorder_timeout_ms = reorder_timeout_ms;
     g_rr_count = (rr_count >= 1) ? rr_count : 1;
+    g_reorder_enabled = reorder_enabled;
     g_lb_running = 1;
     memset(g_rr_state, 0, sizeof(g_rr_state));
     memset(g_reorder_buf, 0, sizeof(g_reorder_buf));
     memset(g_expected_msg_id, 0, sizeof(g_expected_msg_id));
     memset(g_reorder_orig_src, 0, sizeof(g_reorder_orig_src));
     
-    pthread_create(&g_reorder_thread, NULL, reorder_thread_func, NULL);
+    if (g_reorder_enabled) {
+        pthread_create(&g_reorder_thread, NULL, reorder_thread_func, NULL);
+        LOG_INFO("Load balancer initialized with reordering ENABLED (timeout=%dms, strategy=%d)", 
+                 reorder_timeout_ms, strategy);
+    } else {
+        LOG_INFO("Load balancer initialized with reordering DISABLED (strategy=%d)", strategy);
+    }
 }
 
 err_t LB__route_message(IN routing_table_t *rt, IN uint32_t dst, IN const protocol_msg_t *msg, IN const uint8_t *data, IN uint32_t exclude_node_id, IN err_t (*send_fn)(uint32_t, const protocol_msg_t *, const uint8_t *)) {
@@ -231,6 +239,12 @@ static void check_reorder_buffer(uint32_t orig_src, routing_message_cb_t session
 }
 
 void LB__handle_incoming(IN transport_t *t, IN const protocol_msg_t *msg, IN const uint8_t *data, IN size_t data_len, IN routing_message_cb_t session_cb) {
+    /* If reordering is disabled, process packet immediately without buffering */
+    if (!g_reorder_enabled) {
+        if (session_cb) session_cb(t, msg, data, data_len);
+        return;
+    }
+    
     if (msg->message_id == 0) {
         if (session_cb) session_cb(t, msg, data, data_len);
         return;

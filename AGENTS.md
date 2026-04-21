@@ -144,7 +144,16 @@ Options:
   --reconnect-delay N       Delay between reconnect attempts (default: 5 seconds)
   --lb-strategy STR         Load balancing strategy: 'round-robin' (default) or 'all-routes'
   --tcp-rcvbuf N            TCP receive buffer size in bytes for tunnel connections (0 = system default)
-  -h, --help      Show this help message
+  --reorder                Enable packet reordering/buffering (default: disabled, packets processed immediately)
+  -h, --help                Show this help message
+
+Commands (via Python client):
+  c = GanonClient(ip, port, node_id, ..., reorder=False)  # reorder=False (default) = process packets immediately
+  c.connect(ip, port)               Connect local node to peer at ip:port
+  c.connect(ip, port, target_node) Instruct target_node to connect to peer at ip:port
+  c.disconnect(node_id)             Disconnect local node from node_id
+  c.disconnect(node_a, node_b)      Disconnect node_a from node_b
+  c.print_network_graph()            Print visual graph of network topology from this node's perspective
 ```
 
 ## Build Types
@@ -347,7 +356,11 @@ typedef enum {
     MSG__TUNNEL_CONN_ACK = 10,
     MSG__TUNNEL_DATA = 11,
     MSG__TUNNEL_CONN_CLOSE = 12,
-    MSG__TUNNEL_CLOSE = 13
+    MSG__TUNNEL_CLOSE = 13,
+    MSG__CONNECT_CMD = 14,
+    MSG__CONNECT_RESPONSE = 15,
+    MSG__DISCONNECT_CMD = 16,
+    MSG__DISCONNECT_RESPONSE = 17
 } msg_type_t;
 ```
 
@@ -371,6 +384,42 @@ typedef struct __attribute__((packed)) {
 ```
 - **Soft close** (flags=0): Closes the listening port to stop accepting new connections, but keeps existing connections alive until they close naturally.
 - **Force close** (flags=1): Immediately closes the listening port and terminates all existing connections.
+
+**CONNECT_CMD**: data is a `connect_cmd_payload_t` structure:
+```c
+typedef struct __attribute__((packed)) {
+    char target_ip[64];     /* IP address to connect to */
+    uint32_t target_port;   /* Port to connect to */
+} connect_cmd_payload_t;
+```
+Used to dynamically connect a node to a new peer. Sent to the node that should initiate the connection.
+
+**CONNECT_RESPONSE**: data is a `connect_response_payload_t` structure:
+```c
+typedef struct __attribute__((packed)) {
+    uint32_t status;      /* 0=success, 1=refused, 2=timeout, 3=error */
+    uint32_t error_code;  /* Implementation-specific error code */
+} connect_response_payload_t;
+```
+Response to CONNECT_CMD indicating success or failure with specific error codes.
+
+**DISCONNECT_CMD**: data is a `disconnect_cmd_payload_t` structure:
+```c
+typedef struct __attribute__((packed)) {
+    uint32_t node_a;  /* First node (initiator) */
+    uint32_t node_b;  /* Second node (target to disconnect from) */
+} disconnect_cmd_payload_t;
+```
+Used to dynamically disconnect two nodes. Sent to node_a which will terminate its connection to node_b.
+
+**DISCONNECT_RESPONSE**: data is a `disconnect_response_payload_t` structure:
+```c
+typedef struct __attribute__((packed)) {
+    uint32_t status;      /* 0=success, 1=not_connected, 2=error */
+    uint32_t error_code;
+} disconnect_response_payload_t;
+```
+Response to DISCONNECT_CMD indicating success or failure.
 
 ## Data Structures
 
@@ -492,4 +541,10 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Fix UDP tunnel destination-side forwarding - properly track UDP connections in dst_conn_t and use sendto() with correct remote address
 - [x] Implement tunnel connection persistence during route outages - TCP connections enter "stalled" state with backpressure when no route exists, resume when route is restored (UDP packets are lost as expected)
 - [x] Add --tcp-rcvbuf CLI option and TCP_RCVBUF env variable to configure TCP receive buffer size for tunnel connections
+- [x] Add dynamic connect/disconnect feature - `c.connect(ip, port, target_node)` to connect nodes, `c.disconnect(node_a, node_b)` to disconnect nodes, with proper error handling
+- [x] Add network graph visualization - `c.print_network_graph()` to display network topology from the client's perspective, properly handling loops and parallel routes
+- [x] Fix message ID generation - was using Unix timestamp which made message IDs look like node IDs (e.g., 1776634649), now uses sequential counter starting from 1
+- [x] Fix ping timeout when no route exists - C server: flush buffered messages when RREP establishes route; Python client: buffer messages and trigger RREQ when no route, flush when RREP arrives
+- [x] Add optional packet reordering/buffering - CLI flag `--reorder` and Python param `reorder=False` (default), packets processed immediately when disabled
+- [x] Fix multi-path routing deduplication - don't drop "duplicate" unicast messages at intermediate nodes, only drop broadcast duplicates
 - [ ] Add encryption at the transport layer

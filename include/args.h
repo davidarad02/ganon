@@ -19,6 +19,7 @@
 #define ARGS_ENV_REORDER_TIMEOUT "REORDER_TIMEOUT"
 #define ARGS_ENV_RR_COUNT "RR_COUNT"
 #define ARGS_ENV_TCP_RCVBUF "TCP_RCVBUF"
+#define ARGS_ENV_REORDER "REORDER"
 #define ARGS_FLAG_PORT_SHORT "-p"
 #define ARGS_FLAG_PORT_LONG "--port"
 #define ARGS_FLAG_CONNECT_SHORT "-c"
@@ -35,6 +36,7 @@
 #define ARGS_FLAG_REORDER_TIMEOUT_LONG "--reorder-timeout"
 #define ARGS_FLAG_RR_COUNT_LONG "--rr-count"
 #define ARGS_FLAG_TCP_RCVBUF_LONG "--tcp-rcvbuf"
+#define ARGS_FLAG_REORDER_LONG "--reorder"
 
 #define ARGS_PORT_DEFAULT 5555
 #define ARGS_CONNECT_DEFAULT_PORT 5555
@@ -45,6 +47,7 @@
 #define ARGS_REORDER_TIMEOUT_DEFAULT 100
 #define ARGS_RR_COUNT_DEFAULT 1
 #define ARGS_TCP_RCVBUF_DEFAULT 0  /* 0 = use system default */
+#define ARGS_REORDER_DEFAULT 0  /* 0 = disabled (packets processed immediately) */
 
 typedef struct {
     char *ip;
@@ -64,6 +67,7 @@ typedef struct {
     lb_strategy_t lb_strategy;
     int rr_count;
     int tcp_rcvbuf;  /* TCP receive buffer size in bytes (0 = system default) */
+    int reorder;     /* Enable packet reordering/buffering (0 = disabled, 1 = enabled) */
 } args_t;
 
 err_t ARGS__parse(OUT args_t *args_out, IN int argc, IN char *argv[]);

@@ -127,8 +127,12 @@ void ROUTING__init_globals(IN routing_table_t *rt, IN routing_message_cb_t sessi
     g_rt = rt;
     g_session_cb = session_cb;
     
+    /* Initialize message ID counter from a small sequential value.
+     * Previously using timestamp (time(NULL)) caused message IDs to look
+     * like node IDs (e.g., 1776634649), which was confusing in logs.
+     * Now we start from 1 for readable, sequential message IDs. */
     pthread_mutex_lock(&g_msg_id_mutex);
-    g_msg_id_counter = (uint32_t)time(NULL);
+    g_msg_id_counter = 1;
     pthread_mutex_unlock(&g_msg_id_mutex);
 }
 
@@ -201,6 +205,8 @@ static void ROUTING__local_dispatch(IN transport_t *t, IN const protocol_msg_t *
         if (dst == (uint32_t)g_node_id) {
             uint8_t hop_count = (uint8_t)(DEFAULT_TTL > ttl ? (DEFAULT_TTL - ttl) : 1);
             ROUTING__add_via_hop(g_rt, orig_src, src, hop_count);
+            /* Flush any pending messages now that we have a route to orig_src */
+            ROUTING__flush_pending(orig_src);
             if (NULL != g_session_cb) {
                 g_session_cb(t, msg, data, data_len);
             }
@@ -313,10 +319,26 @@ void ROUTING__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN con
         }
     }
 
+    /* Deduplication: Only drop duplicates for:
+     * 1. Broadcast messages (dst == 0) - these flood the network
+     * 2. Unicast messages destined for this node (we process them once)
+     * 
+     * For unicast messages NOT destined for us (we're just forwarding),
+     * we should NOT drop duplicates because load balancing may send the same
+     * message via multiple paths, and we need to forward each copy. */
     rc = ROUTING__is_msg_seen(orig_src, msg->message_id, &seen);
     if (E__SUCCESS == rc && seen) {
-        LOG_TRACE("ROUTING: Dropping duplicate message from %u with ID %u (type %u)", orig_src, msg->message_id, type);
-        return;
+        if (0 == dst) {
+            /* Broadcast: drop duplicate to prevent flooding */
+            LOG_TRACE("ROUTING: Dropping broadcast duplicate from %u with ID %u (type %u)", orig_src, msg->message_id, type);
+            return;
+        } else if (dst == (uint32_t)g_node_id) {
+            /* Unicast for us: drop duplicate, we already processed it */
+            LOG_TRACE("ROUTING: Dropping unicast duplicate for us from %u with ID %u (type %u)", orig_src, msg->message_id, type);
+            return;
+        }
+        /* Unicast not for us: continue forwarding even if "duplicate" - 
+         * this is normal for multi-path load balancing */
     }
 
     if (orig_src != src) {

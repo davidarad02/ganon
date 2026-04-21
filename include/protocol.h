@@ -27,6 +27,10 @@ typedef enum {
     MSG__TUNNEL_DATA = 11,
     MSG__TUNNEL_CONN_CLOSE = 12,
     MSG__TUNNEL_CLOSE = 13,
+    MSG__CONNECT_CMD = 14,
+    MSG__CONNECT_RESPONSE = 15,
+    MSG__DISCONNECT_CMD = 16,
+    MSG__DISCONNECT_RESPONSE = 17,
 } msg_type_t;
 
 typedef struct {
@@ -45,5 +49,37 @@ bool PROTOCOL__validate_magic(IN const uint8_t *buf);
 
 err_t PROTOCOL__unserialize(IN const uint8_t *buf, IN size_t len, OUT protocol_msg_t *msg, OUT uint8_t **data, OUT size_t *data_len);
 err_t PROTOCOL__serialize(IN const protocol_msg_t *msg, IN const uint8_t *data, OUT uint8_t *buf, IN size_t buf_len, OUT size_t *bytes_written);
+
+/* Connect/Disconnect command payload structures */
+typedef struct __attribute__((packed)) {
+    char target_ip[64];
+    uint32_t target_port;
+} connect_cmd_payload_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t status;      /* 0 = success, 1 = refused, 2 = timeout, 3 = other error */
+    uint32_t error_code;  /* Implementation-specific error code */
+} connect_response_payload_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t node_a;      /* First node to disconnect (initiator) */
+    uint32_t node_b;      /* Second node to disconnect (target) */
+} disconnect_cmd_payload_t;
+
+typedef struct __attribute__((packed)) {
+    uint32_t status;      /* 0 = success, 1 = not connected, 2 = other error */
+    uint32_t error_code;
+} disconnect_response_payload_t;
+
+/* Status codes for connect response */
+#define CONNECT_STATUS_SUCCESS   0
+#define CONNECT_STATUS_REFUSED   1
+#define CONNECT_STATUS_TIMEOUT   2
+#define CONNECT_STATUS_ERROR     3
+
+/* Status codes for disconnect response */
+#define DISCONNECT_STATUS_SUCCESS        0
+#define DISCONNECT_STATUS_NOT_CONNECTED  1
+#define DISCONNECT_STATUS_ERROR          2
 
 #endif /* #ifndef GANON_PROTOCOL_H */

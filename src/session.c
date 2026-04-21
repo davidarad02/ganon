@@ -93,6 +93,144 @@ l_cleanup:
     return rc;
 }
 
+static err_t SESSION__handle_connect_cmd(IN session_t *s, IN transport_t *t, IN const protocol_msg_t *msg, 
+                                          IN const uint8_t *data, IN size_t data_len) {
+    err_t rc = E__SUCCESS;
+    (void)t;
+    (void)msg;
+    
+    if (data_len < sizeof(connect_cmd_payload_t)) {
+        LOG_WARNING("CONNECT_CMD payload too small (%zu bytes)", data_len);
+        FAIL(E__SESSION__INVALID_MESSAGE);
+    }
+    
+    const connect_cmd_payload_t *p = (const connect_cmd_payload_t *)data;
+    char ip[65];
+    strncpy(ip, p->target_ip, 64);
+    ip[64] = '\0';
+    uint32_t port = ntohl(p->target_port);
+    
+    LOG_INFO("Received CONNECT_CMD from node %u: connect to %s:%u", 
+             msg->orig_src_node_id, ip, port);
+    
+    /* Attempt to connect to the target */
+    int status = CONNECT_STATUS_SUCCESS;
+    uint32_t error_code = 0;
+    
+    err_t connect_rc = NETWORK__connect_to_peer(s->net, ip, (int)port, &status, &error_code);
+    if (E__SUCCESS != connect_rc) {
+        status = CONNECT_STATUS_ERROR;
+        error_code = (uint32_t)connect_rc;
+    }
+    
+    /* Send response back to originator */
+    connect_response_payload_t resp;
+    resp.status = htonl((uint32_t)status);
+    resp.error_code = htonl(error_code);
+    
+    protocol_msg_t response_msg;
+    memset(&response_msg, 0, sizeof(response_msg));
+    memcpy(response_msg.magic, GANON_PROTOCOL_MAGIC, 4);
+    response_msg.orig_src_node_id = (uint32_t)s->node_id;
+    response_msg.src_node_id = (uint32_t)s->node_id;
+    response_msg.dst_node_id = msg->orig_src_node_id;
+    response_msg.message_id = SESSION__get_next_msg_id();
+    response_msg.type = MSG__CONNECT_RESPONSE;
+    response_msg.data_length = sizeof(resp);
+    response_msg.ttl = DEFAULT_TTL;
+    response_msg.channel_id = 0;
+    
+    ROUTING__route_message(&response_msg, (const uint8_t *)&resp, 0);
+    
+    LOG_INFO("CONNECT_CMD response sent to node %u: status=%d", 
+             msg->orig_src_node_id, status);
+
+l_cleanup:
+    return rc;
+}
+
+static err_t SESSION__handle_disconnect_cmd(IN session_t *s, IN transport_t *t, IN const protocol_msg_t *msg,
+                                             IN const uint8_t *data, IN size_t data_len) {
+    err_t rc = E__SUCCESS;
+    (void)t;
+    
+    if (data_len < sizeof(disconnect_cmd_payload_t)) {
+        LOG_WARNING("DISCONNECT_CMD payload too small (%zu bytes)", data_len);
+        FAIL(E__SESSION__INVALID_MESSAGE);
+    }
+    
+    const disconnect_cmd_payload_t *p = (const disconnect_cmd_payload_t *)data;
+    uint32_t node_a = ntohl(p->node_a);
+    uint32_t node_b = ntohl(p->node_b);
+    
+    LOG_INFO("Received DISCONNECT_CMD from node %u: disconnect %u from %u",
+             msg->orig_src_node_id, node_a, node_b);
+    
+    /* Check if we are node_a (the initiator) */
+    if ((uint32_t)s->node_id != node_a) {
+        LOG_WARNING("DISCONNECT_CMD received but we are not node_a (%u != %u)", 
+                    s->node_id, node_a);
+        /* Forward to node_a if we have a route */
+        /* For now, just report error */
+        int status = DISCONNECT_STATUS_ERROR;
+        uint32_t error_code = E__SESSION__INVALID_MESSAGE;
+        
+        disconnect_response_payload_t resp;
+        resp.status = htonl((uint32_t)status);
+        resp.error_code = htonl(error_code);
+        
+        protocol_msg_t response_msg;
+        memset(&response_msg, 0, sizeof(response_msg));
+        memcpy(response_msg.magic, GANON_PROTOCOL_MAGIC, 4);
+        response_msg.orig_src_node_id = (uint32_t)s->node_id;
+        response_msg.src_node_id = (uint32_t)s->node_id;
+        response_msg.dst_node_id = msg->orig_src_node_id;
+        response_msg.message_id = SESSION__get_next_msg_id();
+        response_msg.type = MSG__DISCONNECT_RESPONSE;
+        response_msg.data_length = sizeof(resp);
+        response_msg.ttl = DEFAULT_TTL;
+        response_msg.channel_id = 0;
+        
+        ROUTING__route_message(&response_msg, (const uint8_t *)&resp, 0);
+        goto l_cleanup;
+    }
+    
+    /* We are node_a, perform the disconnect */
+    int status = DISCONNECT_STATUS_SUCCESS;
+    uint32_t error_code = 0;
+    
+    err_t disconnect_rc = NETWORK__disconnect_from_peer(s->net, node_b, &status, &error_code);
+    if (E__SUCCESS != disconnect_rc) {
+        status = DISCONNECT_STATUS_ERROR;
+        error_code = (uint32_t)disconnect_rc;
+    }
+    
+    /* Send response back to originator */
+    disconnect_response_payload_t resp;
+    resp.status = htonl((uint32_t)status);
+    resp.error_code = htonl(error_code);
+    
+    protocol_msg_t response_msg;
+    memset(&response_msg, 0, sizeof(response_msg));
+    memcpy(response_msg.magic, GANON_PROTOCOL_MAGIC, 4);
+    response_msg.orig_src_node_id = (uint32_t)s->node_id;
+    response_msg.src_node_id = (uint32_t)s->node_id;
+    response_msg.dst_node_id = msg->orig_src_node_id;
+    response_msg.message_id = SESSION__get_next_msg_id();
+    response_msg.type = MSG__DISCONNECT_RESPONSE;
+    response_msg.data_length = sizeof(resp);
+    response_msg.ttl = DEFAULT_TTL;
+    response_msg.channel_id = 0;
+    
+    ROUTING__route_message(&response_msg, (const uint8_t *)&resp, 0);
+    
+    LOG_INFO("DISCONNECT_CMD response sent to node %u: status=%d",
+             msg->orig_src_node_id, status);
+
+l_cleanup:
+    return rc;
+}
+
 err_t SESSION__init(INOUT session_t *s, IN int node_id) {
     err_t rc = E__SUCCESS;
 
@@ -223,6 +361,19 @@ void SESSION__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN con
     case MSG__TUNNEL_CONN_CLOSE:
     case MSG__TUNNEL_CLOSE:
         TUNNEL__on_message(t, msg, data, data_len);
+        break;
+    case MSG__CONNECT_CMD:
+        rc = SESSION__handle_connect_cmd(s, t, msg, data, data_len);
+        break;
+    case MSG__DISCONNECT_CMD:
+        rc = SESSION__handle_disconnect_cmd(s, t, msg, data, data_len);
+        break;
+    case MSG__CONNECT_RESPONSE:
+    case MSG__DISCONNECT_RESPONSE:
+        /* These are handled by the waiting client or can be logged */
+        LOG_INFO("Received %s from node %u", 
+                 (type == MSG__CONNECT_RESPONSE) ? "CONNECT_RESPONSE" : "DISCONNECT_RESPONSE",
+                 orig_src);
         break;
     default:
         LOG_WARNING("Unknown message type: %d", type);

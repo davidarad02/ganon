@@ -31,7 +31,8 @@ void args_print_help(const char *prog_name) {
     printf("  --rr-count N              Number of routes to use per round-robin step (default: 1)\n");
     printf("  --reorder-timeout N       Out-of-order buffering timeout in milliseconds (default: 100)\n");
     printf("  --tcp-rcvbuf N            TCP receive buffer size in bytes (0 = system default)\n");
-    printf("  -h, --help      Show this help message\n");
+    printf("  --reorder                Enable packet reordering/buffering (default: disabled)\n");
+    printf("  -h, --help                Show this help message\n");
     printf("\n");
     printf("Environment variables:\n");
     printf("  LISTEN_IP       Listen IP address (alternative to positional argument)\n");
@@ -45,6 +46,7 @@ void args_print_help(const char *prog_name) {
     printf("  RR_COUNT            Round-robin route count (alternative to --rr-count)\n");
     printf("  REORDER_TIMEOUT     Out-of-order buffering timeout in MS (alternative to --reorder-timeout)\n");
     printf("  TCP_RCVBUF          TCP receive buffer size in bytes (alternative to --tcp-rcvbuf)\n");
+    printf("  REORDER             Enable packet reordering (set to 1 to enable, alternative to --reorder)\n");
 }
 
 static bool_t is_help_flag(const char *arg) {
@@ -337,6 +339,8 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
     int rr_count_set = 0;
     int tcp_rcvbuf = ARGS_TCP_RCVBUF_DEFAULT;
     int tcp_rcvbuf_set = 0;
+    int reorder = ARGS_REORDER_DEFAULT;
+    int reorder_set = 0;
 
     if (NULL == args_out) {
         rc = E__INVALID_ARG_NULL_POINTER;
@@ -351,6 +355,7 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
     args_out->lb_strategy = LB_STRATEGY_ROUND_ROBIN;
     args_out->rr_count = ARGS_RR_COUNT_DEFAULT;
     args_out->tcp_rcvbuf = ARGS_TCP_RCVBUF_DEFAULT;
+    args_out->reorder = ARGS_REORDER_DEFAULT;
 
 #ifdef __DEBUG__
     for (int i = 1; i < argc; i++) {
@@ -528,6 +533,18 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
         }
         tcp_rcvbuf = n;
         tcp_rcvbuf_set = 1;
+    }
+    char *env_reorder = get_env(ARGS_ENV_REORDER);
+    if (NULL != env_reorder) {
+        LOG_TRACE("Using REORDER from environment: %s", env_reorder);
+        FAIL_IF(0 != reorder_set, E__ARGS__CONFLICTING_ARGUMENTS);
+        int n = parse_int(env_reorder);
+        if (0 != n && 1 != n) {
+            LOG_ERROR("Invalid REORDER value: %s (must be 0 or 1)", env_reorder);
+            FAIL(E__ARGS__INVALID_FORMAT);
+        }
+        reorder = n;
+        reorder_set = 1;
     }
 
     for (int i = 1; i < argc; i++) {
@@ -741,6 +758,14 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
                 }
                 tcp_rcvbuf = n;
                 tcp_rcvbuf_set = 1;
+            } else if (0 == strcmp(arg, ARGS_FLAG_REORDER_LONG)) {
+                LOG_TRACE("Reorder flag detected: %s", arg);
+                if (reorder_set) {
+                    LOG_ERROR("Reorder already set via REORDER env, cannot override with CLI --reorder");
+                    FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
+                }
+                reorder = 1;  /* Flag enables reordering */
+                reorder_set = 1;
 #ifdef __DEBUG__
             } else if (count_v_flags(arg) > 0) {
                 continue;
@@ -776,6 +801,7 @@ FAIL(E__ARGS__CONFLICTING_ARGUMENTS);
     args_out->lb_strategy = lb_strategy;
     args_out->rr_count = rr_count;
     args_out->tcp_rcvbuf = tcp_rcvbuf;
+    args_out->reorder = reorder;
 
 l_cleanup:
     return rc;

@@ -15,6 +15,7 @@
 #include "logging.h"
 #include "network.h"
 #include "transport.h"
+#include "tunnel.h"
 
 network_t g_network;
 
@@ -561,4 +562,199 @@ void NETWORK__close_transport(network_t *net, transport_t *t) {
         close(t->fd);
         t->fd = -1;
     }
+}
+
+err_t NETWORK__connect_to_peer(network_t *net, const char *ip, int port, 
+                                int *status, uint32_t *error_code) {
+    err_t rc = E__SUCCESS;
+    int sock_fd = -1;
+    
+    if (NULL == net || NULL == ip || NULL == status || NULL == error_code) {
+        *status = CONNECT_STATUS_ERROR;
+        *error_code = E__INVALID_ARG_NULL_POINTER;
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+    
+    *status = CONNECT_STATUS_SUCCESS;
+    *error_code = 0;
+    
+    LOG_INFO("Connecting to peer %s:%d", ip, port);
+    
+    /* Create socket */
+    sock_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (0 > sock_fd) {
+        LOG_ERROR("Socket creation failed: %s", strerror(errno));
+        *status = CONNECT_STATUS_ERROR;
+        *error_code = E__NET__SOCKET_CREATE_FAILED;
+        FAIL(E__NET__SOCKET_CREATE_FAILED);
+    }
+    
+    /* Set connect timeout */
+    struct timeval tv;
+    tv.tv_sec = net->connect_timeout;
+    tv.tv_usec = 0;
+    if (0 > setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv))) {
+        LOG_WARNING("Failed to set send timeout: %s", strerror(errno));
+    }
+    
+    /* Resolve address */
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    
+    if (1 != inet_pton(AF_INET, ip, &addr.sin_addr)) {
+        LOG_ERROR("Invalid IP address: %s", ip);
+        *status = CONNECT_STATUS_ERROR;
+        *error_code = E__ARGS__INVALID_FORMAT;
+        FAIL(E__ARGS__INVALID_FORMAT);
+    }
+    
+    /* Connect */
+    if (0 > connect(sock_fd, (struct sockaddr *)&addr, sizeof(addr))) {
+        if (ETIMEDOUT == errno || EINPROGRESS == errno) {
+            LOG_WARNING("Connection to %s:%d timed out", ip, port);
+            *status = CONNECT_STATUS_TIMEOUT;
+            *error_code = (uint32_t)errno;
+        } else if (ECONNREFUSED == errno) {
+            LOG_WARNING("Connection to %s:%d refused", ip, port);
+            *status = CONNECT_STATUS_REFUSED;
+            *error_code = (uint32_t)errno;
+        } else {
+            LOG_ERROR("Connection to %s:%d failed: %s", ip, port, strerror(errno));
+            *status = CONNECT_STATUS_ERROR;
+            *error_code = (uint32_t)errno;
+        }
+        close(sock_fd);
+        FAIL(E__NET__SOCKET_CONNECT_FAILED);
+    }
+    
+    /* Create socket entry */
+    socket_entry_t *entry = malloc(sizeof(socket_entry_t));
+    if (NULL == entry) {
+        LOG_ERROR("Failed to allocate socket entry");
+        close(sock_fd);
+        *status = CONNECT_STATUS_ERROR;
+        *error_code = E__INVALID_ARG_NULL_POINTER;
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+    
+    entry->t = TRANSPORT__create(sock_fd);
+    if (NULL == entry->t) {
+        LOG_ERROR("Failed to create transport");
+        close(sock_fd);
+        FREE(entry);
+        *status = CONNECT_STATUS_ERROR;
+        *error_code = E__NET__INVALID_SOCKET;
+        FAIL(E__NET__INVALID_SOCKET);
+    }
+    
+    entry->t->is_incoming = 0;
+    strncpy(entry->t->client_ip, ip, INET_ADDRSTRLEN - 1);
+    entry->t->client_ip[INET_ADDRSTRLEN - 1] = '\0';
+    entry->t->client_port = port;
+    entry->net = net;
+    entry->next = NULL;
+    
+    /* Add to clients list */
+    if (0 != pthread_mutex_lock(&net->clients_mutex)) {
+        LOG_ERROR("Failed to lock mutex");
+        TRANSPORT__destroy(entry->t);
+        FREE(entry);
+        *status = CONNECT_STATUS_ERROR;
+        *error_code = E__NET__THREAD_CREATE_FAILED;
+        FAIL(E__NET__THREAD_CREATE_FAILED);
+    }
+    
+    socket_entry_t *tail = net->clients;
+    if (NULL == tail) {
+        net->clients = entry;
+    } else {
+        while (NULL != tail->next) {
+            tail = tail->next;
+        }
+        tail->next = entry;
+    }
+    
+    pthread_mutex_unlock(&net->clients_mutex);
+    
+    /* Create thread */
+    if (0 != pthread_create(&entry->thread, NULL, socket_thread_func, entry)) {
+        LOG_ERROR("Failed to create socket thread");
+        pthread_mutex_lock(&net->clients_mutex);
+        /* Remove from list */
+        socket_entry_t **current = &net->clients;
+        while (*current != entry) {
+            current = &(*current)->next;
+        }
+        *current = entry->next;
+        pthread_mutex_unlock(&net->clients_mutex);
+        
+        TRANSPORT__destroy(entry->t);
+        FREE(entry);
+        *status = CONNECT_STATUS_ERROR;
+        *error_code = E__NET__THREAD_CREATE_FAILED;
+        FAIL(E__NET__THREAD_CREATE_FAILED);
+    }
+    
+    LOG_INFO("Connected to peer %s:%d", ip, port);
+    
+l_cleanup:
+    return rc;
+}
+
+err_t NETWORK__disconnect_from_peer(network_t *net, uint32_t node_id,
+                                     int *status, uint32_t *error_code) {
+    err_t rc = E__SUCCESS;
+    
+    if (NULL == net || NULL == status || NULL == error_code) {
+        *status = DISCONNECT_STATUS_ERROR;
+        *error_code = E__INVALID_ARG_NULL_POINTER;
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+    
+    *status = DISCONNECT_STATUS_SUCCESS;
+    *error_code = 0;
+    
+    LOG_INFO("Disconnecting from peer %u", node_id);
+    
+    /* Find the transport */
+    transport_t *t = NETWORK__get_transport(net, node_id);
+    if (NULL == t) {
+        LOG_WARNING("No direct connection to node %u", node_id);
+        *status = DISCONNECT_STATUS_NOT_CONNECTED;
+        *error_code = E__ROUTING__NODE_NOT_FOUND;
+        FAIL(E__ROUTING__NODE_NOT_FOUND);
+    }
+    
+    /* Close the transport */
+    NETWORK__close_transport(net, t);
+    
+    /* Remove from clients list */
+    pthread_mutex_lock(&net->clients_mutex);
+    socket_entry_t **current = &net->clients;
+    while (*current != NULL) {
+        if ((*current)->t == t) {
+            socket_entry_t *to_remove = *current;
+            *current = (*current)->next;
+            
+            /* Wait for thread to finish */
+            pthread_join(to_remove->thread, NULL);
+            
+            TRANSPORT__destroy(to_remove->t);
+            FREE(to_remove);
+            break;
+        }
+        current = &(*current)->next;
+    }
+    pthread_mutex_unlock(&net->clients_mutex);
+    
+    /* Update routing */
+    ROUTING__handle_disconnect(node_id);
+    TUNNEL__handle_disconnect(node_id);
+    
+    LOG_INFO("Disconnected from peer %u", node_id);
+    
+l_cleanup:
+    return rc;
 }

@@ -46,7 +46,7 @@ int main(int argc, char *argv[]) {
     SESSION__set_network(SESSION__get_session(), &g_network);
 
     TUNNEL__init(args.tcp_rcvbuf);
-    LB__init(args.lb_strategy, args.reorder_timeout, args.rr_count);
+    LB__init(args.lb_strategy, args.reorder_timeout, args.rr_count, args.reorder);
     ROUTING__init_globals(SESSION__get_routing_table(SESSION__get_session()), SESSION__on_message);
 
     rc = NETWORK__init(&g_network, &args, g_node_id, ROUTING__on_message, SESSION__on_disconnected, SESSION__on_connected);

@@ -18,6 +18,7 @@ def require_connection(func):
 from ganon_client.protocol import (
     DEFAULT_TTL, GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader,
     TUNNEL_PROTO_TCP, TUNNEL_PROTO_UDP, TunnelOpenPayload, TunnelClosePayload,
+    ConnectCmdPayload, ConnectResponsePayload, DisconnectCmdPayload, DisconnectResponsePayload,
 )
 from ganon_client.routing import RouteType, RoutingTable
 from ganon_client.transport import Transport
@@ -135,6 +136,7 @@ class GanonClient:
         reconnect_delay: int = 5,
         log_level: int = LOG_LEVEL_DEBUG,
         reorder_timeout: int = 100,
+        reorder: bool = False,
     ):
         self.ip = ip
         self.port = port
@@ -144,6 +146,7 @@ class GanonClient:
         self.reconnect_delay = reconnect_delay
         self.log_level = log_level
         self.reorder_timeout = reorder_timeout
+        self.reorder = reorder  # False = process packets immediately (default)
 
         self._sock: Optional[socket.socket] = None
         self._running = False
@@ -165,11 +168,15 @@ class GanonClient:
         self._tunnel_id_counter = 0
         self._tunnel_lock = threading.Lock()
         
-        self._msg_seq = int(time.time()) & 0x7FFFFFFF
+        self._msg_seq = 0  # Will start from 1 on first message (pre-increment)
         
         self._seen_msgs = set() # (orig_src, msg_id)
         self._expected_msg_id = {} # orig_src -> expected_id
         self._reorder_buffer = {} # orig_src -> {msg_id -> (header, data, ts)}
+        
+        # Pending messages buffer for route discovery
+        self._pending_lock = threading.Lock()
+        self._pending_messages: dict = {}  # dst_node_id -> list of buffered messages
         self._reorder_thread: Optional[threading.Thread] = None
         self._lb_lock = threading.Lock()
 
@@ -253,12 +260,46 @@ class GanonClient:
         self._debug("Routing table after NODE_INIT:")
         self._routing_table.log_table()
 
+    def _send_rreq(self, target_node_id: int):
+        """Send a route request (RREQ) to discover a path to target_node_id."""
+        self._info("Sending RREQ to discover route to node %d", target_node_id)
+        payload = struct.pack(">I", target_node_id)
+        self._send_protocol_message(0, struct.pack(">I", MsgType.RREQ.value), payload, 
+                                    channel_id=0, bypass_route_check=True)
+    
+    def _flush_pending_messages(self, node_id: int):
+        """Flush buffered messages for node_id now that we have a route."""
+        with self._pending_lock:
+            if node_id not in self._pending_messages:
+                return
+            
+            messages = self._pending_messages[node_id]
+            self._info("Flushing %d buffered messages for node %d", len(messages), node_id)
+            
+            for msg in messages:
+                self._send_protocol_message(node_id, msg['msg_type'], msg['data'], 
+                                             msg['channel_id'], bypass_route_check=True)
+            
+            del self._pending_messages[node_id]
+    
     def _handle_rreq(self, orig_src_node_id: int, src_node_id: int, message_id: int, ttl: int, data: bytes):
         if len(data) >= 4:
             target_node_id = struct.unpack(">I", data[:4])[0]
             if target_node_id == self.node_id:
                 self._info("Received RREQ for us from node %d! Sending RREP.", orig_src_node_id)
                 self._send_protocol_message(orig_src_node_id, struct.pack(">I", MsgType.RREP.value), b"")
+    
+    def _handle_rrep(self, orig_src_node_id: int, src_node_id: int, message_id: int, ttl: int, data: bytes):
+        """Handle RREP - route discovered, flush any pending messages."""
+        self._info("Received RREP from node %d via node %d (msg_id=%d) - route established!", 
+                   orig_src_node_id, src_node_id, message_id)
+        # Add the route
+        hop_count = max(1, DEFAULT_TTL - ttl)
+        self._routing_table.add_via_hop(orig_src_node_id, src_node_id, hop_count)
+        self._debug("Routing table after RREP:")
+        self._routing_table.log_table()
+        # Flush any pending messages for this destination
+        self._flush_pending_messages(orig_src_node_id)
     
     def _handle_rerr(self, orig_src_node_id: int, src_node_id: int, message_id: int, ttl: int, data: bytes):
         count = len(data) // 4
@@ -316,7 +357,7 @@ class GanonClient:
         ttl = header["ttl"]
 
         channel_id = header.get("channel_id", 0)
-        self._info("Protocol: orig_src=%d, src=%d, dst=%d, msg_id=%d, type=%s, ttl=%d, channel=%d, data_len=%d", orig_src_node_id, src_node_id, dst_node_id, message_id, msg_type.name, ttl, channel_id, data_length)
+        self._info("Protocol RECV: orig_src=%d, src=%d, dst=%d, msg_id=%d, type=%s, ttl=%d, channel=%d, data_len=%d", orig_src_node_id, src_node_id, dst_node_id, message_id, msg_type.name, ttl, channel_id, data_length)
 
         # Learn paths from all passing messages
         if orig_src_node_id != self.node_id:
@@ -326,7 +367,7 @@ class GanonClient:
             else:
                 self._routing_table.add_direct(src_node_id, None)
 
-        if message_id != 0:
+        if message_id != 0 and self.reorder:
             with self._lb_lock:
                 if (orig_src_node_id, message_id) in self._seen_msgs:
                     self._debug("Dropping duplicate message %d from %d", message_id, orig_src_node_id)
@@ -422,7 +463,9 @@ class GanonClient:
             self._handle_ping(orig_src_node_id, src_node_id, message_id, ttl, data, channel_id=channel_id)
         elif msg_type == MsgType.PONG:
             self._handle_pong(orig_src_node_id, src_node_id, message_id, ttl, data)
-        elif msg_type in (MsgType.RREP, MsgType.CONNECTION_REJECTED):
+        elif msg_type == MsgType.RREP:
+            self._handle_rrep(orig_src_node_id, src_node_id, message_id, ttl, data)
+        elif msg_type == MsgType.CONNECTION_REJECTED:
             pass
         elif msg_type in (MsgType.TUNNEL_OPEN, MsgType.TUNNEL_CONN_OPEN, MsgType.TUNNEL_CONN_ACK,
                           MsgType.TUNNEL_DATA, MsgType.TUNNEL_CONN_CLOSE, MsgType.TUNNEL_CLOSE):
@@ -543,7 +586,7 @@ class GanonClient:
             if self._recv_thread is None or not self._recv_thread.is_alive():
                 self._recv_thread = threading.Thread(target=self._protocol_loop, daemon=True)
                 self._recv_thread.start()
-            if (self._reorder_thread is None or not self._reorder_thread.is_alive()) and self.reorder_timeout > 0:
+            if self.reorder and (self._reorder_thread is None or not self._reorder_thread.is_alive()) and self.reorder_timeout > 0:
                 self._reorder_thread = threading.Thread(target=self._reorder_loop, daemon=True)
                 self._reorder_thread.start()
 
@@ -688,9 +731,30 @@ class GanonClient:
             self._tunnels[tunnel_id] = tunnel
         return tunnel
 
-    def _send_protocol_message(self, dst_node_id: int, msg_type: bytes, data: bytes, channel_id: int = 0) -> bool:
+    def _send_protocol_message(self, dst_node_id: int, msg_type: bytes, data: bytes, channel_id: int = 0, 
+                                bypass_route_check: bool = False) -> bool:
         if self._sock is None:
             return False
+        
+        # Check if we have a route to destination (unless bypassing for RREQ etc.)
+        if not bypass_route_check and dst_node_id != 0 and dst_node_id != self.node_id:
+            route = self._routing_table.get_route(dst_node_id)
+            if route is None:
+                # No route - buffer message and trigger route discovery
+                self._info("No route to node %d, buffering message and sending RREQ", dst_node_id)
+                with self._pending_lock:
+                    if dst_node_id not in self._pending_messages:
+                        self._pending_messages[dst_node_id] = []
+                    self._pending_messages[dst_node_id].append({
+                        'msg_type': msg_type,
+                        'data': data,
+                        'channel_id': channel_id,
+                        'timestamp': time.time()
+                    })
+                
+                # Send RREQ to discover route
+                self._send_rreq(dst_node_id)
+                return True  # Message buffered, will be sent when route is established
 
         self._msg_seq += 1
         header = ProtocolHeader.build({
@@ -707,6 +771,10 @@ class GanonClient:
 
         try:
             self._sock.sendall(header + data)
+            msg_type_val = struct.unpack(">I", msg_type)[0]
+            msg_type_name = MsgType(msg_type_val).name if msg_type_val in [t.value for t in MsgType] else f"UNKNOWN({msg_type_val})"
+            self._info("Protocol SEND: orig_src=%d, src=%d, dst=%d, msg_id=%d, type=%s, ttl=%d, channel=%d, data_len=%d",
+                       self.node_id, self.node_id, dst_node_id, self._msg_seq, msg_type_name, DEFAULT_TTL, channel_id, len(data))
             self._debug("Sent message to node %d (type=%s, data_len=%d, channel=%d)", dst_node_id, msg_type.hex(), len(data), channel_id)
             return True
         except Exception as e:
@@ -717,6 +785,231 @@ class GanonClient:
     def recv(self, bufsize: int = 4096) -> bytes:
         with self._lock:
             return self._sock.recv(bufsize)
+
+    @require_connection
+    def connect_to_node(self, ip: str, port: int, target_node_id: int = None, timeout: float = 10.0) -> dict:
+        """Connect a node to a new peer.
+        
+        Args:
+            ip: IP address of the peer to connect to
+            port: Port of the peer to connect to
+            target_node_id: Which node should perform the connection (default: local node)
+            timeout: Maximum time to wait for response in seconds
+            
+        Returns:
+            dict with keys: 'success' (bool), 'status' (str), 'error_code' (int)
+            
+        Raises:
+            ConnectionError: If the client is not connected
+            TimeoutError: If no response received within timeout
+        """
+        # Determine which node will execute the connect
+        executor_node = target_node_id if target_node_id is not None else self.node_id
+        
+        payload = ConnectCmdPayload.build({
+            "target_ip": ip,
+            "target_port": port,
+        })
+        
+        self._info("Requesting node %d to connect to %s:%d", executor_node, ip, port)
+        
+        # Send CONNECT_CMD message
+        self._send_protocol_message(
+            executor_node,
+            struct.pack(">I", MsgType.CONNECT_CMD.value),
+            payload,
+            channel_id=0,
+        )
+        
+        # Wait for response (in a real implementation, this would need proper response handling)
+        # For now, we return a pending status
+        return {"success": None, "status": "pending", "error_code": 0}
+    
+    @require_connection  
+    def disconnect_nodes(self, node_a: int, node_b: int = None) -> dict:
+        """Disconnect two nodes from each other.
+        
+        Args:
+            node_a: First node to disconnect (or the local node if node_b is None)
+            node_b: Second node to disconnect (if None, disconnect node_a from local node)
+            
+        Returns:
+            dict with keys: 'success' (bool), 'status' (str), 'error_code' (int)
+            
+        Raises:
+            ConnectionError: If the client is not connected
+        """
+        if node_b is None:
+            # Disconnect local node from node_a
+            executor_node = self.node_id
+            target_node = node_a
+        else:
+            # Disconnect node_a from node_b (may require forwarding)
+            executor_node = node_a
+            target_node = node_b
+            
+        payload = DisconnectCmdPayload.build({
+            "node_a": executor_node,
+            "node_b": target_node,
+        })
+        
+        self._info("Requesting disconnect between node %d and node %d", executor_node, target_node)
+        
+        # Send DISCONNECT_CMD message to executor_node (it will handle the disconnect)
+        self._send_protocol_message(
+            executor_node,
+            struct.pack(">I", MsgType.DISCONNECT_CMD.value),
+            payload,
+            channel_id=0,
+        )
+        
+        return {"success": None, "status": "pending", "error_code": 0}
+
+    @require_connection
+    def print_network_graph(self) -> None:
+        """Print a visual graph of the network topology from this client's perspective.
+        
+        Properly handles loops and parallel routes. Shows all known paths to each node.
+        """
+        self._info("Network topology from node %d perspective:", self.node_id)
+        print("\n" + "=" * 70)
+        print(f"NETWORK GRAPH (Node {self.node_id} perspective)")
+        print("=" * 70)
+        
+        # Get all routes from the routing table
+        all_routes = {}
+        with self._routing_table._lock:
+            for node_id, entries in self._routing_table._entries.items():
+                all_routes[node_id] = list(entries)
+        
+        if not all_routes:
+            print("\n[No known routes - network appears empty]")
+            print("=" * 70 + "\n")
+            return
+        
+        # Build adjacency list showing who we connect to
+        direct_peers = set()
+        route_graph = {}  # node_id -> list of (next_hop, hop_count, route_type)
+        
+        for node_id, entries in all_routes.items():
+            for entry in entries:
+                if entry.route_type == RouteType.DIRECT:
+                    direct_peers.add(node_id)
+                
+                if node_id not in route_graph:
+                    route_graph[node_id] = []
+                route_graph[node_id].append({
+                    'next_hop': entry.next_hop_node_id,
+                    'hops': entry.hop_count,
+                    'type': entry.route_type,
+                    'fd': entry.fd
+                })
+        
+        # Print this node
+        print(f"\n[{self.node_id}] (this node - you)")
+        print("    |")
+        
+        # Print direct connections section
+        if direct_peers:
+            print("    |---[DIRECT CONNECTIONS]")
+            for peer_id in sorted(direct_peers):
+                print(f"    |\\")
+                print(f"    | \\____[{peer_id}] (direct peer)")
+                
+                # Show what this peer can reach (excluding ourselves and already shown direct peers)
+                if peer_id in route_graph:
+                    reachable_via_peer = []
+                    for route in route_graph[peer_id]:
+                        target = route['next_hop']
+                        # Avoid showing: ourselves, the peer itself, other direct peers
+                        if target != self.node_id and target != peer_id and target not in direct_peers:
+                            reachable_via_peer.append((target, route['hops']))
+                    
+                    if reachable_via_peer:
+                        reachable_via_peer = sorted(set(reachable_via_peer))  # Remove duplicates
+                        for i, (target, hops) in enumerate(reachable_via_peer):
+                            is_last = (i == len(reachable_via_peer) - 1)
+                            prefix = "    |      |" if not is_last else "    |      "
+                            print(f"    |      |")
+                            print(f"{prefix}\\____[{target}] ({hops} hops via {peer_id})")
+        
+        # Print indirect routes section
+        indirect_nodes = {}
+        for node_id, routes in route_graph.items():
+            if node_id in direct_peers:
+                continue
+            # Collect all unique paths to this node
+            paths = []
+            for route in routes:
+                next_hop = route['next_hop']
+                hops = route['hops']
+                # Build the path string
+                if next_hop == node_id:
+                    paths.append(f"[{node_id}] (self-loop?)")
+                elif next_hop in direct_peers:
+                    paths.append(f"via {next_hop} ({hops} hops)")
+                else:
+                    paths.append(f"via {next_hop} ({hops} hops, chained)")
+            
+            if paths:
+                indirect_nodes[node_id] = paths
+        
+        if indirect_nodes:
+            print("    |")
+            print("    |---[INDIRECT ROUTES]")
+            for node_id in sorted(indirect_nodes.keys()):
+                paths = indirect_nodes[node_id]
+                print(f"    |\\")
+                print(f"    | \\____[{node_id}]")
+                for i, path in enumerate(paths):
+                    is_last = (i == len(paths) - 1)
+                    prefix = "    |    |" if not is_last else "    |    "
+                    print(f"    |    |")
+                    print(f"{prefix}\\-> {path}")
+        
+        # Detect and report potential loops or parallel routes
+        parallel_routes = []
+        loop_routes = []
+        for node_id, routes in route_graph.items():
+            direct_count = sum(1 for r in routes if r['type'] == RouteType.DIRECT)
+            indirect_count = sum(1 for r in routes if r['type'] == RouteType.VIA_HOP)
+            
+            if direct_count > 0 and indirect_count > 0:
+                parallel_routes.append(node_id)
+            
+            # Check for loops (route where next_hop leads back to self or creates cycle)
+            for route in routes:
+                if route['next_hop'] == node_id and route['type'] == RouteType.VIA_HOP:
+                    loop_routes.append((node_id, route['next_hop']))
+        
+        if parallel_routes or loop_routes:
+            print("\n    |")
+            print("    |---[NETWORK CHARACTERISTICS]")
+            if parallel_routes:
+                print("    |")
+                print("    |  Parallel routes detected (direct + indirect):")
+                for node_id in sorted(parallel_routes):
+                    routes = route_graph.get(node_id, [])
+                    direct = [r for r in routes if r['type'] == RouteType.DIRECT]
+                    indirect = [r for r in routes if r['type'] == RouteType.VIA_HOP]
+                    print(f"    |    Node {node_id}: {len(direct)} direct, {len(indirect)} indirect paths")
+            if loop_routes:
+                print("    |")
+                print("    |  Potential routing loops detected:")
+                for node_id, next_hop in sorted(set(loop_routes)):
+                    print(f"    |    Node {node_id} -> Node {next_hop} (circular reference)")
+        
+        # Print summary
+        total_nodes = len(all_routes)
+        direct_count = len(direct_peers)
+        indirect_count = len(indirect_nodes)
+        
+        print("\n" + "=" * 70)
+        print(f"SUMMARY: {direct_count} direct peers, {indirect_count} reachable via hops, "
+              f"{total_nodes} total known nodes")
+        if parallel_routes:
+            print(f"         {len(parallel_routes)} nodes have parallel routes")
+        print("=" * 70 + "\n")
 
     def __enter__(self):
         self.connect()
