@@ -39,6 +39,15 @@ struct transport {
     uint64_t enc_recv_nonce;
     uint8_t enc_session_id[8];
     int enc_is_initiator;
+
+    /* Cached XChaCha20 subkeys: crypto_aead_lock()/unlock() internally
+     * call crypto_chacha20_h() on every message.  Because our nonces
+     * always have 16 zero bytes in the first half, the subkey is
+     * identical for every message.  We precompute it once after the
+     * handshake and reuse it, shaving 20 ChaCha20 rounds off each
+     * encrypt/decrypt operation. */
+    uint8_t enc_send_subkey[32];
+    uint8_t enc_recv_subkey[32];
 };
 
 ssize_t TRANSPORT__recv(IN int fd, OUT uint8_t *buf, IN size_t len);

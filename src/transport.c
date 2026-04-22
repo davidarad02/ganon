@@ -264,6 +264,15 @@ err_t TRANSPORT__do_handshake(IN transport_t *t, IN int is_initiator) {
     t->enc_recv_nonce = 0;
     t->enc_state = ENC__ESTABLISHED;
 
+    /* Precompute XChaCha20 subkeys.  Our nonces always have 16 zero bytes
+     * in the first half, so crypto_chacha20_h() produces the same subkey
+     * for every message.  Caching it avoids 20 ChaCha20 rounds per frame. */
+    {
+        uint8_t zero_nonce_prefix[16] = {0};
+        crypto_chacha20_h(t->enc_send_subkey, t->enc_send_key, zero_nonce_prefix);
+        crypto_chacha20_h(t->enc_recv_subkey, t->enc_recv_key, zero_nonce_prefix);
+    }
+
     LOG_DEBUG("Encryption handshake complete on fd=%d (session_id=%02x%02x%02x%02x)",
               t->fd, t->enc_session_id[0], t->enc_session_id[1],
               t->enc_session_id[2], t->enc_session_id[3]);
@@ -342,12 +351,21 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
 
-    if (0 != crypto_aead_unlock(plaintext, mac, t->enc_recv_key, nonce,
-                                NULL, 0, ciphertext, ciphertext_len)) {
-        LOG_WARNING("Decryption failed on fd=%d", t->fd);
-        FREE(frame);
-        FREE(plaintext);
-        FAIL(E__CRYPTO__DECRYPT_FAILED);
+    /* Use a local DJB context with the cached subkey.  This is exactly
+     * what crypto_aead_unlock() does internally, minus the redundant
+     * crypto_chacha20_h() call (our nonce prefix is always 16 zeros). */
+    {
+        crypto_aead_ctx ctx;
+        memcpy(ctx.key, t->enc_recv_subkey, 32);
+        memcpy(ctx.nonce, nonce + 16, 8);
+        ctx.counter = 0;
+        if (0 != crypto_aead_read(&ctx, plaintext, mac,
+                                  NULL, 0, ciphertext, ciphertext_len)) {
+            LOG_WARNING("Decryption failed on fd=%d", t->fd);
+            FREE(frame);
+            FREE(plaintext);
+            FAIL(E__CRYPTO__DECRYPT_FAILED);
+        }
     }
 
     FREE(frame);
@@ -424,8 +442,17 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
     build_nonce(nonce, t->enc_send_nonce);
     t->enc_send_nonce++;
 
-    crypto_aead_lock(ciphertext, mac, t->enc_send_key, nonce, NULL, 0,
-                     plain_buf, bytes_written);
+    /* Use a local DJB context with the cached subkey.  This is exactly
+     * what crypto_aead_lock() does internally, minus the redundant
+     * crypto_chacha20_h() call (our nonce prefix is always 16 zeros). */
+    {
+        crypto_aead_ctx ctx;
+        memcpy(ctx.key, t->enc_send_subkey, 32);
+        memcpy(ctx.nonce, nonce + 16, 8);
+        ctx.counter = 0;
+        crypto_aead_write(&ctx, ciphertext, mac, NULL, 0,
+                          plain_buf, bytes_written);
+    }
 
     if (plain_heap) FREE(plain_buf);
 
