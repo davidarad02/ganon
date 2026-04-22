@@ -10,6 +10,10 @@
 #include "protocol.h"
 #include "transport.h"
 
+/* Stack buffer size for TRANSPORT__send_msg to avoid malloc on the hot path.
+ * Must be >= TUNNEL_BUF_SIZE (65536) + tunnel header (8) + protocol header (32). */
+#define TRANSPORT_SEND_STACK_SIZE 65792
+
 ssize_t TRANSPORT__recv(int fd, uint8_t *buf, size_t len) {
     return recv(fd, buf, len, 0);
 }
@@ -205,20 +209,28 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
     if (NULL != data && msg->data_length > 0) {
         buf_len += msg->data_length;
     }
-    uint8_t *buf = malloc(buf_len);
-    if (NULL == buf) {
-        FAIL(E__INVALID_ARG_NULL_POINTER);
+
+    uint8_t *buf;
+    uint8_t stack_buf[TRANSPORT_SEND_STACK_SIZE];
+    int use_heap = (buf_len > TRANSPORT_SEND_STACK_SIZE);
+    if (use_heap) {
+        buf = malloc(buf_len);
+        if (NULL == buf) {
+            FAIL(E__INVALID_ARG_NULL_POINTER);
+        }
+    } else {
+        buf = stack_buf;
     }
 
     size_t bytes_written = 0;
     rc = PROTOCOL__serialize(msg, data, buf, buf_len, &bytes_written);
     if (E__SUCCESS != rc) {
-        FREE(buf);
+        if (use_heap) FREE(buf);
         goto l_cleanup;
     }
 
     rc = TRANSPORT__send_all(t, buf, bytes_written, NULL);
-    FREE(buf);
+    if (use_heap) FREE(buf);
     FAIL_IF(E__SUCCESS != rc, rc);
 
 l_cleanup:

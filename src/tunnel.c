@@ -2,6 +2,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <stdio.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -457,7 +458,13 @@ static void *src_accept_thread(void *arg) {
         conn->dst_node_id  = tunnel->dst_node_id;
         conn->is_active    = 1;
         conn->ack_received = 0;
-        
+
+        int nodelay = 1;
+        if (setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) < 0) {
+            LOG_WARNING("TUNNEL %u conn %u: setsockopt(TCP_NODELAY) failed: %s",
+                       tunnel->tunnel_id, conn_id, strerror(errno));
+        }
+
         /* Set TCP receive buffer size for connection socket if configured */
         if (g_tunnel_tcp_rcvbuf > 0) {
             int rcvbuf = g_tunnel_tcp_rcvbuf;
@@ -838,6 +845,14 @@ static void *dst_connect_thread(void *arg) {
         return NULL;
     }
     freeaddrinfo(res);
+
+    if (TUNNEL_PROTO_UDP != protocol) {
+        int nodelay = 1;
+        if (setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) < 0) {
+            LOG_WARNING("TUNNEL %u conn %u: setsockopt(TCP_NODELAY) failed: %s",
+                       tunnel_id, conn_id, strerror(errno));
+        }
+    }
 
     if (!g_tunnel_running) {
         close(fd);

@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <netinet/tcp.h>
 #include <pthread.h>
 
 #include "common.h"
@@ -135,6 +136,11 @@ static int connect_to_addr(const char *ip, int port, int timeout_sec) {
         }
     }
 
+    int nodelay = 1;
+    if (0 != setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay))) {
+        LOG_WARNING("Failed to set TCP_NODELAY on connected socket: %s", strerror(errno));
+    }
+
     if (-1 == fcntl(fd, F_SETFL, flags)) {
         close(fd);
         return -1;
@@ -243,6 +249,11 @@ static void *accept_thread_func(void *arg) {
             }
             LOG_ERROR("Accept failed: %s", strerror(errno));
             continue;
+        }
+
+        int nodelay = 1;
+        if (0 != setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay))) {
+            LOG_WARNING("Failed to set TCP_NODELAY on accepted socket: %s", strerror(errno));
         }
 
         socket_entry_t *entry = malloc(sizeof(socket_entry_t));

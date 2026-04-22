@@ -14,18 +14,13 @@
 
 static session_t g_session;
 static uint32_t g_msg_seq_id = 0;
-static pthread_mutex_t g_msg_seq_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 session_t *SESSION__get_session(void) {
     return &g_session;
 }
 
 uint32_t SESSION__get_next_msg_id(void) {
-    uint32_t id;
-    pthread_mutex_lock(&g_msg_seq_mutex);
-    id = ++g_msg_seq_id;
-    pthread_mutex_unlock(&g_msg_seq_mutex);
-    return id;
+    return __atomic_add_fetch(&g_msg_seq_id, 1, __ATOMIC_SEQ_CST);
 }
 
 static err_t SESSION__send_node_init(IN transport_t *t) {

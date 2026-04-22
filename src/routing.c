@@ -17,7 +17,6 @@ static routing_message_cb_t g_session_cb = NULL;
 int g_node_id = 0;
 
 static uint32_t g_msg_id_counter = 1;
-static pthread_mutex_t g_msg_id_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 #define SEEN_CACHE_MAX 1024
 typedef struct {
@@ -175,9 +174,7 @@ void ROUTING__init_globals(IN routing_table_t *rt, IN routing_message_cb_t sessi
      * Previously using timestamp (time(NULL)) caused message IDs to look
      * like node IDs (e.g., 1776634649), which was confusing in logs.
      * Now we start from 1 for readable, sequential message IDs. */
-    pthread_mutex_lock(&g_msg_id_mutex);
     g_msg_id_counter = 1;
-    pthread_mutex_unlock(&g_msg_id_mutex);
 }
 
 static err_t ROUTING__send_to_node_id(IN uint32_t node_id, IN const protocol_msg_t *msg, IN const uint8_t *data) {
@@ -351,9 +348,7 @@ void ROUTING__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN con
             rrep.orig_src_node_id = (uint32_t)g_node_id;
             rrep.src_node_id = (uint32_t)g_node_id;
             rrep.dst_node_id = orig_src;
-            pthread_mutex_lock(&g_msg_id_mutex);
-            rrep.message_id = ++g_msg_id_counter;
-            pthread_mutex_unlock(&g_msg_id_mutex);
+            rrep.message_id = __atomic_add_fetch(&g_msg_id_counter, 1, __ATOMIC_SEQ_CST);
             rrep.type = MSG__RREP;
             rrep.data_length = 0;
             rrep.ttl = DEFAULT_TTL - 1;
@@ -714,9 +709,7 @@ err_t ROUTING__send_rreq(IN uint32_t target_node_id) {
     rreq_msg.src_node_id = (uint32_t)g_node_id;
     rreq_msg.dst_node_id = 0;
     
-    pthread_mutex_lock(&g_msg_id_mutex);
-    rreq_msg.message_id = ++g_msg_id_counter;
-    pthread_mutex_unlock(&g_msg_id_mutex);
+    rreq_msg.message_id = __atomic_add_fetch(&g_msg_id_counter, 1, __ATOMIC_SEQ_CST);
     
     rreq_msg.type = MSG__RREQ;
     rreq_msg.data_length = sizeof(uint32_t);
@@ -833,9 +826,7 @@ void ROUTING__handle_disconnect(IN uint32_t node_id) {
     msg.orig_src_node_id = (uint32_t)g_node_id;
     msg.src_node_id = (uint32_t)g_node_id;
     msg.dst_node_id = 0;
-    pthread_mutex_lock(&g_msg_id_mutex);
-    msg.message_id = ++g_msg_id_counter;
-    pthread_mutex_unlock(&g_msg_id_mutex);
+    msg.message_id = __atomic_add_fetch(&g_msg_id_counter, 1, __ATOMIC_SEQ_CST);
     msg.type = MSG__RERR;
     msg.data_length = (uint32_t)(via_count * sizeof(uint32_t));
     msg.ttl = DEFAULT_TTL;
