@@ -80,15 +80,15 @@ static void derive_keys(const uint8_t shared[32],
 
 static void build_nonce(uint8_t nonce[24], uint64_t counter) {
     memset(nonce, 0, 24);
-    /* Store counter as little-endian in first 8 bytes */
-    nonce[0] = (uint8_t)(counter);
-    nonce[1] = (uint8_t)(counter >> 8);
-    nonce[2] = (uint8_t)(counter >> 16);
-    nonce[3] = (uint8_t)(counter >> 24);
-    nonce[4] = (uint8_t)(counter >> 32);
-    nonce[5] = (uint8_t)(counter >> 40);
-    nonce[6] = (uint8_t)(counter >> 48);
-    nonce[7] = (uint8_t)(counter >> 56);
+    /* Store counter as little-endian in last 8 bytes */
+    nonce[16] = (uint8_t)(counter);
+    nonce[17] = (uint8_t)(counter >> 8);
+    nonce[18] = (uint8_t)(counter >> 16);
+    nonce[19] = (uint8_t)(counter >> 24);
+    nonce[20] = (uint8_t)(counter >> 32);
+    nonce[21] = (uint8_t)(counter >> 40);
+    nonce[22] = (uint8_t)(counter >> 48);
+    nonce[23] = (uint8_t)(counter >> 56);
 }
 
 transport_t *TRANSPORT__create(int fd) {
@@ -318,14 +318,14 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
     size_t ciphertext_len = frame_len - ENC_NONCE_SIZE - ENC_MAC_SIZE;
 
     /* Verify nonce: must exactly match expected counter */
-    uint64_t recv_counter = (uint64_t)nonce[0] |
-                           ((uint64_t)nonce[1] << 8) |
-                           ((uint64_t)nonce[2] << 16) |
-                           ((uint64_t)nonce[3] << 24) |
-                           ((uint64_t)nonce[4] << 32) |
-                           ((uint64_t)nonce[5] << 40) |
-                           ((uint64_t)nonce[6] << 48) |
-                           ((uint64_t)nonce[7] << 56);
+    uint64_t recv_counter = (uint64_t)nonce[16] |
+                           ((uint64_t)nonce[17] << 8) |
+                           ((uint64_t)nonce[18] << 16) |
+                           ((uint64_t)nonce[19] << 24) |
+                           ((uint64_t)nonce[20] << 32) |
+                           ((uint64_t)nonce[21] << 40) |
+                           ((uint64_t)nonce[22] << 48) |
+                           ((uint64_t)nonce[23] << 56);
 
     if (recv_counter != t->enc_recv_nonce) {
         LOG_WARNING("Replay detected on fd=%d: expected nonce %llu, got %llu",

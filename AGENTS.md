@@ -524,7 +524,7 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] NODE_DISCONNECT carries list of unreachable nodes
 - [x] Add ROUTING__get_via_nodes function
 - [x] Reconnection logic: connect_and_run_thread handles reconnect loop per peer
-- [ ] Update Python client to match new architecture
+- [x] Update Python client to match new architecture (encryption, protocol, routing)
 - [x] Test multi-node mesh topology
 - [x] Migrated routing to reactive AODV mesh logic
 - [ ] Implement AODV message structs into Python Client
@@ -550,6 +550,9 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Fix tunnel duplicate connection creation - check if connection already exists before creating new one (prevents duplicate connections with multi-path routing)
 - [x] Fix tunnel soft-close reuse - allow soft-closed tunnels to be recreated (check `is_soft_closed` flag in addition to `is_active`)
 - [x] Add encryption at the transport layer
+- [x] Switch Python client from `cryptography` to `monocypher-py` for Monocypher compatibility
+- [x] Revert C server from IETF ChaCha20 (12-byte nonce) to XChaCha20 (24-byte nonce) for Monocypher API compatibility
+- [x] Fix BLAKE2b key derivation in Python client - `monocypher-py` takes `crypto_blake2b(msg, key=...)` where C takes `crypto_blake2b_keyed(hash, hash_size, key, key_size, msg, msg_size)`; shared secret must be passed as `key=shared` and context byte as `msg`
 
 ## Known Bugs - Multi-Path Tunnel Race Conditions
 
@@ -658,11 +661,11 @@ Python: c = GanonClient("127.0.0.1", 11111, 3); c.connect()
 
 ## Transport-Layer Encryption
 
-All TCP connections between ganon nodes are encrypted using **X25519 + ChaCha20-Poly1305** (via vendored Monocypher). Encryption is mandatory and transparent to all layers above transport.
+All TCP connections between ganon nodes are encrypted using **X25519 + XChaCha20-Poly1305** (via vendored Monocypher). Encryption is mandatory and transparent to all layers above transport.
 
 ### Cryptography
 - **Key exchange:** Ephemeral X25519 per TCP connection
-- **Cipher:** ChaCha20-Poly1305 (AEAD, single primitive for encryption + authentication)
+- **Cipher:** XChaCha20-Poly1305 (AEAD, 24-byte nonce, single primitive for encryption + authentication)
 - **Key derivation:** BLAKE2b with single-byte context strings (`S`, `R`, `I`)
 - **Randomness:** `getrandom()` when available, fallback to `/dev/urandom`
 - **No authentication / no PSK:** Protects against passive eavesdropping and active tampering, but not MITM impersonation
@@ -678,7 +681,7 @@ After TCP connect, before any ganon protocol traffic:
 ### Wire Format (post-handshake)
 ```
 [4 bytes]  Big-endian frame length
-[24 bytes] Nonce (8-byte LE counter + 16 zero bytes)
+[24 bytes] Nonce (16 zero bytes + 8-byte LE counter)
 [16 bytes] Poly1305 MAC
 [N bytes]  Ciphertext of serialized (protocol_msg_t || data)
 ```
@@ -686,18 +689,29 @@ After TCP connect, before any ganon protocol traffic:
 - **Replay protection:** Strict 64-bit nonce equality check per session
 - **Overhead:** 44 bytes per frame
 
-### Integration
+### Integration (C Server)
 - `TRANSPORT__do_handshake()` called in `socket_thread_func()` before message loop
-- `TRANSPORT__send_msg()` encrypts serialized message into length-prefixed frame
-- `TRANSPORT__recv_msg()` reads length-prefixed frame, verifies nonce, decrypts, unserializes
+- `TRANSPORT__send_msg()` encrypts via `crypto_aead_lock()` into length-prefixed frame
+- `TRANSPORT__recv_msg()` reads length-prefixed frame, verifies nonce, decrypts via `crypto_aead_unlock()`, unserializes
 - Session, routing, and tunnel layers are completely unaware of encryption
 
+### Integration (Python Client)
+- `ganon_client/transport.py` wraps the socket with `monocypher-py` bindings
+- `Transport.do_handshake()` performs X25519 exchange and key derivation
+- `Transport.send_encrypted()` calls `monocypher.bindings.crypto_lock()`
+- `Transport.recv_decrypted()` calls `monocypher.bindings.crypto_unlock()`
+- Both C and Python use the same Monocypher primitives, ensuring full compatibility
+
+**Important API difference:** `monocypher-py`'s `crypto_blake2b(msg, key=...)` takes the *message* as the first argument and the *key* as the keyword argument. The C `crypto_blake2b_keyed(hash, hash_size, key, key_size, message, message_size)` takes the *key* as the 3rd argument and the *message* as the 5th. When deriving directional keys in Python, the shared secret must be passed as `key=shared` and the single-byte context (`b"S"`/`b"R"`) as the message.
+
 ### Files
-- `src/monocypher.c` + `include/monocypher.h` — vendored crypto library
-- `src/transport.c` — handshake, encrypt, decrypt
-- `src/network.c` — handshake trigger in socket thread
+- `src/monocypher.c` + `include/monocypher.h` — vendored crypto library (C server)
+- `src/transport.c` — handshake, encrypt, decrypt (C server)
+- `src/network.c` — handshake trigger in socket thread (C server)
 - `include/transport.h` — encryption state in `struct transport`
 - `include/err.h` — crypto error codes (`E__CRYPTO__*`)
+- `ganon_client/transport.py` — Python transport encryption layer
+- `ganon_client/pyproject.toml` — `monocypher-py` dependency
 
 ### Future: End-to-End Encryption
 The current design is hop-to-hop (protects the link). End-to-end encryption can be added later without changing the frame format: add a second encryption layer inside `session.c` or `routing.c` that encrypts the `data` payload before `TRANSPORT__send_msg` sees it. The hop-to-hop layer will then encrypt the already-encrypted payload, providing double encryption.

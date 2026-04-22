@@ -148,7 +148,7 @@ class GanonClient:
         self.reorder_timeout = reorder_timeout
         self.reorder = reorder  # False = process packets immediately (default)
 
-        self._sock: Optional[socket.socket] = None
+        self._sock: Optional[Transport] = None
         self._running = False
         self._lock = threading.RLock()
         self._recv_thread: Optional[threading.Thread] = None
@@ -221,7 +221,7 @@ class GanonClient:
     def set_on_reconnected(self, callback: Callable[[], None]):
         self._on_reconnected = callback
 
-    def _connect(self) -> Optional[socket.socket]:
+    def _connect(self) -> Optional[Transport]:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(self.connect_timeout)
 
@@ -230,7 +230,6 @@ class GanonClient:
             sock.connect((self.ip, self.port))
             self._info("Connected to %s:%s", self.ip, self.port)
             sock.settimeout(None)
-            return sock
         except socket.timeout:
             self._warning("Connect to %s:%d timed out", self.ip, self.port)
             sock.close()
@@ -239,6 +238,20 @@ class GanonClient:
             self._warning("Failed to connect to %s:%d: %s", self.ip, self.port, e)
             sock.close()
             return None
+
+        # Transport-layer encryption handshake (mandatory)
+        transport = Transport(sock)
+        self._info("Starting encryption handshake...")
+        if not transport.do_handshake(is_initiator=True):
+            self._error("Encryption handshake failed")
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            sock.close()
+            return None
+        self._info("Encryption handshake complete")
+        return transport
 
     def _handle_node_init(self, orig_src_node_id: int, src_node_id: int, message_id: int, ttl: int, data: bytes):
         self._debug("Received NODE_INIT from node %d (orig_src=%d, msg_id=%d, ttl=%d, data_len=%d)", src_node_id, orig_src_node_id, message_id, ttl, len(data))
@@ -474,13 +487,19 @@ class GanonClient:
             self._warning("Unknown message type: %s", msg_type)
 
     def _protocol_loop(self):
-        header_size = 36
-        transport = Transport(self._sock)
         while self._running:
-            header_data = transport.recv_all(header_size)
-            if header_data is None:
+            plaintext = self._sock.recv_decrypted()
+            if plaintext is None:
                 self._handle_disconnect()
                 return
+
+            if len(plaintext) < 36:
+                self._warning("Decrypted frame too short: %d bytes", len(plaintext))
+                self._handle_disconnect()
+                return
+
+            header_data = plaintext[:36]
+            data = plaintext[36:]
 
             header = ProtocolHeader.parse(header_data)
 
@@ -489,13 +508,11 @@ class GanonClient:
                 self._handle_disconnect()
                 return
 
-            data_length = header.data_length
-            data = b""
-            if data_length > 0:
-                data = transport.recv_all(data_length)
-                if data is None:
-                    self._handle_disconnect()
-                    return
+            if len(data) != header.data_length:
+                self._warning("Data length mismatch: header says %d, got %d",
+                              header.data_length, len(data))
+                self._handle_disconnect()
+                return
 
             self._process(header, data)
 
@@ -578,8 +595,8 @@ class GanonClient:
             "ttl": DEFAULT_TTL,
             "channel_id": 0,
         })
-        
-        self._sock.sendall(header)
+
+        self._sock.send_encrypted(header)
 
     def _start_background_threads(self):
         with self._lock:
@@ -770,7 +787,7 @@ class GanonClient:
         })
 
         try:
-            self._sock.sendall(header + data)
+            self._sock.send_encrypted(header + data)
             msg_type_val = struct.unpack(">I", msg_type)[0]
             msg_type_name = MsgType(msg_type_val).name if msg_type_val in [t.value for t in MsgType] else f"UNKNOWN({msg_type_val})"
             self._info("Protocol SEND: orig_src=%d, src=%d, dst=%d, msg_id=%d, type=%s, ttl=%d, channel=%d, data_len=%d",
