@@ -179,6 +179,15 @@ static void *socket_thread_func(void *arg) {
         net->connected_cb(t);
     }
 
+    /* Transport-layer encryption handshake */
+    {
+        err_t enc_rc = TRANSPORT__do_handshake(t, !t->is_incoming);
+        if (E__SUCCESS != enc_rc) {
+            LOG_ERROR("Encryption handshake failed on fd=%d, closing connection", t->fd);
+            goto l_cleanup;
+        }
+    }
+
     while (true) {
         protocol_msg_t msg;
         uint8_t *data = NULL;
@@ -194,6 +203,7 @@ static void *socket_thread_func(void *arg) {
         free(data);
     }
 
+l_cleanup:
     LOG_INFO("Connection %s:%d closed", t->client_ip, t->client_port);
 
     if (NULL != net->disconnected_cb) {

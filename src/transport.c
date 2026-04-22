@@ -2,6 +2,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <arpa/inet.h>
 
 #include "common.h"
 #include "err.h"
@@ -9,10 +11,16 @@
 #include "network.h"
 #include "protocol.h"
 #include "transport.h"
+#include "monocypher.h"
 
 /* Stack buffer size for TRANSPORT__send_msg to avoid malloc on the hot path.
  * Must be >= TUNNEL_BUF_SIZE (65536) + tunnel header (8) + protocol header (32). */
 #define TRANSPORT_SEND_STACK_SIZE 65792
+
+/* Encryption frame overhead: 4 (length) + 24 (nonce) + 16 (MAC) = 44 bytes */
+#define ENC_FRAME_OVERHEAD 44
+#define ENC_NONCE_SIZE 24
+#define ENC_MAC_SIZE 16
 
 ssize_t TRANSPORT__recv(int fd, uint8_t *buf, size_t len) {
     return recv(fd, buf, len, 0);
@@ -20,6 +28,67 @@ ssize_t TRANSPORT__recv(int fd, uint8_t *buf, size_t len) {
 
 ssize_t TRANSPORT__send(int fd, const uint8_t *buf, size_t len) {
     return send(fd, buf, len, 0);
+}
+
+static int get_random_bytes(uint8_t *buf, size_t len) {
+#if defined(__linux__) && defined(SYS_getrandom)
+    ssize_t n = getrandom(buf, len, 0);
+    if (n == (ssize_t)len) {
+        return 0;
+    }
+#endif
+    static int urandom_fd = -1;
+    if (urandom_fd < 0) {
+        urandom_fd = open("/dev/urandom", O_RDONLY | O_CLOEXEC);
+        if (urandom_fd < 0) {
+            return -1;
+        }
+    }
+    size_t total = 0;
+    while (total < len) {
+        ssize_t n = read(urandom_fd, buf + total, len - total);
+        if (n < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return -1;
+        }
+        total += (size_t)n;
+    }
+    return 0;
+}
+
+static void derive_keys(const uint8_t shared[32],
+                        uint8_t send_key[32], uint8_t recv_key[32],
+                        uint8_t session_id[8]) {
+    uint8_t out[32];
+    const char send_ctx = 'S';
+    const char recv_ctx = 'R';
+    const char sess_ctx = 'I';
+
+    crypto_blake2b_keyed(out, 32, shared, 32, (const uint8_t *)&send_ctx, 1);
+    memcpy(send_key, out, 32);
+
+    crypto_blake2b_keyed(out, 32, shared, 32, (const uint8_t *)&recv_ctx, 1);
+    memcpy(recv_key, out, 32);
+
+    crypto_blake2b_keyed(out, 32, shared, 32, (const uint8_t *)&sess_ctx, 1);
+    memcpy(session_id, out, 8);
+
+    crypto_wipe(out, sizeof(out));
+}
+
+static void build_nonce(uint8_t nonce[24], uint64_t counter) {
+    memset(nonce, 0, 24);
+    /* Store counter as little-endian in first 8 bytes */
+    nonce[0] = (uint8_t)(counter);
+    nonce[1] = (uint8_t)(counter >> 8);
+    nonce[2] = (uint8_t)(counter >> 16);
+    nonce[3] = (uint8_t)(counter >> 24);
+    nonce[4] = (uint8_t)(counter >> 32);
+    nonce[5] = (uint8_t)(counter >> 40);
+    nonce[6] = (uint8_t)(counter >> 48);
+    nonce[7] = (uint8_t)(counter >> 56);
 }
 
 transport_t *TRANSPORT__create(int fd) {
@@ -38,6 +107,16 @@ transport_t *TRANSPORT__create(int fd) {
     t->recv = TRANSPORT__recv;
     t->send = TRANSPORT__send;
 
+    t->enc_state = ENC__INIT;
+    memset(t->enc_ephemeral_priv, 0, 32);
+    memset(t->enc_ephemeral_pub, 0, 32);
+    memset(t->enc_send_key, 0, 32);
+    memset(t->enc_recv_key, 0, 32);
+    memset(t->enc_session_id, 0, 8);
+    t->enc_send_nonce = 0;
+    t->enc_recv_nonce = 0;
+    t->enc_is_initiator = 0;
+
     return t;
 }
 
@@ -45,6 +124,9 @@ void TRANSPORT__destroy(transport_t *t) {
     if (NULL == t) {
         return;
     }
+    crypto_wipe(t->enc_ephemeral_priv, 32);
+    crypto_wipe(t->enc_send_key, 32);
+    crypto_wipe(t->enc_recv_key, 32);
     if (t->fd >= 0) {
         shutdown(t->fd, SHUT_RDWR);
         close(t->fd);
@@ -136,54 +218,142 @@ l_cleanup:
     return rc;
 }
 
+err_t TRANSPORT__do_handshake(IN transport_t *t, IN int is_initiator) {
+    err_t rc = E__SUCCESS;
+    uint8_t peer_pub[32];
+    uint8_t shared[32];
+
+    VALIDATE_ARGS(t);
+
+    if (0 != get_random_bytes(t->enc_ephemeral_priv, 32)) {
+        LOG_ERROR("Failed to generate random bytes for keypair");
+        FAIL(E__CRYPTO__HANDSHAKE_FAILED);
+    }
+
+    crypto_x25519_public_key(t->enc_ephemeral_pub, t->enc_ephemeral_priv);
+    t->enc_is_initiator = is_initiator;
+
+    if (is_initiator) {
+        /* Send our pubkey */
+        rc = TRANSPORT__send_all(t, t->enc_ephemeral_pub, 32, NULL);
+        FAIL_IF(E__SUCCESS != rc, rc);
+
+        /* Receive peer pubkey */
+        rc = TRANSPORT__recv_all(t, peer_pub, 32, NULL);
+        FAIL_IF(E__SUCCESS != rc, rc);
+    } else {
+        /* Receive peer pubkey */
+        rc = TRANSPORT__recv_all(t, peer_pub, 32, NULL);
+        FAIL_IF(E__SUCCESS != rc, rc);
+
+        /* Send our pubkey */
+        rc = TRANSPORT__send_all(t, t->enc_ephemeral_pub, 32, NULL);
+        FAIL_IF(E__SUCCESS != rc, rc);
+    }
+
+    crypto_x25519(shared, t->enc_ephemeral_priv, peer_pub);
+
+    if (is_initiator) {
+        derive_keys(shared, t->enc_send_key, t->enc_recv_key, t->enc_session_id);
+    } else {
+        derive_keys(shared, t->enc_recv_key, t->enc_send_key, t->enc_session_id);
+    }
+
+    t->enc_send_nonce = 0;
+    t->enc_recv_nonce = 0;
+    t->enc_state = ENC__ESTABLISHED;
+
+    LOG_DEBUG("Encryption handshake complete on fd=%d (session_id=%02x%02x%02x%02x)",
+              t->fd, t->enc_session_id[0], t->enc_session_id[1],
+              t->enc_session_id[2], t->enc_session_id[3]);
+
+l_cleanup:
+    crypto_wipe(shared, sizeof(shared));
+    return rc;
+}
+
 err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
     err_t rc = E__SUCCESS;
+    uint8_t len_buf[4];
+    uint32_t frame_len = 0;
+    uint8_t *frame = NULL;
+    uint8_t *plaintext = NULL;
 
     VALIDATE_ARGS(t, msg, data);
 
     *data = NULL;
 
-    uint8_t header[PROTOCOL_HEADER_SIZE];
-    ssize_t bytes_read = 0;
-    rc = TRANSPORT__recv_all(t, header, PROTOCOL_HEADER_SIZE, &bytes_read);
-    if (E__SUCCESS != rc) {
-        goto l_cleanup;
-    }
+    /* Read length-prefixed encrypted frame */
+    rc = TRANSPORT__recv_all(t, len_buf, 4, NULL);
+    FAIL_IF(E__SUCCESS != rc, rc);
 
-    if ((size_t)bytes_read < PROTOCOL_HEADER_SIZE) {
-        LOG_WARNING("Incomplete protocol header on fd %d: got %zd, expected %zu", t->fd, bytes_read, PROTOCOL_HEADER_SIZE);
+    frame_len = ((uint32_t)len_buf[0] << 24) |
+                ((uint32_t)len_buf[1] << 16) |
+                ((uint32_t)len_buf[2] <<  8) |
+                ((uint32_t)len_buf[3]);
+
+    if (frame_len < ENC_FRAME_OVERHEAD || frame_len > 200000) {
+        LOG_WARNING("Invalid encrypted frame length: %u on fd=%d", frame_len, t->fd);
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 
-    protocol_msg_t tmp_msg;
-    memcpy(&tmp_msg, header, sizeof(tmp_msg));
-    uint32_t data_len = ntohl(tmp_msg.data_length);
-
-    size_t total_len = PROTOCOL_HEADER_SIZE + data_len;
-    uint8_t *full_msg = malloc(total_len);
-    if (NULL == full_msg) {
+    frame = malloc(frame_len);
+    if (NULL == frame) {
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
 
-    memcpy(full_msg, header, PROTOCOL_HEADER_SIZE);
-    if (data_len > 0) {
-        rc = TRANSPORT__recv_all(t, full_msg + PROTOCOL_HEADER_SIZE, data_len, &bytes_read);
-        if (E__SUCCESS != rc) {
-            FREE(full_msg);
-            goto l_cleanup;
-        }
-        if ((size_t)bytes_read < data_len) {
-            LOG_WARNING("Incomplete message data on fd %d: got %zd, expected %u", t->fd, bytes_read, data_len);
-            FREE(full_msg);
-            FAIL(E__NET__SOCKET_CONNECT_FAILED);
-        }
+    rc = TRANSPORT__recv_all(t, frame, frame_len, NULL);
+    if (E__SUCCESS != rc) {
+        FREE(frame);
+        goto l_cleanup;
     }
 
+    /* Decrypt frame: nonce(24) || mac(16) || ciphertext(N) */
+    uint8_t *nonce = frame;
+    uint8_t *mac = frame + ENC_NONCE_SIZE;
+    uint8_t *ciphertext = frame + ENC_NONCE_SIZE + ENC_MAC_SIZE;
+    size_t ciphertext_len = frame_len - ENC_FRAME_OVERHEAD + 4;
+
+    /* Verify nonce: must exactly match expected counter */
+    uint64_t recv_counter = (uint64_t)nonce[0] |
+                           ((uint64_t)nonce[1] << 8) |
+                           ((uint64_t)nonce[2] << 16) |
+                           ((uint64_t)nonce[3] << 24) |
+                           ((uint64_t)nonce[4] << 32) |
+                           ((uint64_t)nonce[5] << 40) |
+                           ((uint64_t)nonce[6] << 48) |
+                           ((uint64_t)nonce[7] << 56);
+
+    if (recv_counter != t->enc_recv_nonce) {
+        LOG_WARNING("Replay detected on fd=%d: expected nonce %llu, got %llu",
+                    t->fd, (unsigned long long)t->enc_recv_nonce,
+                    (unsigned long long)recv_counter);
+        FREE(frame);
+        FAIL(E__CRYPTO__REPLAY_DETECTED);
+    }
+    t->enc_recv_nonce++;
+
+    plaintext = malloc(ciphertext_len);
+    if (NULL == plaintext) {
+        FREE(frame);
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+
+    if (0 != crypto_aead_unlock(plaintext, mac, t->enc_recv_key, nonce,
+                                NULL, 0, ciphertext, ciphertext_len)) {
+        LOG_WARNING("Decryption failed on fd=%d", t->fd);
+        FREE(frame);
+        FREE(plaintext);
+        FAIL(E__CRYPTO__DECRYPT_FAILED);
+    }
+
+    FREE(frame);
+
     size_t unserialize_data_len = 0;
-    rc = PROTOCOL__unserialize(full_msg, total_len, msg, data, &unserialize_data_len);
+    rc = PROTOCOL__unserialize(plaintext, ciphertext_len, msg, data, &unserialize_data_len);
     if (E__SUCCESS != rc) {
-        LOG_WARNING("Failed to unserialize message from fd %d", t->fd);
-        FREE(full_msg);
+        LOG_WARNING("Failed to unserialize decrypted message from fd %d", t->fd);
+        FREE(plaintext);
         goto l_cleanup;
     }
 
@@ -191,13 +361,14 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
               msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
               msg->message_id, msg->type, msg->data_length, msg->ttl, msg->channel_id, t->fd);
 
-    FREE(full_msg);
+    FREE(plaintext);
 l_cleanup:
     return rc;
 }
 
 err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8_t *data) {
     err_t rc = E__SUCCESS;
+    uint8_t *frame = NULL;
 
     VALIDATE_ARGS(t, msg);
 
@@ -205,32 +376,57 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
               msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
               msg->message_id, msg->type, msg->data_length, msg->ttl, msg->channel_id, t->fd);
 
-    size_t buf_len = PROTOCOL_HEADER_SIZE;
+    size_t plain_len = PROTOCOL_HEADER_SIZE;
     if (NULL != data && msg->data_length > 0) {
-        buf_len += msg->data_length;
+        plain_len += msg->data_length;
     }
 
-    uint8_t *buf;
-    uint8_t stack_buf[TRANSPORT_SEND_STACK_SIZE];
-    int use_heap = (buf_len > TRANSPORT_SEND_STACK_SIZE);
-    if (use_heap) {
-        buf = malloc(buf_len);
-        if (NULL == buf) {
+    uint8_t *plain_buf;
+    uint8_t plain_stack[TRANSPORT_SEND_STACK_SIZE];
+    int plain_heap = (plain_len > TRANSPORT_SEND_STACK_SIZE);
+    if (plain_heap) {
+        plain_buf = malloc(plain_len);
+        if (NULL == plain_buf) {
             FAIL(E__INVALID_ARG_NULL_POINTER);
         }
     } else {
-        buf = stack_buf;
+        plain_buf = plain_stack;
     }
 
     size_t bytes_written = 0;
-    rc = PROTOCOL__serialize(msg, data, buf, buf_len, &bytes_written);
+    rc = PROTOCOL__serialize(msg, data, plain_buf, plain_len, &bytes_written);
     if (E__SUCCESS != rc) {
-        if (use_heap) FREE(buf);
+        if (plain_heap) FREE(plain_buf);
         goto l_cleanup;
     }
 
-    rc = TRANSPORT__send_all(t, buf, bytes_written, NULL);
-    if (use_heap) FREE(buf);
+    /* Encrypt into frame: length(4) || nonce(24) || mac(16) || ciphertext(N) */
+    size_t ciphertext_len = bytes_written;
+    size_t frame_len = 4 + ENC_NONCE_SIZE + ENC_MAC_SIZE + ciphertext_len;
+
+    frame = malloc(frame_len);
+    if (NULL == frame) {
+        if (plain_heap) FREE(plain_buf);
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+
+    uint32_t net_len = htonl((uint32_t)frame_len);
+    memcpy(frame, &net_len, 4);
+
+    uint8_t *nonce = frame + 4;
+    uint8_t *mac = frame + 4 + ENC_NONCE_SIZE;
+    uint8_t *ciphertext = frame + 4 + ENC_NONCE_SIZE + ENC_MAC_SIZE;
+
+    build_nonce(nonce, t->enc_send_nonce);
+    t->enc_send_nonce++;
+
+    crypto_aead_lock(ciphertext, mac, t->enc_send_key, nonce, NULL, 0,
+                     plain_buf, bytes_written);
+
+    if (plain_heap) FREE(plain_buf);
+
+    rc = TRANSPORT__send_all(t, frame, frame_len, NULL);
+    FREE(frame);
     FAIL_IF(E__SUCCESS != rc, rc);
 
 l_cleanup:

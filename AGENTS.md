@@ -549,7 +549,7 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Fix multi-path routing deduplication - don't drop "duplicate" unicast messages at intermediate nodes, only drop broadcast duplicates
 - [x] Fix tunnel duplicate connection creation - check if connection already exists before creating new one (prevents duplicate connections with multi-path routing)
 - [x] Fix tunnel soft-close reuse - allow soft-closed tunnels to be recreated (check `is_soft_closed` flag in addition to `is_active`)
-- [ ] Add encryption at the transport layer
+- [x] Add encryption at the transport layer
 
 ## Known Bugs - Multi-Path Tunnel Race Conditions
 
@@ -655,3 +655,49 @@ Python: c = GanonClient("127.0.0.1", 11111, 3); c.connect()
         t = c.create_tunnel(30, 11, "127.0.0.1", 8000, "127.0.0.1", 9000, "tcp")
         # Then: iperf3 -s -p 9000 & iperf3 -c 127.0.0.1 -p 8000 -t 10
 ```
+
+## Transport-Layer Encryption
+
+All TCP connections between ganon nodes are encrypted using **X25519 + ChaCha20-Poly1305** (via vendored Monocypher). Encryption is mandatory and transparent to all layers above transport.
+
+### Cryptography
+- **Key exchange:** Ephemeral X25519 per TCP connection
+- **Cipher:** ChaCha20-Poly1305 (AEAD, single primitive for encryption + authentication)
+- **Key derivation:** BLAKE2b with single-byte context strings (`S`, `R`, `I`)
+- **Randomness:** `getrandom()` when available, fallback to `/dev/urandom`
+- **No authentication / no PSK:** Protects against passive eavesdropping and active tampering, but not MITM impersonation
+
+### Handshake
+After TCP connect, before any ganon protocol traffic:
+1. Both sides generate an ephemeral X25519 keypair
+2. Initiator sends 32-byte ephemeral public key
+3. Responder sends 32-byte ephemeral public key
+4. Both compute shared secret and derive directional `send_key` / `recv_key`
+5. Session ID derived from shared secret for internal tracking only (never on wire)
+
+### Wire Format (post-handshake)
+```
+[4 bytes]  Big-endian frame length
+[24 bytes] Nonce (8-byte LE counter + 16 zero bytes)
+[16 bytes] Poly1305 MAC
+[N bytes]  Ciphertext of serialized (protocol_msg_t || data)
+```
+- **AAD:** 0 bytes (no visible metadata to minimize traffic fingerprinting)
+- **Replay protection:** Strict 64-bit nonce equality check per session
+- **Overhead:** 44 bytes per frame
+
+### Integration
+- `TRANSPORT__do_handshake()` called in `socket_thread_func()` before message loop
+- `TRANSPORT__send_msg()` encrypts serialized message into length-prefixed frame
+- `TRANSPORT__recv_msg()` reads length-prefixed frame, verifies nonce, decrypts, unserializes
+- Session, routing, and tunnel layers are completely unaware of encryption
+
+### Files
+- `src/monocypher.c` + `include/monocypher.h` — vendored crypto library
+- `src/transport.c` — handshake, encrypt, decrypt
+- `src/network.c` — handshake trigger in socket thread
+- `include/transport.h` — encryption state in `struct transport`
+- `include/err.h` — crypto error codes (`E__CRYPTO__*`)
+
+### Future: End-to-End Encryption
+The current design is hop-to-hop (protects the link). End-to-end encryption can be added later without changing the frame format: add a second encryption layer inside `session.c` or `routing.c` that encrypts the `data` payload before `TRANSPORT__send_msg` sees it. The hop-to-hop layer will then encrypt the already-encrypted payload, providing double encryption.

@@ -13,6 +13,12 @@
 typedef struct network_t network_t;
 typedef struct transport transport_t;
 
+typedef enum {
+    ENC__INIT = 0,
+    ENC__WAIT,
+    ENC__ESTABLISHED,
+} enc_state_t;
+
 struct transport {
     int fd;
     int is_incoming;
@@ -22,6 +28,17 @@ struct transport {
     void *ctx;
     ssize_t (*recv)(int fd, uint8_t *buf, size_t len);
     ssize_t (*send)(int fd, const uint8_t *buf, size_t len);
+
+    /* Transport-layer encryption state */
+    enc_state_t enc_state;
+    uint8_t enc_ephemeral_priv[32];
+    uint8_t enc_ephemeral_pub[32];
+    uint8_t enc_send_key[32];
+    uint8_t enc_recv_key[32];
+    uint64_t enc_send_nonce;
+    uint64_t enc_recv_nonce;
+    uint8_t enc_session_id[8];
+    int enc_is_initiator;
 };
 
 ssize_t TRANSPORT__recv(IN int fd, OUT uint8_t *buf, IN size_t len);
@@ -41,5 +58,7 @@ uint32_t TRANSPORT__get_node_id(IN transport_t *t);
 void TRANSPORT__set_node_id(IN transport_t *t, IN uint32_t node_id);
 
 err_t TRANSPORT__send_to_node_id(IN network_t *net, IN uint32_t node_id, IN const protocol_msg_t *msg, IN const uint8_t *data);
+
+err_t TRANSPORT__do_handshake(IN transport_t *t, IN int is_initiator);
 
 #endif /* #ifndef GANON_TRANSPORT_H */

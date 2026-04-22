@@ -483,7 +483,7 @@ static void *src_accept_thread(void *arg) {
         p.conn_id     = htonl(conn_id);
         p.remote_port = htons(tunnel->remote_port);
         p.protocol    = tunnel->protocol;
-        strncpy(p.remote_host, tunnel->remote_host, sizeof(p.remote_host) - 1);
+        snprintf(p.remote_host, sizeof(p.remote_host), "%s", tunnel->remote_host);
 
         /* Use conn_id as channel_id for per-connection isolation in load balancer */
         tunnel_send(tunnel->dst_node_id, MSG__TUNNEL_CONN_OPEN, conn_id,
@@ -550,7 +550,7 @@ static udp_client_t* udp_find_or_create_client(udp_ctx_t *ctx, struct sockaddr_i
             p.conn_id     = htonl(*conn_id_out);
             p.remote_port = htons(ctx->tunnel->remote_port);
             p.protocol    = ctx->tunnel->protocol;
-            strncpy(p.remote_host, ctx->tunnel->remote_host, sizeof(p.remote_host) - 1);
+            snprintf(p.remote_host, sizeof(p.remote_host), "%s", ctx->tunnel->remote_host);
             tunnel_send(ctx->tunnel->dst_node_id, MSG__TUNNEL_CONN_OPEN, *conn_id_out,
                         (uint8_t *)&p, sizeof(p));
             LOG_INFO("TUNNEL %u conn %u: UDP client %s:%u added",
@@ -697,8 +697,8 @@ static void handle_tunnel_open(uint32_t src_node_id, const uint8_t *data, size_t
     tunnel->src_port    = src_port;
     tunnel->remote_port = remote_port;
     tunnel->protocol    = protocol;
-    strncpy(tunnel->src_host,    p->src_host,    sizeof(tunnel->src_host)    - 1);
-    strncpy(tunnel->remote_host, p->remote_host, sizeof(tunnel->remote_host) - 1);
+    snprintf(tunnel->src_host,    sizeof(tunnel->src_host),    "%s", p->src_host);
+    snprintf(tunnel->remote_host, sizeof(tunnel->remote_host), "%s", p->remote_host);
 
     /* Determine socket type based on protocol */
     int sock_type = (TUNNEL_PROTO_UDP == protocol) ? SOCK_DGRAM : SOCK_STREAM;

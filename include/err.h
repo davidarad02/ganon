@@ -45,6 +45,11 @@ typedef enum {
     E__ROUTING__NODE_NOT_FOUND = 0x501,
     E__ROUTING__TABLE_FULL,
     E__ROUTING__INVALID_ARG,
+
+    /* crypto (transport-layer encryption) */
+    E__CRYPTO__HANDSHAKE_FAILED = 0x601,
+    E__CRYPTO__DECRYPT_FAILED,
+    E__CRYPTO__REPLAY_DETECTED,
 } err_t;
 
 #endif /* #ifndef GANON_ERR_H */

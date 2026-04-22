@@ -235,8 +235,8 @@ static void ROUTING__local_dispatch(IN transport_t *t, IN const protocol_msg_t *
 
     if (MSG__RREQ == type) {
         if (orig_src != (uint32_t)g_node_id && data_len >= sizeof(uint32_t)) {
-            uint32_t target_node_id = ntohl(*(uint32_t *)data);
-            LOG_TRACE("ROUTING: Forwarding RREQ for %u from %u", target_node_id, orig_src);
+            LOG_TRACE("ROUTING: Forwarding RREQ for %u from %u",
+                      ntohl(*(uint32_t *)data), orig_src);
         }
         if (dst == 0) {
             ROUTING__broadcast(g_rt, src, (uint32_t)g_node_id, msg, data);
