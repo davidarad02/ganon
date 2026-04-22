@@ -547,4 +547,111 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Fix ping timeout when no route exists - C server: flush buffered messages when RREP establishes route; Python client: buffer messages and trigger RREQ when no route, flush when RREP arrives
 - [x] Add optional packet reordering/buffering - CLI flag `--reorder` and Python param `reorder=False` (default), packets processed immediately when disabled
 - [x] Fix multi-path routing deduplication - don't drop "duplicate" unicast messages at intermediate nodes, only drop broadcast duplicates
+- [x] Fix tunnel duplicate connection creation - check if connection already exists before creating new one (prevents duplicate connections with multi-path routing)
+- [x] Fix tunnel soft-close reuse - allow soft-closed tunnels to be recreated (check `is_soft_closed` flag in addition to `is_active`)
 - [ ] Add encryption at the transport layer
+
+## Known Bugs - Multi-Path Tunnel Race Conditions
+
+### Bug 1: Dedup logic collision between RREQ and TUNNEL_CONN_OPEN (PARTIALLY FIXED)
+
+**Symptom**: In multi-path environments (`--rr-count 2`), TUNNEL_CONN_OPEN messages are dropped as duplicates when they're actually new messages.
+
+**Root cause**: The dedup key in `ROUTING__is_msg_seen()` uses only `orig_src + msg_id`, not the message type. When node 30 sends both RREQ (type=2) and CONN_OPEN (type=9) with the same `orig_src=30, msg_id=4`, they collide.
+
+**Why it happens**: 
+1. Node 30 sends RREQ for route discovery (msg_id=4, type=2)
+2. Node 30 sends CONN_OPEN for tunnel (msg_id=4, type=9)
+3. Both have same orig_src and msg_id but different types
+4. Node 11 sees RREQ first, marks (30, 4) as seen
+5. Node 11 receives CONN_OPEN, incorrectly drops it as duplicate
+
+**Log evidence**:
+```
+Node 11: RECV msg: orig_src=30, msg_id=4, type=2 (RREQ) - marked as seen
+Node 11: RECV msg: orig_src=30, msg_id=4, type=9 (CONN_OPEN) 
+Node 11: Dropping unicast duplicate for us from 30 with ID 4 (type 9)
+```
+
+**Fix applied**: Added `type` field to `seen_msg_t` structure in `routing.c`. Updated `ROUTING__check_msg_seen_readonly()`, `ROUTING__mark_msg_seen()`, and `ROUTING__is_msg_seen()` to include type in comparison. Also updated dedup logic to only mark messages as seen when processing (broadcast or for us), not when forwarding.
+
+**Files modified**: `src/routing.c`
+
+**Status**: Code modified but NOT fully tested. Needs rebuild and testing without `-vv` flag.
+
+### Bug 2: Tunnel sends data before CONN_ACK is received (FIXED)
+
+**Symptom**: In multi-path environments, tunnel data is lost because TUNNEL_DATA arrives at destination before the connection is established.
+
+**Root cause**: The `fwd_thread_func` in `tunnel.c` starts reading from client socket and sending TUNNEL_DATA immediately after CONN_OPEN is sent, without waiting for CONN_ACK.
+
+**Why it happens**:
+1. Client connects to tunnel source (node 30)
+2. `handle_client_connection()` sends CONN_OPEN to destination (node 11)
+3. `fwd_thread_func()` starts immediately
+4. Thread reads data from client and sends TUNNEL_DATA
+5. CONN_OPEN and TUNNEL_DATA arrive at node 11 almost simultaneously
+6. Node 11 hasn't finished processing CONN_OPEN yet
+7. TUNNEL_DATA arrives, connection doesn't exist yet
+8. Node 11 drops data: "TUNNEL X conn Y: data for unknown connection, dropping"
+9. Node 11 finishes CONN_OPEN processing, connects to destination
+10. But data was already lost
+
+**Log evidence**:
+```
+Node 30: SEND CONN_OPEN (msg_id=4, type=9)
+Node 30: SEND TUNNEL_DATA (msg_id=5, type=11)  <- 25 microseconds later!
+Node 11: RECV TUNNEL_DATA, "data for unknown connection, dropping"
+Node 11: connected to 127.0.0.1:9000  <- too late
+```
+
+**Why `-vv` masks it**: Extra logging I/O adds delays, so CONN_ACK/data timing changes enough that it works by luck.
+
+**Fix implemented** (`src/tunnel.c`):
+- Added `volatile int ack_received` to `src_conn_t`; zeroed when slot is allocated.
+- Added `volatile int *p_ack_received` to `fwd_ctx_t`; set to `&conn->ack_received` for src-side fwd threads, `NULL` for dst-side threads.
+- Added module-level `pthread_cond_t g_ack_cond` (shared with `g_tunnel_mutex`).
+- `fwd_thread_func`: if `p_ack_received != NULL`, waits up to 10 s on `g_ack_cond` for the flag to be set before entering the read/forward loop. On timeout or early shutdown, tears down the connection cleanly (with `p_slot_conn_id` re-check).
+- `handle_tunnel_conn_ack`: now locks `g_tunnel_mutex`, finds the matching `src_conn_t`, sets `ack_received = 1`, and broadcasts on `g_ack_cond`.
+- `handle_tunnel_conn_close`, `TUNNEL__handle_disconnect`, `TUNNEL__destroy`: each broadcasts on `g_ack_cond` so a waiting fwd thread wakes immediately instead of timing out.
+
+### Bug 4: UDP tunnel return-path broken (FIXED)
+
+**Symptom**: UDP tunnels forward data src→dst correctly, but replies from the remote UDP server never make it back to the client. TCP tunnels work end-to-end.
+
+**Root cause**: The destination-side UDP socket was created but never bound to a local port before the return-path reader (`fwd_thread_func`) started calling `recvfrom()`. The socket only got an ephemeral port later, when `handle_tunnel_data` called the first `sendto()`. Until that first outbound datagram, the kernel had no port to deliver inbound replies to, so return-path datagrams were dropped.
+
+**Why it happens**:
+1. `dst_connect_thread` creates a UDP socket (`socket(AF_INET, SOCK_DGRAM, 0)`)
+2. For UDP, the `connect()` call was skipped entirely (it was guarded by `if (TUNNEL_PROTO_UDP != protocol)`)
+3. `fwd_thread_func` is spawned and immediately enters `recvfrom()` on a socket with no local port
+4. The first `sendto()` from `handle_tunnel_data` auto-binds an ephemeral port, but replies that arrived before this are already lost
+5. Even after auto-bind, replies are only delivered if the source address exactly matches; without `connect()`, there is no peer filter
+
+**Fix implemented** (`src/tunnel.c`):
+- Removed the `TUNNEL_PROTO_UDP != protocol` guard around `connect()` in `dst_connect_thread` (line ~832). For UDP, `connect()` sends no packets — it only installs the remote peer address in the kernel and binds a local ephemeral port up-front.
+- Changed the UDP branch in `fwd_thread_func` to use plain `recv()` instead of `recvfrom()`, since the socket is now connected and the peer is fixed.
+- This ensures replies from the remote server are matched to this fd from the moment the thread starts, and ICMP errors are surfaced for debugging.
+
+**Files modified**: `src/tunnel.c`
+
+### Bug 3: Multi-path duplicate CONN_OPEN handling (ALREADY FIXED)
+
+**Symptom**: With `--rr-count 2`, CONN_OPEN arrives via both paths, creating duplicate connections.
+
+**Root cause**: `handle_tunnel_conn_open()` didn't check if connection already exists before creating new one.
+
+**Fix**: Already fixed in previous session - added `tunnel_find_conn_by_id()` check before creating connection.
+
+### Test Setup for Reproducing
+
+```
+Node 30: ./ganon 0.0.0.0 -p 11131 -i 30 --reconnect-retries always --rr-count 2 -vv
+Node 22: ./ganon 0.0.0.0 -p 11122 -c 127.0.0.1:11131 -i 22 --reconnect-retries always -vv
+Node 21: ./ganon 0.0.0.0 -p 11121 -c 127.0.0.1:11131 -i 21 --reconnect-retries always -vv
+Node 11: ./ganon 0.0.0.0 -p 11111 -c 127.0.0.1:11121,127.0.0.1:11122 -i 11 --reconnect-retries always --rr-count 2 -vv
+
+Python: c = GanonClient("127.0.0.1", 11111, 3); c.connect()
+        t = c.create_tunnel(30, 11, "127.0.0.1", 8000, "127.0.0.1", 9000, "tcp")
+        # Then: iperf3 -s -p 9000 & iperf3 -c 127.0.0.1 -p 8000 -t 10
+```

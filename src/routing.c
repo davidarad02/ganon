@@ -23,6 +23,7 @@ static pthread_mutex_t g_msg_id_mutex = PTHREAD_MUTEX_INITIALIZER;
 typedef struct {
     uint32_t orig_src;
     uint32_t msg_id;
+    uint32_t type;
 } seen_msg_t;
 static seen_msg_t g_seen_msgs[SEEN_CACHE_MAX];
 static size_t g_seen_msgs_idx = 0;
@@ -80,7 +81,7 @@ static void ROUTING__flush_pending(uint32_t dst) {
     pthread_mutex_unlock(&g_pending_mutex);
 }
 
-static err_t ROUTING__is_msg_seen(IN uint32_t orig_src, IN uint32_t msg_id, OUT int *seen) {
+static err_t ROUTING__check_msg_seen_readonly(IN uint32_t orig_src, IN uint32_t msg_id, IN uint32_t type, OUT int *seen) {
     err_t rc = E__SUCCESS;
 
     VALIDATE_ARGS(seen);
@@ -91,7 +92,48 @@ static err_t ROUTING__is_msg_seen(IN uint32_t orig_src, IN uint32_t msg_id, OUT 
     }
     
     for (size_t i = 0; i < SEEN_CACHE_MAX; i++) {
-        if (g_seen_msgs[i].orig_src == orig_src && g_seen_msgs[i].msg_id == msg_id) {
+        if (g_seen_msgs[i].orig_src == orig_src && g_seen_msgs[i].msg_id == msg_id && g_seen_msgs[i].type == type) {
+            *seen = 1;
+            break;
+        }
+    }
+    
+    pthread_mutex_unlock(&g_seen_mutex);
+
+l_cleanup:
+    return rc;
+}
+
+static err_t ROUTING__mark_msg_seen(IN uint32_t orig_src, IN uint32_t msg_id, IN uint32_t type) {
+    err_t rc = E__SUCCESS;
+
+    if (0 != pthread_mutex_lock(&g_seen_mutex)) {
+        FAIL(E__NET__THREAD_CREATE_FAILED);
+    }
+    
+    g_seen_msgs[g_seen_msgs_idx].orig_src = orig_src;
+    g_seen_msgs[g_seen_msgs_idx].msg_id = msg_id;
+    g_seen_msgs[g_seen_msgs_idx].type = type;
+    g_seen_msgs_idx = (g_seen_msgs_idx + 1) % SEEN_CACHE_MAX;
+    
+    pthread_mutex_unlock(&g_seen_mutex);
+
+l_cleanup:
+    return rc;
+}
+
+static err_t ROUTING__is_msg_seen(IN uint32_t orig_src, IN uint32_t msg_id, IN uint32_t type, OUT int *seen) {
+    err_t rc = E__SUCCESS;
+
+    VALIDATE_ARGS(seen);
+    *seen = 0;
+
+    if (0 != pthread_mutex_lock(&g_seen_mutex)) {
+        FAIL(E__NET__THREAD_CREATE_FAILED);
+    }
+    
+    for (size_t i = 0; i < SEEN_CACHE_MAX; i++) {
+        if (g_seen_msgs[i].orig_src == orig_src && g_seen_msgs[i].msg_id == msg_id && g_seen_msgs[i].type == type) {
             *seen = 1;
             pthread_mutex_unlock(&g_seen_mutex);
             goto l_cleanup;
@@ -99,6 +141,7 @@ static err_t ROUTING__is_msg_seen(IN uint32_t orig_src, IN uint32_t msg_id, OUT 
     }
     g_seen_msgs[g_seen_msgs_idx].orig_src = orig_src;
     g_seen_msgs[g_seen_msgs_idx].msg_id = msg_id;
+    g_seen_msgs[g_seen_msgs_idx].type = type;
     g_seen_msgs_idx = (g_seen_msgs_idx + 1) % SEEN_CACHE_MAX;
     
     pthread_mutex_unlock(&g_seen_mutex);
@@ -113,6 +156,7 @@ void ROUTING__clear_seen_for_node(IN uint32_t node_id) {
         if (g_seen_msgs[i].orig_src == node_id) {
             g_seen_msgs[i].orig_src = 0;
             g_seen_msgs[i].msg_id = 0;
+            g_seen_msgs[i].type = 0;
         }
     }
     pthread_mutex_unlock(&g_seen_mutex);
@@ -149,10 +193,11 @@ static err_t ROUTING__send_to_node_id(IN uint32_t node_id, IN const protocol_msg
     fwd_msg = *msg;
     fwd_msg.src_node_id = (uint32_t)g_node_id;
     if (fwd_msg.ttl <= 1) {
+        LOG_DEBUG("Dropping message to %u, TTL depleted", node_id);
         goto l_cleanup; // Depleted, drops passively
     }
     fwd_msg.ttl--;
-    
+
     rc = TRANSPORT__send_msg(t, &fwd_msg, data);
     FAIL_IF(E__SUCCESS != rc, rc);
 
@@ -268,14 +313,14 @@ void ROUTING__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN con
 
     if (MSG__NODE_INIT == type) {
         if (orig_src != src) {
-            rc = ROUTING__is_msg_seen(orig_src, msg->message_id, &seen);
+            rc = ROUTING__is_msg_seen(orig_src, msg->message_id, type, &seen);
             if (E__SUCCESS == rc && seen) {
                 return;
             }
         }
         ROUTING__clear_state_for_node(orig_src);
         int dummy;
-        ROUTING__is_msg_seen(orig_src, msg->message_id, &dummy);
+        ROUTING__is_msg_seen(orig_src, msg->message_id, type, &dummy);
 
         if (orig_src != (uint32_t)g_node_id && orig_src != src) {
             uint8_t hop_count = (uint8_t)(DEFAULT_TTL > ttl ? (DEFAULT_TTL - ttl) : 1);
@@ -314,7 +359,7 @@ void ROUTING__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN con
             rrep.ttl = DEFAULT_TTL - 1;
             LOG_INFO("ROUTING: RREQ for us from %u via %u - sending RREP directly on arrival path", orig_src, src);
             TRANSPORT__send_msg(t, &rrep, NULL);
-            ROUTING__is_msg_seen(orig_src, msg->message_id, &seen);
+            ROUTING__is_msg_seen(orig_src, msg->message_id, type, &seen);
             return;
         }
     }
@@ -325,8 +370,14 @@ void ROUTING__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN con
      * 
      * For unicast messages NOT destined for us (we're just forwarding),
      * we should NOT drop duplicates because load balancing may send the same
-     * message via multiple paths, and we need to forward each copy. */
-    rc = ROUTING__is_msg_seen(orig_src, msg->message_id, &seen);
+     * message via multiple paths, and we need to forward each copy.
+     *
+     * IMPORTANT: We use a read-only check first, and only mark as seen when
+     * we actually process the message (broadcast or for us). This prevents
+     * forwarded messages from polluting the seen cache and causing false
+     * duplicates when a different message with the same orig_src+msg_id
+     * arrives later destined for us. */
+    rc = ROUTING__check_msg_seen_readonly(orig_src, msg->message_id, type, &seen);
     if (E__SUCCESS == rc && seen) {
         if (0 == dst) {
             /* Broadcast: drop duplicate to prevent flooding */
@@ -339,6 +390,11 @@ void ROUTING__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN con
         }
         /* Unicast not for us: continue forwarding even if "duplicate" - 
          * this is normal for multi-path load balancing */
+    }
+    
+    /* Mark as seen only if we're processing (not just forwarding) */
+    if (0 == dst || dst == (uint32_t)g_node_id) {
+        ROUTING__mark_msg_seen(orig_src, msg->message_id, type);
     }
 
     if (orig_src != src) {
@@ -668,7 +724,7 @@ err_t ROUTING__send_rreq(IN uint32_t target_node_id) {
 
     target = htonl(target_node_id);
 
-    ROUTING__is_msg_seen((uint32_t)g_node_id, rreq_msg.message_id, &seen); 
+    ROUTING__is_msg_seen((uint32_t)g_node_id, rreq_msg.message_id, MSG__RREQ, &seen); 
     ROUTING__broadcast(g_rt, 0, (uint32_t)g_node_id, &rreq_msg, (const uint8_t *)&target);
 
     return rc;

@@ -61,6 +61,11 @@ typedef struct __attribute__((packed)) {
 
 /* ---- runtime state ---- */
 
+/* Forward declaration so src_tunnel_t can hold a udp_ctx_t* before the full
+ * definition appears below. */
+struct udp_ctx_t;
+typedef struct udp_ctx_t udp_ctx_t;
+
 typedef struct {
     int             fd;
     uint32_t        conn_id;
@@ -68,6 +73,7 @@ typedef struct {
     uint32_t        dst_node_id;
     volatile int    is_active;
     volatile int    is_stalled;  /* 1 = no route available, TCP backpressure applied */
+    volatile int    ack_received; /* 1 = TUNNEL_CONN_ACK received from dst node */
     pthread_t       fwd_thread;
 } src_conn_t;
 
@@ -84,6 +90,7 @@ typedef struct {
     volatile int    is_soft_closed;  /* 1 = soft closed (no new connections), 0 = normal */
     uint32_t        next_conn_id;
     pthread_t       accept_thread;
+    udp_ctx_t      *udp_ctx; /* NULL unless protocol == TUNNEL_PROTO_UDP */
     src_conn_t      conns[MAX_CONNS_PER_TUNNEL];
 } src_tunnel_t;
 
@@ -109,6 +116,7 @@ typedef struct {
     volatile int      *p_is_active;
     volatile uint32_t *p_slot_conn_id; /* points to conn->conn_id in the slot; used to
                                           detect slot reuse before doing fd cleanup */
+    volatile int      *p_ack_received; /* NULL for dst side; &conn->ack_received for src side */
     /* UDP-specific fields for destination-side forwarding */
     int                is_udp;
     struct sockaddr_in udp_remote_addr;
@@ -119,6 +127,16 @@ typedef struct {
     src_tunnel_t *tunnel;
 } accept_ctx_t;
 
+/* Pre-ACK packet queue for UDP clients */
+#define MAX_PRE_ACK_PACKETS 8
+#define MAX_PRE_ACK_DATA    2048
+
+typedef struct {
+    uint8_t  data[MAX_PRE_ACK_DATA];
+    uint32_t data_len;
+    int      valid;
+} pre_ack_packet_t;
+
 /* UDP client tracking - since UDP is connectionless, we track clients by address */
 typedef struct {
     struct sockaddr_in addr;
@@ -126,16 +144,19 @@ typedef struct {
     uint32_t conn_id;
     time_t last_activity;
     int is_active;
+    volatile int ack_received;  /* Set when CONN_ACK arrives */
+    pre_ack_packet_t pre_ack_queue[MAX_PRE_ACK_PACKETS];
+    int pre_ack_count;
 } udp_client_t;
 
 #define MAX_UDP_CLIENTS 64
 
-typedef struct {
+struct udp_ctx_t {
     src_tunnel_t *tunnel;
     int udp_fd;
     udp_client_t clients[MAX_UDP_CLIENTS];
     pthread_mutex_t clients_mutex;
-} udp_ctx_t;
+};
 
 /* Heap-allocated context for the per-connection dst-side setup thread, so that
  * handle_tunnel_conn_open can return immediately without blocking the recv thread. */
@@ -151,6 +172,7 @@ typedef struct {
 static src_tunnel_t g_src_tunnels[MAX_SRC_TUNNELS];
 static dst_conn_t   g_dst_conns[MAX_DST_CONNS];
 static pthread_mutex_t g_tunnel_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t  g_ack_cond     = PTHREAD_COND_INITIALIZER;
 static volatile int g_tunnel_running = 0;
 int g_tunnel_tcp_rcvbuf = 0;  /* TCP receive buffer size in bytes (0 = system default) */
 
@@ -204,13 +226,42 @@ static void *fwd_thread_func(void *arg) {
         return NULL;
     }
 
+    /* Src side: block until dst has registered its connection slot and sent CONN_ACK.
+     * Without this, TUNNEL_DATA can arrive at the dst before dst_connect_thread has
+     * stored the dconn entry, causing the data to be silently dropped. */
+    if (NULL != ctx->p_ack_received) {
+        struct timespec deadline;
+        clock_gettime(CLOCK_REALTIME, &deadline);
+        deadline.tv_sec += 10;
+        pthread_mutex_lock(&g_tunnel_mutex);
+        while (g_tunnel_running && *ctx->p_is_active && !*ctx->p_ack_received) {
+            int wrc = pthread_cond_timedwait(&g_ack_cond, &g_tunnel_mutex, &deadline);
+            if (ETIMEDOUT == wrc) break;
+        }
+        int got_ack = *ctx->p_ack_received;
+        pthread_mutex_unlock(&g_tunnel_mutex);
+        if (!got_ack) {
+            LOG_WARNING("TUNNEL %u conn %u: timed out waiting for CONN_ACK, closing",
+                        ctx->tunnel_id, ctx->conn_id);
+            pthread_mutex_lock(&g_tunnel_mutex);
+            if ((*ctx->p_is_active == 1 || *ctx->p_is_active == 2) &&
+                *ctx->p_slot_conn_id == ctx->conn_id) {
+                *ctx->p_is_active = 0;
+                close(ctx->fd);
+            }
+            pthread_mutex_unlock(&g_tunnel_mutex);
+            free(buf);
+            free(ctx);
+            return NULL;
+        }
+    }
+
     if (ctx->is_udp) {
-        /* UDP: Use recvfrom/sendto for connectionless datagrams */
+        /* UDP dst side: socket is connect()ed so we can use plain recv().
+         * The connected socket binds a local ephemeral port up-front, ensuring
+         * the kernel can deliver replies from the remote before any data is sent. */
         while (g_tunnel_running && *ctx->p_is_active) {
-            struct sockaddr_in from_addr;
-            socklen_t from_len = sizeof(from_addr);
-            ssize_t n = recvfrom(ctx->fd, buf + 8, TUNNEL_BUF_SIZE, 0,
-                                 (struct sockaddr *)&from_addr, &from_len);
+            ssize_t n = recv(ctx->fd, buf + 8, TUNNEL_BUF_SIZE, 0);
             if (n < 0) {
                 if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
                     continue;
@@ -400,11 +451,12 @@ static void *src_accept_thread(void *arg) {
         }
 
         uint32_t conn_id = ++tunnel->next_conn_id;
-        conn->fd          = client_fd;
-        conn->conn_id     = conn_id;
-        conn->tunnel_id   = tunnel->tunnel_id;
-        conn->dst_node_id = tunnel->dst_node_id;
-        conn->is_active   = 1;
+        conn->fd           = client_fd;
+        conn->conn_id      = conn_id;
+        conn->tunnel_id    = tunnel->tunnel_id;
+        conn->dst_node_id  = tunnel->dst_node_id;
+        conn->is_active    = 1;
+        conn->ack_received = 0;
         
         /* Set TCP receive buffer size for connection socket if configured */
         if (g_tunnel_tcp_rcvbuf > 0) {
@@ -444,6 +496,7 @@ static void *src_accept_thread(void *arg) {
         fwd->peer_node_id    = tunnel->dst_node_id;
         fwd->p_is_active     = &conn->is_active;
         fwd->p_slot_conn_id  = (volatile uint32_t *)&conn->conn_id;
+        fwd->p_ack_received  = &conn->ack_received;
 
         pthread_create(&conn->fwd_thread, NULL, fwd_thread_func, fwd);
         pthread_detach(conn->fwd_thread);
@@ -478,6 +531,9 @@ static udp_client_t* udp_find_or_create_client(udp_ctx_t *ctx, struct sockaddr_i
             ctx->clients[i].addr_len = addr_len;
             ctx->clients[i].conn_id = ++ctx->tunnel->next_conn_id;
             ctx->clients[i].last_activity = now;
+            ctx->clients[i].ack_received = 0;
+            ctx->clients[i].pre_ack_count = 0;
+            memset(ctx->clients[i].pre_ack_queue, 0, sizeof(ctx->clients[i].pre_ack_queue));
             *conn_id_out = ctx->clients[i].conn_id;
             
             /* Send TUNNEL_CONN_OPEN for this UDP "connection" */
@@ -535,7 +591,27 @@ static void *udp_recv_thread(void *arg) {
             continue;
         }
         
-        /* Forward UDP packet */
+        /* Check if ACK received - if not, queue the packet */
+        if (!client->ack_received) {
+            if (client->pre_ack_count < MAX_PRE_ACK_PACKETS) {
+                pre_ack_packet_t *pkt = &client->pre_ack_queue[client->pre_ack_count];
+                if ((uint32_t)n <= MAX_PRE_ACK_DATA) {
+                    memcpy(pkt->data, buf + 8, n);
+                    pkt->data_len = (uint32_t)n;
+                    pkt->valid = 1;
+                    client->pre_ack_count++;
+                    LOG_TRACE("TUNNEL %u conn %u: queued pre-ACK UDP packet (%d/%d)",
+                              ctx->tunnel->tunnel_id, conn_id,
+                              client->pre_ack_count, MAX_PRE_ACK_PACKETS);
+                }
+            } else {
+                LOG_WARNING("TUNNEL %u conn %u: pre-ACK queue full, dropping packet",
+                            ctx->tunnel->tunnel_id, conn_id);
+            }
+            continue;
+        }
+        
+        /* ACK received - forward UDP packet immediately */
         uint32_t tid = htonl(ctx->tunnel->tunnel_id);
         uint32_t cid = htonl(conn_id);
         memcpy(buf, &tid, 4);
@@ -584,9 +660,10 @@ static void handle_tunnel_open(uint32_t src_node_id, const uint8_t *data, size_t
 
     pthread_mutex_lock(&g_tunnel_mutex);
 
-    /* Reject duplicate tunnel IDs */
+    /* Reject duplicate tunnel IDs (but allow reuse of soft-closed tunnels) */
     for (int i = 0; i < MAX_SRC_TUNNELS; i++) {
-        if (g_src_tunnels[i].is_active && g_src_tunnels[i].tunnel_id == tunnel_id) {
+        if (g_src_tunnels[i].is_active && !g_src_tunnels[i].is_soft_closed && 
+            g_src_tunnels[i].tunnel_id == tunnel_id) {
             pthread_mutex_unlock(&g_tunnel_mutex);
             LOG_WARNING("TUNNEL %u: already exists", tunnel_id);
             return;
@@ -595,7 +672,8 @@ static void handle_tunnel_open(uint32_t src_node_id, const uint8_t *data, size_t
 
     src_tunnel_t *tunnel = NULL;
     for (int i = 0; i < MAX_SRC_TUNNELS; i++) {
-        if (!g_src_tunnels[i].is_active) {
+        /* Allow reuse of inactive or soft-closed tunnels */
+        if (!g_src_tunnels[i].is_active || g_src_tunnels[i].is_soft_closed) {
             tunnel = &g_src_tunnels[i];
             break;
         }
@@ -680,6 +758,7 @@ static void handle_tunnel_open(uint32_t src_node_id, const uint8_t *data, size_t
         udp_ctx->udp_fd = listen_fd;
         memset(udp_ctx->clients, 0, sizeof(udp_ctx->clients));
         pthread_mutex_init(&udp_ctx->clients_mutex, NULL);
+        tunnel->udp_ctx = udp_ctx;
         pthread_create(&tunnel->accept_thread, NULL, udp_recv_thread, udp_ctx);
         pthread_detach(tunnel->accept_thread);
     } else {
@@ -747,15 +826,16 @@ static void *dst_connect_thread(void *arg) {
     socklen_t udp_remote_addr_len = res->ai_addrlen;
     memcpy(&udp_remote_addr, res->ai_addr, sizeof(udp_remote_addr));
 
-    if (TUNNEL_PROTO_UDP != protocol) {
-        /* TCP: use connect() to establish connection */
-        if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
-            freeaddrinfo(res);
-            close(fd);
-            LOG_ERROR("TUNNEL %u conn %u: connect() to %s:%u failed: %s",
-                      tunnel_id, conn_id, remote_host, remote_port, strerror(errno));
-            return NULL;
-        }
+    /* TCP: connect() establishes the stream connection.
+     * UDP: connect() just installs the remote peer address in the kernel — no packets
+     * are sent — but it binds the local ephemeral port up-front so that recvfrom in
+     * fwd_thread_func can receive reply datagrams from the moment the thread starts. */
+    if (connect(fd, res->ai_addr, res->ai_addrlen) < 0) {
+        freeaddrinfo(res);
+        close(fd);
+        LOG_ERROR("TUNNEL %u conn %u: connect() to %s:%u failed: %s",
+                  tunnel_id, conn_id, remote_host, remote_port, strerror(errno));
+        return NULL;
     }
     freeaddrinfo(res);
 
@@ -765,6 +845,19 @@ static void *dst_connect_thread(void *arg) {
     }
 
     pthread_mutex_lock(&g_tunnel_mutex);
+    
+    /* Check if connection already exists (duplicate TUNNEL_CONN_OPEN via multi-path) */
+    for (int i = 0; i < MAX_DST_CONNS; i++) {
+        if (g_dst_conns[i].is_active &&
+            g_dst_conns[i].tunnel_id == tunnel_id &&
+            g_dst_conns[i].conn_id == conn_id) {
+            pthread_mutex_unlock(&g_tunnel_mutex);
+            close(fd);
+            LOG_INFO("TUNNEL %u conn %u: duplicate CONN_OPEN received, ignoring", tunnel_id, conn_id);
+            return NULL;
+        }
+    }
+    
     dst_conn_t *dconn = NULL;
     for (int i = 0; i < MAX_DST_CONNS; i++) {
         if (!g_dst_conns[i].is_active) {
@@ -810,6 +903,7 @@ static void *dst_connect_thread(void *arg) {
     fwd->peer_node_id           = src_node_id;
     fwd->p_is_active            = &dconn->is_active;
     fwd->p_slot_conn_id         = (volatile uint32_t *)&dconn->conn_id;
+    fwd->p_ack_received         = NULL; /* dst side never waits for ACK */
     fwd->is_udp                 = (TUNNEL_PROTO_UDP == protocol);
     fwd->udp_remote_addr        = udp_remote_addr;
     fwd->udp_remote_addr_len    = udp_remote_addr_len;
@@ -853,7 +947,76 @@ static void handle_tunnel_conn_ack(const uint8_t *data, size_t data_len) {
     }
     uint32_t tunnel_id = ntohl(*(const uint32_t *)data);
     uint32_t conn_id   = ntohl(*(const uint32_t *)(data + 4));
-    LOG_INFO("TUNNEL %u conn %u: dst node confirmed connection", tunnel_id, conn_id);
+
+    pthread_mutex_lock(&g_tunnel_mutex);
+    for (int i = 0; i < MAX_SRC_TUNNELS; i++) {
+        if (!g_src_tunnels[i].is_active || g_src_tunnels[i].tunnel_id != tunnel_id) {
+            continue;
+        }
+        
+        /* Handle TCP connections */
+        for (int j = 0; j < MAX_CONNS_PER_TUNNEL; j++) {
+            if (g_src_tunnels[i].conns[j].is_active &&
+                g_src_tunnels[i].conns[j].conn_id == conn_id) {
+                g_src_tunnels[i].conns[j].ack_received = 1;
+                pthread_cond_broadcast(&g_ack_cond);
+                pthread_mutex_unlock(&g_tunnel_mutex);
+                LOG_INFO("TUNNEL %u conn %u: dst node confirmed connection", tunnel_id, conn_id);
+                return;
+            }
+        }
+        
+        /* Handle UDP clients */
+        if (NULL != g_src_tunnels[i].udp_ctx) {
+            udp_ctx_t *uctx = g_src_tunnels[i].udp_ctx;
+            pthread_mutex_lock(&uctx->clients_mutex);
+            for (int j = 0; j < MAX_UDP_CLIENTS; j++) {
+                if (uctx->clients[j].is_active && uctx->clients[j].conn_id == conn_id) {
+                    uctx->clients[j].ack_received = 1;
+                    LOG_INFO("TUNNEL %u conn %u: dst node confirmed UDP connection (%d queued packets to flush)",
+                             tunnel_id, conn_id, uctx->clients[j].pre_ack_count);
+                    
+                    /* Flush queued pre-ACK packets */
+                    LOG_INFO("TUNNEL %u conn %u: starting flush of %d packets",
+                             tunnel_id, conn_id, uctx->clients[j].pre_ack_count);
+                    for (int k = 0; k < uctx->clients[j].pre_ack_count; k++) {
+                        pre_ack_packet_t *pkt = &uctx->clients[j].pre_ack_queue[k];
+                        LOG_TRACE("TUNNEL %u conn %u: packet %d - valid=%d, len=%u",
+                                 tunnel_id, conn_id, k, pkt->valid, pkt->data_len);
+                        if (pkt->valid && pkt->data_len > 0) {
+                            /* Build the packet with tunnel_id and conn_id header */
+                            uint8_t buf[TUNNEL_BUF_SIZE + 8];
+                            uint32_t tid = htonl(tunnel_id);
+                            uint32_t cid = htonl(conn_id);
+                            memcpy(buf, &tid, 4);
+                            memcpy(buf + 4, &cid, 4);
+                            memcpy(buf + 8, pkt->data, pkt->data_len);
+                            
+                            err_t send_rc = tunnel_send(g_src_tunnels[i].dst_node_id, MSG__TUNNEL_DATA, conn_id,
+                                        buf, pkt->data_len + 8);
+                            if (E__SUCCESS != send_rc) {
+                                LOG_WARNING("TUNNEL %u conn %u: failed to flush pre-ACK packet %d/%d (rc=%d)",
+                                            tunnel_id, conn_id, k+1, uctx->clients[j].pre_ack_count, send_rc);
+                            } else {
+                                LOG_TRACE("TUNNEL %u conn %u: flushed pre-ACK packet %d/%d (%u bytes)",
+                                          tunnel_id, conn_id, k+1, uctx->clients[j].pre_ack_count, pkt->data_len);
+                            }
+                            pkt->valid = 0;
+                        }
+                    }
+                    uctx->clients[j].pre_ack_count = 0;
+                    
+                    pthread_mutex_unlock(&uctx->clients_mutex);
+                    pthread_mutex_unlock(&g_tunnel_mutex);
+                    return;
+                }
+            }
+            pthread_mutex_unlock(&uctx->clients_mutex);
+        }
+        break;
+    }
+    pthread_mutex_unlock(&g_tunnel_mutex);
+    LOG_WARNING("TUNNEL %u conn %u: CONN_ACK for unknown connection", tunnel_id, conn_id);
 }
 
 static void handle_tunnel_data(const uint8_t *data, size_t data_len) {
@@ -879,13 +1042,26 @@ static void handle_tunnel_data(const uint8_t *data, size_t data_len) {
         }
         /* Check if this is a UDP tunnel - need to find client by conn_id */
         if (TUNNEL_PROTO_UDP == g_src_tunnels[i].protocol) {
-            /* For UDP, we need the tunnel fd and will look up client later */
             fd = g_src_tunnels[i].listen_fd;
             is_udp = 1;
-            /* Note: UDP source tracking would require additional state per client.
-             * For now, UDP tunnels work best when the destination initiates the "connection" 
-             * via the tunnel mechanism. Bidirectional UDP requires maintaining client state. */
-            found = 1;
+            /* Look up the UDP client by conn_id to get its address for sendto() */
+            if (NULL != g_src_tunnels[i].udp_ctx) {
+                pthread_mutex_lock(&g_src_tunnels[i].udp_ctx->clients_mutex);
+                for (int k = 0; k < MAX_UDP_CLIENTS; k++) {
+                    if (g_src_tunnels[i].udp_ctx->clients[k].is_active &&
+                        g_src_tunnels[i].udp_ctx->clients[k].conn_id == conn_id) {
+                        memcpy(&udp_addr, &g_src_tunnels[i].udp_ctx->clients[k].addr,
+                               sizeof(udp_addr));
+                        udp_addr_len = g_src_tunnels[i].udp_ctx->clients[k].addr_len;
+                        found = 1;
+                        break;
+                    }
+                }
+                pthread_mutex_unlock(&g_src_tunnels[i].udp_ctx->clients_mutex);
+            }
+            if (!found) {
+                LOG_DEBUG("TUNNEL %u conn %u: UDP client not found for response", tunnel_id, conn_id);
+            }
             break;
         }
         for (int j = 0; j < MAX_CONNS_PER_TUNNEL; j++) {
@@ -939,6 +1115,9 @@ static void handle_tunnel_data(const uint8_t *data, size_t data_len) {
             if (EAGAIN == errno || EWOULDBLOCK == errno) {
                 LOG_DEBUG("TUNNEL %u conn %u: remote socket buffer full, dropping %zu bytes",
                           tunnel_id, conn_id, remaining);
+            } else {
+                LOG_WARNING("TUNNEL %u conn %u: send failed: %s",
+                            tunnel_id, conn_id, strerror(errno));
             }
             break;
         }
@@ -983,6 +1162,7 @@ static void handle_tunnel_conn_close(const uint8_t *data, size_t data_len) {
         }
     }
 
+    pthread_cond_broadcast(&g_ack_cond); /* wake any fwd thread still waiting for ACK */
     pthread_mutex_unlock(&g_tunnel_mutex);
     LOG_INFO("TUNNEL %u conn %u: closed by peer", tunnel_id, conn_id);
 }
@@ -1075,6 +1255,7 @@ void TUNNEL__destroy(void) {
         }
     }
 
+    pthread_cond_broadcast(&g_ack_cond); /* wake any fwd threads still waiting for ACK */
     pthread_mutex_unlock(&g_tunnel_mutex);
 }
 
@@ -1143,5 +1324,6 @@ void TUNNEL__handle_disconnect(IN uint32_t node_id) {
                  g_src_tunnels[i].tunnel_id, node_id);
     }
 
+    pthread_cond_broadcast(&g_ack_cond); /* wake any fwd threads still waiting for ACK */
     pthread_mutex_unlock(&g_tunnel_mutex);
 }
