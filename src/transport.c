@@ -222,6 +222,7 @@ err_t TRANSPORT__do_handshake(IN transport_t *t, IN int is_initiator) {
     err_t rc = E__SUCCESS;
     uint8_t peer_pub[32];
     uint8_t shared[32];
+    ssize_t dummy;
 
     VALIDATE_ARGS(t);
 
@@ -239,11 +240,11 @@ err_t TRANSPORT__do_handshake(IN transport_t *t, IN int is_initiator) {
         FAIL_IF(E__SUCCESS != rc, rc);
 
         /* Receive peer pubkey */
-        rc = TRANSPORT__recv_all(t, peer_pub, 32, NULL);
+        rc = TRANSPORT__recv_all(t, peer_pub, 32, &dummy);
         FAIL_IF(E__SUCCESS != rc, rc);
     } else {
         /* Receive peer pubkey */
-        rc = TRANSPORT__recv_all(t, peer_pub, 32, NULL);
+        rc = TRANSPORT__recv_all(t, peer_pub, 32, &dummy);
         FAIL_IF(E__SUCCESS != rc, rc);
 
         /* Send our pubkey */
@@ -278,13 +279,14 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
     uint32_t frame_len = 0;
     uint8_t *frame = NULL;
     uint8_t *plaintext = NULL;
+    ssize_t dummy;
 
     VALIDATE_ARGS(t, msg, data);
 
     *data = NULL;
 
-    /* Read length-prefixed encrypted frame */
-    rc = TRANSPORT__recv_all(t, len_buf, 4, NULL);
+    /* Read 4-byte length prefix */
+    rc = TRANSPORT__recv_all(t, len_buf, 4, &dummy);
     FAIL_IF(E__SUCCESS != rc, rc);
 
     frame_len = ((uint32_t)len_buf[0] << 24) |
@@ -292,7 +294,8 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
                 ((uint32_t)len_buf[2] <<  8) |
                 ((uint32_t)len_buf[3]);
 
-    if (frame_len < ENC_FRAME_OVERHEAD || frame_len > 200000) {
+    /* frame_len is payload after length prefix: nonce(24) + mac(16) + ciphertext(N) */
+    if (frame_len < (ENC_NONCE_SIZE + ENC_MAC_SIZE) || frame_len > 200000) {
         LOG_WARNING("Invalid encrypted frame length: %u on fd=%d", frame_len, t->fd);
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
@@ -302,7 +305,7 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
 
-    rc = TRANSPORT__recv_all(t, frame, frame_len, NULL);
+    rc = TRANSPORT__recv_all(t, frame, frame_len, &dummy);
     if (E__SUCCESS != rc) {
         FREE(frame);
         goto l_cleanup;
@@ -312,7 +315,7 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
     uint8_t *nonce = frame;
     uint8_t *mac = frame + ENC_NONCE_SIZE;
     uint8_t *ciphertext = frame + ENC_NONCE_SIZE + ENC_MAC_SIZE;
-    size_t ciphertext_len = frame_len - ENC_FRAME_OVERHEAD + 4;
+    size_t ciphertext_len = frame_len - ENC_NONCE_SIZE - ENC_MAC_SIZE;
 
     /* Verify nonce: must exactly match expected counter */
     uint64_t recv_counter = (uint64_t)nonce[0] |
@@ -402,15 +405,16 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
 
     /* Encrypt into frame: length(4) || nonce(24) || mac(16) || ciphertext(N) */
     size_t ciphertext_len = bytes_written;
-    size_t frame_len = 4 + ENC_NONCE_SIZE + ENC_MAC_SIZE + ciphertext_len;
+    size_t payload_len = ENC_NONCE_SIZE + ENC_MAC_SIZE + ciphertext_len;
+    size_t total_len = 4 + payload_len;
 
-    frame = malloc(frame_len);
+    frame = malloc(total_len);
     if (NULL == frame) {
         if (plain_heap) FREE(plain_buf);
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
 
-    uint32_t net_len = htonl((uint32_t)frame_len);
+    uint32_t net_len = htonl((uint32_t)payload_len);
     memcpy(frame, &net_len, 4);
 
     uint8_t *nonce = frame + 4;
@@ -425,7 +429,7 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
 
     if (plain_heap) FREE(plain_buf);
 
-    rc = TRANSPORT__send_all(t, frame, frame_len, NULL);
+    rc = TRANSPORT__send_all(t, frame, total_len, NULL);
     FREE(frame);
     FAIL_IF(E__SUCCESS != rc, rc);
 
