@@ -20,7 +20,7 @@
 #define MAX_SRC_TUNNELS      32
 #define MAX_CONNS_PER_TUNNEL 64
 #define MAX_DST_CONNS        512
-#define TUNNEL_BUF_SIZE      65536
+#define TUNNEL_BUF_SIZE      131072
 
 #define TUNNEL_PROTO_TCP 0
 #define TUNNEL_PROTO_UDP 1
@@ -1000,7 +1000,7 @@ static void handle_tunnel_conn_ack(const uint8_t *data, size_t data_len) {
                                  tunnel_id, conn_id, k, pkt->valid, pkt->data_len);
                         if (pkt->valid && pkt->data_len > 0) {
                             /* Build the packet with tunnel_id and conn_id header */
-                            uint8_t buf[TUNNEL_BUF_SIZE + 8];
+                            uint8_t buf[MAX_PRE_ACK_DATA + 8];
                             uint32_t tid = htonl(tunnel_id);
                             uint32_t cid = htonl(conn_id);
                             memcpy(buf, &tid, 4);

@@ -13,9 +13,17 @@
 #include "transport.h"
 #include "monocypher.h"
 
+#ifdef USE_LIBSODIUM
+#include <sodium.h>
+#endif
+
 /* Stack buffer size for TRANSPORT__send_msg to avoid malloc on the hot path.
- * Must be >= TUNNEL_BUF_SIZE (65536) + tunnel header (8) + protocol header (32). */
-#define TRANSPORT_SEND_STACK_SIZE 65792
+ * Must be >= TUNNEL_BUF_SIZE (131072) + tunnel header (8) + protocol header (32). */
+#define TRANSPORT_SEND_STACK_SIZE 131328
+
+/* Stack buffer size for TRANSPORT__recv_msg to avoid malloc on the hot path.
+ * Must be >= max expected encrypted frame for a single message. */
+#define TRANSPORT_RECV_STACK_SIZE 131400
 
 /* Encryption frame overhead: 4 (length) + 24 (nonce) + 16 (MAC) = 44 bytes */
 #define ENC_FRAME_OVERHEAD 44
@@ -264,14 +272,18 @@ err_t TRANSPORT__do_handshake(IN transport_t *t, IN int is_initiator) {
     t->enc_recv_nonce = 0;
     t->enc_state = ENC__ESTABLISHED;
 
+#ifndef USE_LIBSODIUM
     /* Precompute XChaCha20 subkeys.  Our nonces always have 16 zero bytes
      * in the first half, so crypto_chacha20_h() produces the same subkey
-     * for every message.  Caching it avoids 20 ChaCha20 rounds per frame. */
+     * for every message.  Caching it avoids 20 ChaCha20 rounds per frame.
+     * libsodium's high-level AEAD handles subkey derivation internally in
+     * optimized assembly, so we skip this when libsodium is available. */
     {
         uint8_t zero_nonce_prefix[16] = {0};
         crypto_chacha20_h(t->enc_send_subkey, t->enc_send_key, zero_nonce_prefix);
         crypto_chacha20_h(t->enc_recv_subkey, t->enc_recv_key, zero_nonce_prefix);
     }
+#endif
 
     LOG_DEBUG("Encryption handshake complete on fd=%d (session_id=%02x%02x%02x%02x)",
               t->fd, t->enc_session_id[0], t->enc_session_id[1],
@@ -304,19 +316,25 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
                 ((uint32_t)len_buf[3]);
 
     /* frame_len is payload after length prefix: nonce(24) + mac(16) + ciphertext(N) */
-    if (frame_len < (ENC_NONCE_SIZE + ENC_MAC_SIZE) || frame_len > 200000) {
+    if (frame_len < (ENC_NONCE_SIZE + ENC_MAC_SIZE) || frame_len > 300000) {
         LOG_WARNING("Invalid encrypted frame length: %u on fd=%d", frame_len, t->fd);
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 
-    frame = malloc(frame_len);
-    if (NULL == frame) {
-        FAIL(E__INVALID_ARG_NULL_POINTER);
+    uint8_t frame_stack[TRANSPORT_RECV_STACK_SIZE];
+    int frame_heap = (frame_len > TRANSPORT_RECV_STACK_SIZE);
+    if (frame_heap) {
+        frame = malloc(frame_len);
+        if (NULL == frame) {
+            FAIL(E__INVALID_ARG_NULL_POINTER);
+        }
+    } else {
+        frame = frame_stack;
     }
 
     rc = TRANSPORT__recv_all(t, frame, frame_len, &dummy);
     if (E__SUCCESS != rc) {
-        FREE(frame);
+        if (frame_heap) FREE(frame);
         goto l_cleanup;
     }
 
@@ -340,17 +358,33 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
         LOG_WARNING("Replay detected on fd=%d: expected nonce %llu, got %llu",
                     t->fd, (unsigned long long)t->enc_recv_nonce,
                     (unsigned long long)recv_counter);
-        FREE(frame);
+        if (frame_heap) FREE(frame);
         FAIL(E__CRYPTO__REPLAY_DETECTED);
     }
     t->enc_recv_nonce++;
 
-    plaintext = malloc(ciphertext_len);
-    if (NULL == plaintext) {
-        FREE(frame);
-        FAIL(E__INVALID_ARG_NULL_POINTER);
+    uint8_t plaintext_stack[TRANSPORT_RECV_STACK_SIZE];
+    int plaintext_heap = (ciphertext_len > TRANSPORT_RECV_STACK_SIZE);
+    if (plaintext_heap) {
+        plaintext = malloc(ciphertext_len);
+        if (NULL == plaintext) {
+            if (frame_heap) FREE(frame);
+            FAIL(E__INVALID_ARG_NULL_POINTER);
+        }
+    } else {
+        plaintext = plaintext_stack;
     }
 
+#ifdef USE_LIBSODIUM
+    if (0 != crypto_aead_xchacha20poly1305_ietf_decrypt_detached(
+            plaintext, NULL, ciphertext, ciphertext_len, mac,
+            NULL, 0, nonce, t->enc_recv_key)) {
+        LOG_WARNING("Decryption failed on fd=%d", t->fd);
+        if (frame_heap) FREE(frame);
+        if (plaintext_heap) FREE(plaintext);
+        FAIL(E__CRYPTO__DECRYPT_FAILED);
+    }
+#else
     /* Use a local DJB context with the cached subkey.  This is exactly
      * what crypto_aead_unlock() does internally, minus the redundant
      * crypto_chacha20_h() call (our nonce prefix is always 16 zeros). */
@@ -362,19 +396,20 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
         if (0 != crypto_aead_read(&ctx, plaintext, mac,
                                   NULL, 0, ciphertext, ciphertext_len)) {
             LOG_WARNING("Decryption failed on fd=%d", t->fd);
-            FREE(frame);
-            FREE(plaintext);
+            if (frame_heap) FREE(frame);
+            if (plaintext_heap) FREE(plaintext);
             FAIL(E__CRYPTO__DECRYPT_FAILED);
         }
     }
+#endif
 
-    FREE(frame);
+    if (frame_heap) FREE(frame);
 
     size_t unserialize_data_len = 0;
     rc = PROTOCOL__unserialize(plaintext, ciphertext_len, msg, data, &unserialize_data_len);
     if (E__SUCCESS != rc) {
         LOG_WARNING("Failed to unserialize decrypted message from fd %d", t->fd);
-        FREE(plaintext);
+        if (plaintext_heap) FREE(plaintext);
         goto l_cleanup;
     }
 
@@ -382,7 +417,7 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
               msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
               msg->message_id, msg->type, msg->data_length, msg->ttl, msg->channel_id, t->fd);
 
-    FREE(plaintext);
+    if (plaintext_heap) FREE(plaintext);
 l_cleanup:
     return rc;
 }
@@ -442,6 +477,12 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
     build_nonce(nonce, t->enc_send_nonce);
     t->enc_send_nonce++;
 
+#ifdef USE_LIBSODIUM
+    crypto_aead_xchacha20poly1305_ietf_encrypt_detached(
+        ciphertext, mac, NULL,
+        plain_buf, bytes_written,
+        NULL, 0, NULL, nonce, t->enc_send_key);
+#else
     /* Use a local DJB context with the cached subkey.  This is exactly
      * what crypto_aead_lock() does internally, minus the redundant
      * crypto_chacha20_h() call (our nonce prefix is always 16 zeros). */
@@ -453,6 +494,7 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
         crypto_aead_write(&ctx, ciphertext, mac, NULL, 0,
                           plain_buf, bytes_written);
     }
+#endif
 
     if (plain_heap) FREE(plain_buf);
 

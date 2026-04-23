@@ -4,3 +4,14 @@ bin/
 build-*/
 cmake-build-debug/
 venv/logs/
+
+# third_party build artifacts (source is vendored, builds are generated)
+third_party/libsodium-install/
+third_party/libsodium/config.log
+third_party/libsodium/config.status
+third_party/libsodium/Makefile
+third_party/libsodium/src/libsodium/include/sodium/version.h
+third_party/libsodium/*.pc
+third_party/libsodium/src/Makefile
+third_party/libsodium/src/libsodium/Makefile
+third_party/libsodium/libtool

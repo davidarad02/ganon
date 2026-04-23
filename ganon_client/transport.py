@@ -125,7 +125,7 @@ class Transport:
 
         payload_len = struct.unpack(">I", len_bytes)[0]
         min_payload = self._NONCE_SIZE + self._TAG_SIZE
-        if payload_len < min_payload or payload_len > 200_000:
+        if payload_len < min_payload or payload_len > 300_000:
             return None
 
         payload = self._recv_raw(payload_len)

@@ -191,12 +191,15 @@ endif()
 
 ### Makefile Targets
 
-- `make` - Builds all targets (x64r, x64d, armr, armd, mips32ber, mips32bed)
+- `make` - Builds all targets (x64r, x64d, armr, armd, armv7r, armv7d, mips32ber, mips32bed)
 - `make x64` - Builds x64 release and debug
 - `make x64r` - Builds x64 release only
 - `make x64d` - Builds x64 debug only
 - `make arm` - Builds arm release and debug
+- `make armv7` - Builds armv7 release and debug
 - `make mips32be` - Builds mips32be release and debug
+- `make libsodium` - Builds libsodium from `third_party/libsodium` into `third_party/libsodium-install`
+- `make clean-libsodium` - Removes libsodium build artifacts
 - `make clean` - Removes all build artifacts
 
 ### Binary Output
@@ -208,6 +211,8 @@ bin/
 ├── ganon_<ver>_x64_debug
 ├── ganon_<ver>_arm_release
 ├── ganon_<ver>_arm_debug
+├── ganon_<ver>_armv7_release
+├── ganon_<ver>_armv7_debug
 ├── ganon_<ver>_mips32be_release
 └── ganon_<ver>_mips32be_debug
 ```
@@ -218,11 +223,13 @@ A convenience symlink `ganon` in project root points to `./bin/ganon_<ver>_x64_d
 
 All targets use static linking (`-static` flag):
 - x64: Native GCC
-- armv5: arm-linux-gnueabihf-gcc (ARMv7 hard-float)
+- armv5: arm-linux-gnueabihf-gcc (ARMv7 hard-float, no NEON)
+- armv7: arm-linux-gnueabihf-gcc (ARMv7-A with NEON-VFPv4 hard-float)
 - mips32be: mips-linux-gnu-gcc (MIPS big-endian, o32 ABI)
 
 Toolchain files are in `cmake/`:
 - `cmake/armv5-toolchain.cmake`
+- `cmake/armv7-toolchain.cmake`
 - `cmake/mips32be-toolchain.cmake`
 
 ## Code Style
@@ -553,6 +560,19 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Switch Python client from `cryptography` to `monocypher-py` for Monocypher compatibility
 - [x] Revert C server from IETF ChaCha20 (12-byte nonce) to XChaCha20 (24-byte nonce) for Monocypher API compatibility
 - [x] Fix BLAKE2b key derivation in Python client - `monocypher-py` takes `crypto_blake2b(msg, key=...)` where C takes `crypto_blake2b_keyed(hash, hash_size, key, key_size, msg, msg_size)`; shared secret must be passed as `key=shared` and context byte as `msg`
+- [x] Integrate libsodium for high-performance XChaCha20-Poly1305 AEAD on x64 (~3.6× isolated crypto improvement: 8.97 Gbps vs 2.49 Gbps)
+- [x] Maintain Monocypher for X25519/BLAKE2b to preserve Python client wire compatibility
+- [x] Move libsodium source and build artifacts into `third_party/` for self-contained builds
+- [x] Add Makefile `libsodium` and `clean-libsodium` targets to rebuild from vendored source
+- [x] Update CMake auto-detection to use project-local `third_party/libsodium-install/`
+- [x] Add ARMv7 toolchain (`cmake/armv7-toolchain.cmake`) with NEON flags and Makefile targets `armv7r`/`armv7d`
+- [x] Increase TUNNEL_BUF_SIZE from 64K to 128K (+8% tunnel throughput, 128K chosen for embedded RAM constraints)
+- [x] Fix stack-allocated `buf[TUNNEL_BUF_SIZE + 8]` in `handle_tunnel_conn_ack` to use `MAX_PRE_ACK_DATA + 8`
+- [x] Increase encrypted frame size limit from 200KB to 300KB in both C server and Python client
+- [x] Implement stack-allocated frame buffer in `TRANSPORT__recv_msg` (avoids malloc on hot path for typical frames)
+- [x] Create `PERFORMANCE_PLAN.md` with ranked list of future optimizations (io_uring, kTLS, splice, batching, etc.)
+- [x] Add detailed Appendix A to `PERFORMANCE_PLAN.md` covering io_uring on legacy kernels (2.6.x, 3.3.x) and embedded architectures (ARM/MIPS)
+- [x] Add kernel-generation-specific optimization availability table (2.6.x vs 3.3.x vs 5.6+) with estimated impact per generation
 
 ## Known Bugs - Multi-Path Tunnel Race Conditions
 
@@ -661,14 +681,48 @@ Python: c = GanonClient("127.0.0.1", 11111, 3); c.connect()
 
 ## Transport-Layer Encryption
 
-All TCP connections between ganon nodes are encrypted using **X25519 + XChaCha20-Poly1305** (via vendored Monocypher). Encryption is mandatory and transparent to all layers above transport.
+All TCP connections between ganon nodes are encrypted using **X25519 + XChaCha20-Poly1305**. Encryption is mandatory and transparent to all layers above transport.
 
 ### Cryptography
-- **Key exchange:** Ephemeral X25519 per TCP connection
-- **Cipher:** XChaCha20-Poly1305 (AEAD, 24-byte nonce, single primitive for encryption + authentication)
-- **Key derivation:** BLAKE2b with single-byte context strings (`S`, `R`, `I`)
+- **Key exchange:** Ephemeral X25519 per TCP connection (Monocypher)
+- **Cipher:** XChaCha20-Poly1305 (AEAD, 24-byte nonce)
+- **Key derivation:** BLAKE2b with single-byte context strings (`S`, `R`, `I`) (Monocypher)
+- **AEAD implementation:** Monocypher (reference C implementation) for cross-compilation targets; **libsodium** (AVX2/SSE4.1-optimized assembly) for x64 when available
 - **Randomness:** `getrandom()` when available, fallback to `/dev/urandom`
 - **No authentication / no PSK:** Protects against passive eavesdropping and active tampering, but not MITM impersonation
+
+### Why libsodium for x64
+
+Monocypher is a compact, auditable, single-file reference implementation written in portable C. libsodium is a production library that includes hand-optimized assembly for common platforms. For XChaCha20-Poly1305 on x64:
+
+**Technical differences:**
+- **ChaCha20:** libsodium uses 4-way or 8-way parallel block processing via AVX2/SSE4.1 SIMD instructions. It encrypts multiple 64-byte blocks simultaneously in a single round, whereas Monocypher processes one block at a time in portable C.
+- **Poly1305:** libsodium uses SIMD (SSE2/AVX2) to process multiple message blocks in parallel for the universal hash computation. Monocypher uses a portable 32-bit limb implementation.
+- **Result:** libsodium achieves ~3.6× higher throughput in isolated crypto benchmarks.
+
+**Isolated benchmark** (65 KB frames, tight loop, `-O3`, same x64 machine):
+
+| Implementation | Throughput |
+|----------------|------------|
+| Monocypher (reference C) | **2.49 Gbps** |
+| libsodium (AVX2/SSE4.1 assembly) | **8.97 Gbps** |
+
+**Tunnel benchmark** (1 GB over local TCP tunnel) shows high variance (~2.5–4.5 Gbps for both builds) because the end-to-end path is bottlenecked by syscall overhead, thread context switches, and Python client/protocol framing — not by raw crypto speed. libsodium removes crypto from the critical path; further tunnel throughput gains require optimizing the non-crypto pipeline.
+
+### Self-Contained Build
+
+libsodium is vendored in `third_party/`:
+- `third_party/libsodium/` — libsodium 1.0.20 source tree (rebuildable)
+- `third_party/libsodium-install/` — prebuilt static library and headers for x64
+
+The ganon `Makefile` has a `libsodium` target that builds from source:
+```
+make libsodium    # Build third_party/libsodium -> third_party/libsodium-install
+make x64r         # Builds ganon linked against local libsodium
+make clean-libsodium  # Remove build artifacts
+```
+
+`src/CMakeLists.txt` auto-detects `${CMAKE_SOURCE_DIR}/third_party/libsodium-install/lib/libsodium.a` and defines `USE_LIBSODIUM` when present. Cross-compilation targets (ARM, MIPS) skip libsodium detection and fall back to Monocypher.
 
 ### Handshake
 After TCP connect, before any ganon protocol traffic:
@@ -677,6 +731,8 @@ After TCP connect, before any ganon protocol traffic:
 3. Responder sends 32-byte ephemeral public key
 4. Both compute shared secret and derive directional `send_key` / `recv_key`
 5. Session ID derived from shared secret for internal tracking only (never on wire)
+
+**Note:** libsodium's `crypto_scalarmult_curve25519()` does not clamp the scalar internally, whereas Monocypher's `crypto_x25519()` does. To maintain wire compatibility with the Python client (which uses Monocypher), the C server keeps Monocypher for X25519 key exchange and BLAKE2b key derivation, using libsodium **only** for the XChaCha20-Poly1305 AEAD encrypt/decrypt.
 
 ### Wire Format (post-handshake)
 ```
@@ -691,8 +747,8 @@ After TCP connect, before any ganon protocol traffic:
 
 ### Integration (C Server)
 - `TRANSPORT__do_handshake()` called in `socket_thread_func()` before message loop
-- `TRANSPORT__send_msg()` encrypts via `crypto_aead_lock()` into length-prefixed frame
-- `TRANSPORT__recv_msg()` reads length-prefixed frame, verifies nonce, decrypts via `crypto_aead_unlock()`, unserializes
+- `TRANSPORT__send_msg()` encrypts via `crypto_aead_xchacha20poly1305_ietf_encrypt_detached()` (libsodium) or `crypto_aead_lock()` (Monocypher) into length-prefixed frame
+- `TRANSPORT__recv_msg()` reads length-prefixed frame, verifies nonce, decrypts via `crypto_aead_xchacha20poly1305_ietf_decrypt_detached()` (libsodium) or `crypto_aead_unlock()` (Monocypher), then unserializes
 - Session, routing, and tunnel layers are completely unaware of encryption
 
 ### Integration (Python Client)
@@ -700,18 +756,54 @@ After TCP connect, before any ganon protocol traffic:
 - `Transport.do_handshake()` performs X25519 exchange and key derivation
 - `Transport.send_encrypted()` calls `monocypher.bindings.crypto_lock()`
 - `Transport.recv_decrypted()` calls `monocypher.bindings.crypto_unlock()`
-- Both C and Python use the same Monocypher primitives, ensuring full compatibility
+- Both C and Python use the same Monocypher primitives for handshake/key derivation, ensuring full compatibility
 
 **Important API difference:** `monocypher-py`'s `crypto_blake2b(msg, key=...)` takes the *message* as the first argument and the *key* as the keyword argument. The C `crypto_blake2b_keyed(hash, hash_size, key, key_size, message, message_size)` takes the *key* as the 3rd argument and the *message* as the 5th. When deriving directional keys in Python, the shared secret must be passed as `key=shared` and the single-byte context (`b"S"`/`b"R"`) as the message.
 
 ### Files
-- `src/monocypher.c` + `include/monocypher.h` — vendored crypto library (C server)
-- `src/transport.c` — handshake, encrypt, decrypt (C server)
+- `src/monocypher.c` + `include/monocypher.h` — vendored Monocypher library (X25519, BLAKE2b, AEAD fallback)
+- `src/transport.c` — handshake, encrypt, decrypt (conditionally uses libsodium AEAD)
 - `src/network.c` — handshake trigger in socket thread (C server)
+- `src/CMakeLists.txt` — auto-detects and links local libsodium (`USE_LIBSODIUM`)
+- `src/main.c` — calls `sodium_init()` when `USE_LIBSODIUM` is defined
 - `include/transport.h` — encryption state in `struct transport`
 - `include/err.h` — crypto error codes (`E__CRYPTO__*`)
+- `third_party/libsodium/` — libsodium 1.0.20 source
+- `third_party/libsodium-install/` — prebuilt x64 static library and headers
 - `ganon_client/transport.py` — Python transport encryption layer
 - `ganon_client/pyproject.toml` — `monocypher-py` dependency
+
+### Performance on ARM and MIPS
+
+**ARM:**
+- libsodium includes NEON-optimized assembly for ARMv7+ and AArch64. On those platforms, expect a **2–4×** isolated-crypto improvement over Monocypher.
+- Our ARMv5 target (`arm-linux-gnueabihf`) does **not** have NEON. On ARMv5, libsodium falls back to its reference C implementation, which is only marginally faster than Monocypher (maybe **1.2–1.5×**). For ARMv5, Monocypher remains a perfectly viable choice.
+- **Recommendation:** If you ever move to ARMv7+ or AArch64, cross-compile libsodium with `--host=arm-linux-gnueabihf` (or `aarch64-linux-gnu`) and link it; the NEON paths will unlock significant gains.
+
+**MIPS (big-endian, o32 ABI):**
+- libsodium has limited MIPS-specific assembly. Most primitives fall back to reference C.
+- Expected improvement over Monocypher on MIPS: **1.0–1.3×** (often negligible).
+- Monocypher is competitive on MIPS because it is already well-optimized portable C.
+
+### How to Improve Performance on ARM/MIPS
+
+Since raw crypto speed is not the main bottleneck on these platforms (and libsodium offers limited gains), focus on **non-crypto optimizations**:
+
+1. **Increase tunnel buffer size** (`TUNNEL_BUF_SIZE` in `include/tunnel.h`). Larger buffers mean fewer encrypt/decrypt calls per gigabyte transferred, amortizing function-call and nonce-construction overhead.
+2. **Batch small reads** in `fwd_thread_func()` (`src/tunnel.c`). Instead of `recv()` → encrypt → send for every small chunk, read as much as possible before encrypting. This reduces the number of `TRANSPORT__send_msg()` calls.
+3. **Zero-copy optimizations:**
+   - Use `sendfile()` or `splice()` for tunnel forwarding when both source and destination are local sockets, bypassing userspace entirely.
+   - Avoid the `malloc()`/`free()` in `TRANSPORT__recv_msg()` by using a stack-allocated frame buffer up to a reasonable size (e.g., 68 KB).
+4. **Reduce wire overhead:** The nonce prefix is always 16 zero bytes. Consider sending only the 8-byte counter on the wire and reconstructing the full 24-byte nonce on receipt. This saves 16 bytes per frame (~0.024% overhead reduction for 65 KB frames, but more meaningful for small control messages).
+5. **kernel TLS (kTLS):** On Linux 4.17+ with OpenSSL or wolfSSL, kTLS can offload ChaCha20-Poly1305 to the kernel, eliminating userspace crypto and syscall overhead entirely. This is a larger architectural change but can double tunnel throughput on any architecture.
+6. **Cross-compile libsodium properly for ARM:** If you upgrade to ARMv7+ or AArch64, build libsodium with the cross-compiler:
+   ```
+   cd third_party/libsodium
+   ./configure --host=arm-linux-gnueabihf --prefix=... \
+       CC=arm-linux-gnueabihf-gcc CFLAGS="-O3" \
+       --enable-static --disable-shared --disable-tests
+   ```
+   Then update `src/CMakeLists.txt` to point at the ARM install prefix for ARM builds.
 
 ### Future: End-to-End Encryption
 The current design is hop-to-hop (protects the link). End-to-end encryption can be added later without changing the frame format: add a second encryption layer inside `session.c` or `routing.c` that encrypts the `data` payload before `TRANSPORT__send_msg` sees it. The hop-to-hop layer will then encrypt the already-encrypted payload, providing double encryption.

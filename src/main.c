@@ -3,6 +3,10 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef USE_LIBSODIUM
+#include <sodium.h>
+#endif
+
 #include "common.h"
 #include "logging.h"
 #include "args.h"
@@ -26,6 +30,13 @@ int main(int argc, char *argv[]) {
 
     rc = ARGS__parse(&args, argc, argv);
     FAIL_IF(E__SUCCESS != rc, rc);
+
+#ifdef USE_LIBSODIUM
+    if (sodium_init() < 0) {
+        LOG_ERROR("libsodium initialization failed");
+        FAIL(E__CRYPTO__HANDSHAKE_FAILED);
+    }
+#endif
 
     g_node_id = args.node_id;
 
