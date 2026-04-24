@@ -422,6 +422,7 @@ typedef struct __attribute__((packed)) {
 **CONNECT_CMD**: data is a `connect_cmd_payload_t` structure:
 ```c
 typedef struct __attribute__((packed)) {
+    uint32_t request_id;    /* correlation id echoed back in response */
     char target_ip[64];     /* IP address to connect to */
     uint32_t target_port;   /* Port to connect to */
 } connect_cmd_payload_t;
@@ -431,11 +432,13 @@ Used to dynamically connect a node to a new peer. Sent to the node that should i
 **CONNECT_RESPONSE**: data is a `connect_response_payload_t` structure:
 ```c
 typedef struct __attribute__((packed)) {
-    uint32_t status;      /* 0=success, 1=refused, 2=timeout, 3=error */
-    uint32_t error_code;  /* Implementation-specific error code */
+    uint32_t request_id;        /* matches the request */
+    uint32_t status;            /* 0=success, 1=refused, 2=timeout, 3=error */
+    uint32_t error_code;        /* Implementation-specific error code */
+    uint32_t connected_node_id; /* node id of the peer we connected to (0 if unknown) */
 } connect_response_payload_t;
 ```
-Response to CONNECT_CMD indicating success or failure with specific error codes.
+Response to CONNECT_CMD indicating success or failure with specific error codes. The `connected_node_id` is only known after the peer sends `NODE_INIT`; the C server defers the response until then.
 
 **DISCONNECT_CMD**: data is a `disconnect_cmd_payload_t` structure:
 ```c
@@ -698,6 +701,10 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Add remote file upload/download - `c.upload_file(node, local, remote)` and `c.download_file(node, remote, local)` with helpful error messages (no space, read-only fs, permission denied, not found)
 - [x] Add EXEC_CMD/EXEC_RESPONSE, FILE_UPLOAD/FILE_UPLOAD_RESPONSE, FILE_DOWNLOAD/FILE_DOWNLOAD_RESPONSE protocol messages
 - [x] Add NodeClient - `nc = c.node(30)` binds all commands to a specific node id so you can call `nc.run_command("cmd")`, `nc.upload_file(local, remote)`, `nc.ping()`, etc. without repeating the node id
+- [x] Make `connect_to_node()` synchronous - add `request_id` correlation to `CONNECT_CMD/RESPONSE`, defer `CONNECT_RESPONSE` in C server until peer `NODE_INIT` arrives so the peer node id is known, handle pending-connect cleanup on disconnect
+- [x] Make `connect_to_node()` return `NodeClient` (via `self.node()`) and raise `ConnectToNodeError` on remote failure
+- [x] Make `node()` verify reachability with a ping before returning (configurable via `verify=` and `timeout=`)
+- [x] Python client: convert silent failures to explicit exceptions - `connect()`, `reconnect()`, `_connect()`, `_send_protocol_message()`, `send_to_node()`, `disconnect_nodes()` all raise `ConnectionError` instead of returning `False`/`None`/dict; `run_command()`, `upload_file()`, `download_file()` no longer manually check send return values
 
 ## Known Bugs - Multi-Path Tunnel Race Conditions
 

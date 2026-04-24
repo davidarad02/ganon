@@ -58,13 +58,16 @@ err_t PROTOCOL__serialize(IN const protocol_msg_t *msg, IN const uint8_t *data, 
 
 /* Connect/Disconnect command payload structures */
 typedef struct __attribute__((packed)) {
+    uint32_t request_id;  /* correlation id echoed back in response */
     char target_ip[64];
     uint32_t target_port;
 } connect_cmd_payload_t;
 
 typedef struct __attribute__((packed)) {
-    uint32_t status;      /* 0 = success, 1 = refused, 2 = timeout, 3 = other error */
-    uint32_t error_code;  /* Implementation-specific error code */
+    uint32_t request_id;       /* matches the request */
+    uint32_t status;           /* 0 = success, 1 = refused, 2 = timeout, 3 = other error */
+    uint32_t error_code;       /* Implementation-specific error code */
+    uint32_t connected_node_id;/* node id of the peer we connected to (0 if unknown) */
 } connect_response_payload_t;
 
 typedef struct __attribute__((packed)) {

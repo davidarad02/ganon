@@ -22,6 +22,87 @@
 static session_t g_session;
 static uint32_t g_msg_seq_id = 0;
 
+/* ---- pending connect responses (CONNECT_CMD -> wait for NODE_INIT) ---- */
+
+#define MAX_PENDING_CONNECTS 8
+#define PENDING_CONNECT_TIMEOUT_SEC 30
+
+typedef struct {
+    int active;
+    int fd;
+    uint32_t request_id;
+    uint32_t requester;
+    time_t timestamp;
+} pending_connect_t;
+
+static pending_connect_t g_pending_connects[MAX_PENDING_CONNECTS];
+static pthread_mutex_t g_pending_connect_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static void pending_connect_add(int fd, uint32_t request_id, uint32_t requester) {
+    pthread_mutex_lock(&g_pending_connect_mutex);
+    time_t now = time(NULL);
+    /* Evict stale entries */
+    for (int i = 0; i < MAX_PENDING_CONNECTS; i++) {
+        if (g_pending_connects[i].active && (now - g_pending_connects[i].timestamp) > PENDING_CONNECT_TIMEOUT_SEC) {
+            g_pending_connects[i].active = 0;
+        }
+    }
+    /* Find free slot */
+    for (int i = 0; i < MAX_PENDING_CONNECTS; i++) {
+        if (!g_pending_connects[i].active) {
+            g_pending_connects[i].active = 1;
+            g_pending_connects[i].fd = fd;
+            g_pending_connects[i].request_id = request_id;
+            g_pending_connects[i].requester = requester;
+            g_pending_connects[i].timestamp = now;
+            pthread_mutex_unlock(&g_pending_connect_mutex);
+            return;
+        }
+    }
+    pthread_mutex_unlock(&g_pending_connect_mutex);
+    LOG_WARNING("Pending connect table full, dropping tracking for fd=%d", fd);
+}
+
+static int pending_connect_remove(int fd, uint32_t *out_request_id, uint32_t *out_requester) {
+    int found = 0;
+    pthread_mutex_lock(&g_pending_connect_mutex);
+    for (int i = 0; i < MAX_PENDING_CONNECTS; i++) {
+        if (g_pending_connects[i].active && g_pending_connects[i].fd == fd) {
+            *out_request_id = g_pending_connects[i].request_id;
+            *out_requester = g_pending_connects[i].requester;
+            g_pending_connects[i].active = 0;
+            found = 1;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&g_pending_connect_mutex);
+    return found;
+}
+
+static void send_connect_response(session_t *s, uint32_t dst, uint32_t request_id,
+                                   int status, uint32_t error_code, uint32_t connected_node_id) {
+    connect_response_payload_t resp;
+    memset(&resp, 0, sizeof(resp));
+    resp.request_id = htonl(request_id);
+    resp.status = htonl((uint32_t)status);
+    resp.error_code = htonl(error_code);
+    resp.connected_node_id = htonl(connected_node_id);
+
+    protocol_msg_t response_msg;
+    memset(&response_msg, 0, sizeof(response_msg));
+    memcpy(response_msg.magic, GANON_PROTOCOL_MAGIC, 4);
+    response_msg.orig_src_node_id = (uint32_t)s->node_id;
+    response_msg.src_node_id = (uint32_t)s->node_id;
+    response_msg.dst_node_id = dst;
+    response_msg.message_id = SESSION__get_next_msg_id();
+    response_msg.type = MSG__CONNECT_RESPONSE;
+    response_msg.data_length = sizeof(resp);
+    response_msg.ttl = DEFAULT_TTL;
+    response_msg.channel_id = 0;
+
+    ROUTING__route_message(&response_msg, (const uint8_t *)&resp, 0);
+}
+
 session_t *SESSION__get_session(void) {
     return &g_session;
 }
@@ -79,6 +160,19 @@ static err_t SESSION__handle_node_init(IN session_t *s, IN transport_t *t, IN ui
         // When a new neighbor connects, rediscover paths for our active routes
         // to allow the new neighbor to participate in load-balancing.
         ROUTING__rediscover_active_routes(&s->routing_table);
+
+        /* If this connection was initiated by a CONNECT_CMD, send the deferred
+         * response now that we know the peer's node id. */
+        {
+            uint32_t req_id = 0;
+            uint32_t req_requester = 0;
+            if (pending_connect_remove(t->fd, &req_id, &req_requester)) {
+                send_connect_response(s, req_requester, req_id,
+                                      CONNECT_STATUS_SUCCESS, 0, src);
+                LOG_INFO("CONNECT_CMD deferred success to node %u (req=%u): connected_node=%u",
+                         req_requester, req_id, src);
+            }
+        }
     }
 
 l_cleanup:
@@ -96,57 +190,43 @@ l_cleanup:
     return rc;
 }
 
-static err_t SESSION__handle_connect_cmd(IN session_t *s, IN transport_t *t, IN const protocol_msg_t *msg, 
+static err_t SESSION__handle_connect_cmd(IN session_t *s, IN transport_t *t, IN const protocol_msg_t *msg,
                                           IN const uint8_t *data, IN size_t data_len) {
     err_t rc = E__SUCCESS;
     (void)t;
-    (void)msg;
-    
+
     if (data_len < sizeof(connect_cmd_payload_t)) {
         LOG_WARNING("CONNECT_CMD payload too small (%zu bytes)", data_len);
         FAIL(E__SESSION__INVALID_MESSAGE);
     }
-    
+
     const connect_cmd_payload_t *p = (const connect_cmd_payload_t *)data;
+    uint32_t request_id = ntohl(p->request_id);
     char ip[65];
     strncpy(ip, p->target_ip, 64);
     ip[64] = '\0';
     uint32_t port = ntohl(p->target_port);
-    
-    LOG_INFO("Received CONNECT_CMD from node %u: connect to %s:%u", 
-             msg->orig_src_node_id, ip, port);
-    
-    /* Attempt to connect to the target */
+
+    LOG_INFO("Received CONNECT_CMD from node %u (req=%u): connect to %s:%u",
+             msg->orig_src_node_id, request_id, ip, port);
+
     int status = CONNECT_STATUS_SUCCESS;
     uint32_t error_code = 0;
-    
-    err_t connect_rc = NETWORK__connect_to_peer(s->net, ip, (int)port, &status, &error_code);
+    int new_fd = -1;
+
+    err_t connect_rc = NETWORK__connect_to_peer(s->net, ip, (int)port, &status, &error_code, &new_fd);
     if (E__SUCCESS != connect_rc) {
-        status = CONNECT_STATUS_ERROR;
-        error_code = (uint32_t)connect_rc;
+        /* Immediate failure (TCP refused, timeout, etc.) – send response now */
+        send_connect_response(s, msg->orig_src_node_id, request_id, status, error_code, 0);
+        LOG_INFO("CONNECT_CMD immediate failure to node %u (req=%u): status=%d",
+                 msg->orig_src_node_id, request_id, status);
+        goto l_cleanup;
     }
-    
-    /* Send response back to originator */
-    connect_response_payload_t resp;
-    resp.status = htonl((uint32_t)status);
-    resp.error_code = htonl(error_code);
-    
-    protocol_msg_t response_msg;
-    memset(&response_msg, 0, sizeof(response_msg));
-    memcpy(response_msg.magic, GANON_PROTOCOL_MAGIC, 4);
-    response_msg.orig_src_node_id = (uint32_t)s->node_id;
-    response_msg.src_node_id = (uint32_t)s->node_id;
-    response_msg.dst_node_id = msg->orig_src_node_id;
-    response_msg.message_id = SESSION__get_next_msg_id();
-    response_msg.type = MSG__CONNECT_RESPONSE;
-    response_msg.data_length = sizeof(resp);
-    response_msg.ttl = DEFAULT_TTL;
-    response_msg.channel_id = 0;
-    
-    ROUTING__route_message(&response_msg, (const uint8_t *)&resp, 0);
-    
-    LOG_INFO("CONNECT_CMD response sent to node %u: status=%d", 
-             msg->orig_src_node_id, status);
+
+    /* TCP connect succeeded.  Defer the response until the peer sends NODE_INIT
+     * so we can include its node id.  Track the pending response by fd. */
+    pending_connect_add(new_fd, request_id, msg->orig_src_node_id);
+    LOG_INFO("CONNECT_CMD deferred response for fd=%d (req=%u)", new_fd, request_id);
 
 l_cleanup:
     return rc;
@@ -836,10 +916,26 @@ void SESSION__on_disconnected(IN transport_t *t) {
     session_t *s = SESSION__get_session();
     uint32_t node_id = TRANSPORT__get_node_id(t);
 
-    if (NULL == s || 0 == node_id) {
+    if (NULL == s) {
         return;
     }
-    
+
+    /* If there was a pending CONNECT_CMD waiting for NODE_INIT on this fd,
+     * send an error response because the connection failed before handshake. */
+    {
+        uint32_t req_id = 0;
+        uint32_t req_requester = 0;
+        if (pending_connect_remove(t->fd, &req_id, &req_requester)) {
+            send_connect_response(s, req_requester, req_id,
+                                  CONNECT_STATUS_ERROR, E__SESSION__CONNECTION_REJECTED, 0);
+            LOG_INFO("Pending connect on fd=%d failed: connection dropped before NODE_INIT", t->fd);
+        }
+    }
+
+    if (0 == node_id) {
+        return;
+    }
+
     LOG_INFO("Node %u disconnected", node_id);
     ROUTING__handle_disconnect(node_id);
     TUNNEL__handle_disconnect(node_id);
