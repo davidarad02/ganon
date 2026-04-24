@@ -626,6 +626,7 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Add remote command execution - `c.run_command(node, "cmd")` returns dict with exit_code/stdout/stderr; `c.run(node, "cmd")` returns merged output
 - [x] Add remote file upload/download - `c.upload_file(node, local, remote)` and `c.download_file(node, remote, local)` with helpful error messages (no space, read-only fs, permission denied, not found)
 - [x] Add EXEC_CMD/EXEC_RESPONSE, FILE_UPLOAD/FILE_UPLOAD_RESPONSE, FILE_DOWNLOAD/FILE_DOWNLOAD_RESPONSE protocol messages
+- [x] Add NodeClient - `nc = c.node(30)` binds all commands to a specific node id so you can call `nc.run_command("cmd")`, `nc.upload_file(local, remote)`, `nc.ping()`, etc. without repeating the node id
 
 ## Known Bugs - Multi-Path Tunnel Race Conditions
 
