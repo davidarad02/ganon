@@ -52,8 +52,8 @@ transport_t *NETWORK__get_transport(IN network_t *net, IN uint32_t node_id);
 void NETWORK__close_transport(IN network_t *net, IN transport_t *t);
 
 /* Dynamic connect/disconnect functions */
-err_t NETWORK__connect_to_peer(IN network_t *net, IN const char *ip, IN int port, 
-                                OUT int *status, OUT uint32_t *error_code);
+err_t NETWORK__connect_to_peer(IN network_t *net, IN const char *ip, IN int port,
+                                OUT int *status, OUT uint32_t *error_code, OUT int *out_fd);
 err_t NETWORK__disconnect_from_peer(IN network_t *net, IN uint32_t node_id,
                                      OUT int *status, OUT uint32_t *error_code);
 

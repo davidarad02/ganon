@@ -19,6 +19,7 @@ from ganon_client.protocol import (
     DEFAULT_TTL, GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader,
     TUNNEL_PROTO_TCP, TUNNEL_PROTO_UDP, TunnelOpenPayload, TunnelClosePayload,
     ConnectCmdPayload, ConnectResponsePayload, DisconnectCmdPayload, DisconnectResponsePayload,
+    CONNECT_STATUS_SUCCESS, CONNECT_STATUS_REFUSED, CONNECT_STATUS_TIMEOUT, CONNECT_STATUS_ERROR,
     FILE_STATUS_SUCCESS, FILE_STATUS_NOT_FOUND, FILE_STATUS_NO_SPACE,
     FILE_STATUS_READ_ONLY, FILE_STATUS_PERMISSION, FILE_STATUS_OTHER,
 )
@@ -45,6 +46,20 @@ LEVEL_COLORS = {
 }
 
 LEVEL_WIDTH = 5
+
+
+class ConnectToNodeError(ConnectionError):
+    """Raised when a CONNECT_CMD fails at the remote node.
+
+    Attributes:
+        status: Human-readable status string ('refused', 'timeout', 'error').
+        error_code: Raw error code returned by the remote node.
+    """
+
+    def __init__(self, message: str, status: str, error_code: int):
+        super().__init__(message)
+        self.status = status
+        self.error_code = error_code
 
 
 class GanonFormatter(logging.Formatter):
@@ -178,7 +193,7 @@ class NodeClient:
             src_host, src_port, remote_host, remote_port, protocol
         )
 
-    def connect_to_node(self, ip: str, port: int, timeout: float = 10.0) -> dict:
+    def connect_to_node(self, ip: str, port: int, timeout: float = 10.0) -> "NodeClient":
         return self._client.connect_to_node(ip, port, self.node_id, timeout)
 
     def disconnect_nodes(self, node_b: int) -> dict:
@@ -234,6 +249,7 @@ class GanonClient:
         self._pending_execs = {}     # request_id -> (event, result_dict)
         self._pending_uploads = {}   # request_id -> (event, result_dict)
         self._pending_downloads = {} # request_id -> (event, result_dict)
+        self._pending_connects = {}  # request_id -> (event, result_dict)
         self._rpc_lock = threading.Lock()
         self._rpc_counter = 0
 
@@ -294,7 +310,7 @@ class GanonClient:
     def set_on_reconnected(self, callback: Callable[[], None]):
         self._on_reconnected = callback
 
-    def _connect(self) -> Optional[Transport]:
+    def _connect(self) -> Transport:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(self.connect_timeout)
 
@@ -304,25 +320,28 @@ class GanonClient:
             self._info("Connected to %s:%s", self.ip, self.port)
             sock.settimeout(None)
         except socket.timeout:
-            self._warning("Connect to %s:%d timed out", self.ip, self.port)
             sock.close()
-            return None
+            raise ConnectionError(
+                f"Connect to {self.ip}:{self.port} timed out after {self.connect_timeout}s"
+            )
         except socket.error as e:
-            self._warning("Failed to connect to %s:%d: %s", self.ip, self.port, e)
             sock.close()
-            return None
+            raise ConnectionError(
+                f"Failed to connect to {self.ip}:{self.port}: {e}"
+            )
 
         # Transport-layer encryption handshake (mandatory)
         transport = Transport(sock)
         self._info("Starting encryption handshake...")
         if not transport.do_handshake(is_initiator=True):
-            self._error("Encryption handshake failed")
             try:
                 sock.shutdown(socket.SHUT_RDWR)
             except OSError:
                 pass
             sock.close()
-            return None
+            raise ConnectionError(
+                f"Encryption handshake with {self.ip}:{self.port} failed"
+            )
         self._info("Encryption handshake complete")
         return transport
 
@@ -486,6 +505,23 @@ class GanonClient:
                     result["error"] = data[8:].split(b"\x00")[0].decode("utf-8", errors="replace")
                 event.set()
 
+    def _handle_connect_response(self, orig_src_node_id: int, data: bytes):
+        if len(data) < 16:
+            self._warning("CONNECT_RESPONSE too short (%d bytes)", len(data))
+            return
+        request_id = struct.unpack(">I", data[:4])[0]
+        status = struct.unpack(">I", data[4:8])[0]
+        error_code = struct.unpack(">I", data[8:12])[0]
+        connected_node_id = struct.unpack(">I", data[12:16])[0]
+
+        with self._rpc_lock:
+            if request_id in self._pending_connects:
+                event, result = self._pending_connects[request_id]
+                result["status"] = status
+                result["error_code"] = error_code
+                result["connected_node_id"] = connected_node_id
+                event.set()
+
     def _process(self, header: dict, data: bytes):
         orig_src_node_id = header["orig_src_node_id"]
         src_node_id = header["src_node_id"]
@@ -610,6 +646,8 @@ class GanonClient:
             self._handle_file_upload_response(orig_src_node_id, data)
         elif msg_type == MsgType.FILE_DOWNLOAD_RESPONSE:
             self._handle_file_download_response(orig_src_node_id, data)
+        elif msg_type == MsgType.CONNECT_RESPONSE:
+            self._handle_connect_response(orig_src_node_id, data)
         elif msg_type == MsgType.CONNECTION_REJECTED:
             pass
         elif msg_type in (MsgType.TUNNEL_OPEN, MsgType.TUNNEL_CONN_OPEN, MsgType.TUNNEL_CONN_ACK,
@@ -712,8 +750,8 @@ class GanonClient:
         self._start_background_threads()
 
     def _send_node_init(self):
-        if self._sock is None:
-            return
+        if self._sock is None or not self._running:
+            raise ConnectionError("Client is not connected to the network. Please call connect() first.")
 
         self._msg_seq += 1
         header = ProtocolHeader.build({
@@ -739,21 +777,16 @@ class GanonClient:
                 self._reorder_thread = threading.Thread(target=self._reorder_loop, daemon=True)
                 self._reorder_thread.start()
 
-    def connect(self) -> bool:
+    def connect(self) -> None:
         with self._lock:
             if self._sock is not None:
                 self._warning("Already connected to %s:%d", self.ip, self.port)
-                return True
+                return
 
-            sock = self._connect()
-            if sock is None:
-                return False
-
-            self._sock = sock
+            self._sock = self._connect()
             self._running = True
             self._send_node_init()
             self._start_background_threads()
-            return True
 
     def disconnect(self):
         with self._lock:
@@ -777,20 +810,32 @@ class GanonClient:
                 self._reorder_thread.join(timeout=2)
                 self._reorder_thread = None
 
-    def node(self, node_id: int) -> NodeClient:
+    def node(self, node_id: int, verify: bool = True, timeout: float = 5.0) -> NodeClient:
         """Return a NodeClient bound to *node_id*.
 
         All node-targeted methods (run_command, run, upload_file,
         download_file, ping, send_to_node, create_tunnel, etc.) will
         automatically use this node id as the target.
+
+        Args:
+            node_id: The remote node id to bind to.
+            verify: If True (default), send a ping to verify the node
+                is reachable before returning the NodeClient.
+            timeout: Timeout in seconds for the verification ping.
+
+        Raises:
+            TimeoutError: If verify=True and the node does not respond
+                to the ping within *timeout* seconds.
         """
+        if verify:
+            self.ping(node_id, timeout=timeout)
         return NodeClient(self, node_id)
 
     def is_connected(self) -> bool:
         with self._lock:
             return self._sock is not None and self._running
 
-    def reconnect(self) -> bool:
+    def reconnect(self) -> None:
         with self._lock:
             if self._running:
                 self._running = False
@@ -804,7 +849,8 @@ class GanonClient:
 
         self._running = True
         self._do_reconnect()
-        return self._sock is not None
+        if self._sock is None:
+            raise ConnectionError(f"Failed to reconnect to {self.ip}:{self.port}")
 
     @require_connection
     def send(self, data: bytes) -> int:
@@ -812,10 +858,10 @@ class GanonClient:
             return self._sock.send(data)
 
     @require_connection
-    def send_to_node(self, dst_node_id: int, data: bytes, channel_id: int = 0) -> bool:
+    def send_to_node(self, dst_node_id: int, data: bytes, channel_id: int = 0) -> None:
         with self._lock:
             msg_type_bytes = struct.pack(">I", MsgType.USER_DATA.value)
-            return self._send_protocol_message(dst_node_id, msg_type_bytes, data, channel_id=channel_id)
+            self._send_protocol_message(dst_node_id, msg_type_bytes, data, channel_id=channel_id)
 
     @require_connection
     def ping(self, dst_node_id: int, timeout: float = 5.0, channel_id: int = 0) -> float:
@@ -829,27 +875,26 @@ class GanonClient:
 
         self._info("Pinging node %d with %d bytes of random data...", dst_node_id, len(ping_data))
         msg_type_bytes = struct.pack(">I", MsgType.PING.value)
-        
+
         start_time = time.time()
 
-        if not self._send_protocol_message(dst_node_id, msg_type_bytes, ping_data, channel_id=channel_id):
+        try:
+            self._send_protocol_message(dst_node_id, msg_type_bytes, ping_data, channel_id=channel_id)
+        except Exception:
             with self._ping_lock:
-                if ping_data in self._pending_pings:
-                    del self._pending_pings[ping_data]
-            raise ConnectionError(f"Failed to transmit PING to node {dst_node_id}")
+                self._pending_pings.pop(ping_data, None)
+            raise
 
         # Block until PONG or timeout
         received = event.wait(timeout)
 
         with self._ping_lock:
-            if ping_data in self._pending_pings:
-                del self._pending_pings[ping_data]
+            self._pending_pings.pop(ping_data, None)
 
-        if received:
-            elapsed_ms = (time.time() - start_time) * 1000.0
-            return elapsed_ms
-        else:
+        if not received:
             raise TimeoutError(f"Ping to node {dst_node_id} timed out after {timeout} seconds (Node not reachable or doesn't exist)")
+
+        return (time.time() - start_time) * 1000.0
 
     @require_connection
     def create_tunnel(self, src_node_id: int, dst_node_id: int,
@@ -889,11 +934,11 @@ class GanonClient:
             self._tunnels[tunnel_id] = tunnel
         return tunnel
 
-    def _send_protocol_message(self, dst_node_id: int, msg_type: bytes, data: bytes, channel_id: int = 0, 
-                                bypass_route_check: bool = False) -> bool:
-        if self._sock is None:
-            return False
-        
+    def _send_protocol_message(self, dst_node_id: int, msg_type: bytes, data: bytes, channel_id: int = 0,
+                                bypass_route_check: bool = False) -> None:
+        if self._sock is None or not self._running:
+            raise ConnectionError("Client is not connected to the network. Please call connect() first.")
+
         # Check if we have a route to destination (unless bypassing for RREQ etc.)
         if not bypass_route_check and dst_node_id != 0 and dst_node_id != self.node_id:
             route = self._routing_table.get_route(dst_node_id)
@@ -909,10 +954,10 @@ class GanonClient:
                         'channel_id': channel_id,
                         'timestamp': time.time()
                     })
-                
+
                 # Send RREQ to discover route
                 self._send_rreq(dst_node_id)
-                return True  # Message buffered, will be sent when route is established
+                return  # Message buffered, will be sent when route is established
 
         self._msg_seq += 1
         header = ProtocolHeader.build({
@@ -934,10 +979,8 @@ class GanonClient:
             self._info("Protocol SEND: orig_src=%d, src=%d, dst=%d, msg_id=%d, type=%s, ttl=%d, channel=%d, data_len=%d",
                        self.node_id, self.node_id, dst_node_id, self._msg_seq, msg_type_name, DEFAULT_TTL, channel_id, len(data))
             self._debug("Sent message to node %d (type=%s, data_len=%d, channel=%d)", dst_node_id, msg_type.hex(), len(data), channel_id)
-            return True
         except Exception as e:
-            self._warning("Failed to send to node %d: %s", dst_node_id, e)
-            return False
+            raise ConnectionError(f"Failed to send message to node {dst_node_id}: {e}") from e
 
     @require_connection
     def recv(self, bufsize: int = 4096) -> bytes:
@@ -945,83 +988,110 @@ class GanonClient:
             return self._sock.recv(bufsize)
 
     @require_connection
-    def connect_to_node(self, ip: str, port: int, target_node_id: int = None, timeout: float = 10.0) -> dict:
-        """Connect a node to a new peer.
-        
+    def connect_to_node(self, ip: str, port: int, target_node_id: int = None, timeout: float = 10.0) -> "NodeClient":
+        """Connect a node to a new peer and return a bound NodeClient.
+
         Args:
             ip: IP address of the peer to connect to
             port: Port of the peer to connect to
             target_node_id: Which node should perform the connection (default: local node)
             timeout: Maximum time to wait for response in seconds
-            
+
         Returns:
-            dict with keys: 'success' (bool), 'status' (str), 'error_code' (int)
-            
+            NodeClient bound to the newly connected peer's node id.
+
         Raises:
-            ConnectionError: If the client is not connected
-            TimeoutError: If no response received within timeout
+            ConnectionError: If the client is not connected or message send fails.
+            TimeoutError: If no response received within timeout.
+            ConnectToNodeError: If the remote node reports a connection failure.
         """
-        # Determine which node will execute the connect
         executor_node = target_node_id if target_node_id is not None else self.node_id
-        
+        request_id = self._alloc_request_id()
+        event = threading.Event()
+        result = {}
+
+        with self._rpc_lock:
+            self._pending_connects[request_id] = (event, result)
+
         payload = ConnectCmdPayload.build({
+            "request_id": request_id,
             "target_ip": ip,
             "target_port": port,
         })
-        
-        self._info("Requesting node %d to connect to %s:%d", executor_node, ip, port)
-        
-        # Send CONNECT_CMD message
-        self._send_protocol_message(
-            executor_node,
-            struct.pack(">I", MsgType.CONNECT_CMD.value),
-            payload,
-            channel_id=0,
+
+        self._info("Requesting node %d to connect to %s:%d (req=%d)", executor_node, ip, port, request_id)
+
+        try:
+            self._send_protocol_message(
+                executor_node,
+                struct.pack(">I", MsgType.CONNECT_CMD.value),
+                payload,
+                channel_id=0,
+            )
+        except Exception:
+            with self._rpc_lock:
+                self._pending_connects.pop(request_id, None)
+            raise
+
+        if not event.wait(timeout):
+            with self._rpc_lock:
+                self._pending_connects.pop(request_id, None)
+            raise TimeoutError(f"connect_to_node to {ip}:{port} via node {executor_node} timed out after {timeout}s")
+
+        with self._rpc_lock:
+            self._pending_connects.pop(request_id, None)
+
+        status = result.get("status", CONNECT_STATUS_ERROR)
+        error_code = result.get("error_code", 0)
+        connected_node_id = result.get("connected_node_id", 0)
+
+        if status == CONNECT_STATUS_SUCCESS and connected_node_id != 0:
+            self._info("Node %d connected to peer %d at %s:%d", executor_node, connected_node_id, ip, port)
+            return self.node(connected_node_id)
+
+        status_map = {
+            CONNECT_STATUS_REFUSED: "refused",
+            CONNECT_STATUS_TIMEOUT: "timeout",
+            CONNECT_STATUS_ERROR: "error",
+        }
+        status_str = status_map.get(status, "unknown")
+        raise ConnectToNodeError(
+            f"Node {executor_node} failed to connect to {ip}:{port}: {status_str} (error_code={error_code})",
+            status=status_str,
+            error_code=error_code,
         )
-        
-        # Wait for response (in a real implementation, this would need proper response handling)
-        # For now, we return a pending status
-        return {"success": None, "status": "pending", "error_code": 0}
     
-    @require_connection  
-    def disconnect_nodes(self, node_a: int, node_b: int = None) -> dict:
+    @require_connection
+    def disconnect_nodes(self, node_a: int, node_b: int = None) -> None:
         """Disconnect two nodes from each other.
-        
+
         Args:
             node_a: First node to disconnect (or the local node if node_b is None)
             node_b: Second node to disconnect (if None, disconnect node_a from local node)
-            
-        Returns:
-            dict with keys: 'success' (bool), 'status' (str), 'error_code' (int)
-            
+
         Raises:
-            ConnectionError: If the client is not connected
+            ConnectionError: If the client is not connected or message send fails.
         """
         if node_b is None:
-            # Disconnect local node from node_a
             executor_node = self.node_id
             target_node = node_a
         else:
-            # Disconnect node_a from node_b (may require forwarding)
             executor_node = node_a
             target_node = node_b
-            
+
         payload = DisconnectCmdPayload.build({
             "node_a": executor_node,
             "node_b": target_node,
         })
-        
+
         self._info("Requesting disconnect between node %d and node %d", executor_node, target_node)
-        
-        # Send DISCONNECT_CMD message to executor_node (it will handle the disconnect)
+
         self._send_protocol_message(
             executor_node,
             struct.pack(">I", MsgType.DISCONNECT_CMD.value),
             payload,
             channel_id=0,
         )
-        
-        return {"success": None, "status": "pending", "error_code": 0}
 
     @require_connection
     def print_network_graph(self) -> None:
@@ -1202,10 +1272,12 @@ class GanonClient:
 
         self._info("Executing command on node %d (req=%d): %s", target_node_id, request_id, cmd)
 
-        if not self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0):
+        try:
+            self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0)
+        except Exception:
             with self._rpc_lock:
                 self._pending_execs.pop(request_id, None)
-            raise ConnectionError(f"Failed to send EXEC_CMD to node {target_node_id}")
+            raise
 
         if not event.wait(timeout):
             with self._rpc_lock:
@@ -1284,10 +1356,12 @@ class GanonClient:
         self._info("Uploading %s -> node %d:%s (%d bytes, req=%d)",
                    local_path, target_node_id, remote_path, len(file_data), request_id)
 
-        if not self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0):
+        try:
+            self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0)
+        except Exception:
             with self._rpc_lock:
                 self._pending_uploads.pop(request_id, None)
-            raise ConnectionError(f"Failed to send FILE_UPLOAD to node {target_node_id}")
+            raise
 
         if not event.wait(timeout):
             with self._rpc_lock:
@@ -1334,10 +1408,12 @@ class GanonClient:
         self._info("Downloading node %d:%s -> %s (req=%d)",
                    target_node_id, remote_path, local_path, request_id)
 
-        if not self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0):
+        try:
+            self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0)
+        except Exception:
             with self._rpc_lock:
                 self._pending_downloads.pop(request_id, None)
-            raise ConnectionError(f"Failed to send FILE_DOWNLOAD to node {target_node_id}")
+            raise
 
         if not event.wait(timeout):
             with self._rpc_lock:

@@ -586,17 +586,21 @@ void NETWORK__close_transport(network_t *net, transport_t *t) {
     }
 }
 
-err_t NETWORK__connect_to_peer(network_t *net, const char *ip, int port, 
-                                int *status, uint32_t *error_code) {
+err_t NETWORK__connect_to_peer(network_t *net, const char *ip, int port,
+                                int *status, uint32_t *error_code, int *out_fd) {
     err_t rc = E__SUCCESS;
     int sock_fd = -1;
-    
+
+    if (NULL != out_fd) {
+        *out_fd = -1;
+    }
+
     if (NULL == net || NULL == ip || NULL == status || NULL == error_code) {
         *status = CONNECT_STATUS_ERROR;
         *error_code = E__INVALID_ARG_NULL_POINTER;
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
-    
+
     *status = CONNECT_STATUS_SUCCESS;
     *error_code = 0;
     
@@ -720,7 +724,11 @@ err_t NETWORK__connect_to_peer(network_t *net, const char *ip, int port,
     }
     
     LOG_INFO("Connected to peer %s:%d", ip, port);
-    
+
+    if (NULL != out_fd) {
+        *out_fd = sock_fd;
+    }
+
 l_cleanup:
     return rc;
 }

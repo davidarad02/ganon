@@ -70,14 +70,17 @@ TunnelClosePayload = ct.Struct(
 
 # Connect command payload
 ConnectCmdPayload = ct.Struct(
+    "request_id" / ct.Int32ub,
     "target_ip" / ct.PaddedString(64, "ascii"),
     "target_port" / ct.Int32ub,
 )
 
 # Connect response payload
 ConnectResponsePayload = ct.Struct(
+    "request_id" / ct.Int32ub,  # matches the request
     "status" / ct.Int32ub,  # 0 = success, 1 = refused, 2 = timeout, 3 = other error
     "error_code" / ct.Int32ub,  # Implementation-specific error code
+    "connected_node_id" / ct.Int32ub,  # node id of the peer we connected to (0 if unknown)
 )
 
 # Disconnect command payload
@@ -91,6 +94,12 @@ DisconnectResponsePayload = ct.Struct(
     "status" / ct.Int32ub,  # 0 = success, 1 = not connected, 2 = other error
     "error_code" / ct.Int32ub,
 )
+
+# Connect response status codes
+CONNECT_STATUS_SUCCESS = 0
+CONNECT_STATUS_REFUSED = 1
+CONNECT_STATUS_TIMEOUT = 2
+CONNECT_STATUS_ERROR = 3
 
 # File operation status codes
 FILE_STATUS_SUCCESS = 0
