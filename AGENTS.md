@@ -170,11 +170,16 @@ Options:
 
 Commands (via Python client):
   c = GanonClient(ip, port, node_id, ..., reorder=False)  # reorder=False (default) = process packets immediately
-  c.connect(ip, port)               Connect local node to peer at ip:port
-  c.connect(ip, port, target_node) Instruct target_node to connect to peer at ip:port
-  c.disconnect(node_id)             Disconnect local node from node_id
-  c.disconnect(node_a, node_b)      Disconnect node_a from node_b
+  c.connect()                       Connect local node to peer (sync wrapper)
+  await c.a_connect()               Async connect variant
+  c.disconnect()                    Disconnect from the network
+  c.connect_to_node(ip, port)       Instruct local node to connect to peer at ip:port
+  c.disconnect_nodes(node_a, node_b) Disconnect node_a from node_b
   c.print_network_graph()            Print visual graph of network topology from this node's perspective
+
+  All public methods have both sync and `a_` prefixed async variants (e.g. `c.a_ping()`, `c.a_run_command()`).
+  The client manages its own asyncio event loop in a background thread; sync wrappers submit coroutines via
+  `asyncio.run_coroutine_threadsafe()`.
 ```
 
 ## Build Types
@@ -705,6 +710,7 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Make `connect_to_node()` return `NodeClient` (via `self.node()`) and raise `ConnectToNodeError` on remote failure
 - [x] Make `node()` verify reachability with a ping before returning (configurable via `verify=` and `timeout=`)
 - [x] Python client: convert silent failures to explicit exceptions - `connect()`, `reconnect()`, `_connect()`, `_send_protocol_message()`, `send_to_node()`, `disconnect_nodes()` all raise `ConnectionError` instead of returning `False`/`None`/dict; `run_command()`, `upload_file()`, `download_file()` no longer manually check send return values
+- [x] Refactor Python client to async-capable architecture - manages internal asyncio event loop in background thread, all I/O methods are async with `a_` prefixes, sync wrappers use `asyncio.run_coroutine_threadsafe()`, response correlation uses `asyncio.Future` instead of `threading.Event`
 
 ## Known Bugs - Multi-Path Tunnel Race Conditions
 
@@ -939,3 +945,113 @@ Since raw crypto speed is not the main bottleneck on these platforms (and libsod
 
 ### Future: End-to-End Encryption
 The current design is hop-to-hop (protects the link). End-to-end encryption can be added later without changing the frame format: add a second encryption layer inside `session.c` or `routing.c` that encrypts the `data` payload before `TRANSPORT__send_msg` sees it. The hop-to-hop layer will then encrypt the already-encrypted payload, providing double encryption.
+
+## Python Client API
+
+### Async Architecture
+
+The Python client (`ganon_client/client.py`) is built on an **async-native core** with **sync wrappers**. All network I/O runs on an internal `asyncio` event loop in a background daemon thread. Response correlation uses `asyncio.Future` instead of `threading.Event`.
+
+**Internal async methods** (no `a_` prefix because they're internal):
+- `_protocol_loop()` — reads encrypted frames from the socket
+- `_send_protocol_message()` — sends encrypted frames
+- `_send_rreq()`, `_flush_pending_messages()`, `_send_node_init()`
+
+**Public async methods** (`a_` prefix) return `_AsyncBridge` objects that can be `await`-ed from any event loop:
+```python
+# From your own async code
+result = await c.a_run_command(10, "uptime")
+```
+
+**Public sync methods** block the caller thread and internally delegate to the async implementation via `asyncio.run_coroutine_threadsafe()`:
+```python
+# From sync code
+result = c.run_command(10, "uptime")
+```
+
+### `_AsyncBridge`
+
+`_AsyncBridge` is a small awaitable that bridges a coroutine running on the client's internal loop to the caller's async context:
+
+```python
+class _AsyncBridge:
+    def __init__(self, coro, loop):
+        self._coro = coro
+        self._loop = loop
+
+    def __await__(self):
+        future = asyncio.run_coroutine_threadsafe(self._coro, self._loop)
+        wrapped = asyncio.wrap_future(future)
+        return wrapped.__await__()
+```
+
+This means `await c.a_ping(10)` works from any async context (your own event loop, Jupyter, etc.) because the actual coroutine executes on the client's internal loop and the result is bridged back.
+
+### Dual API Reference
+
+Every external-facing command has both a sync and an async version:
+
+| Sync Method | Async Method | Description |
+|---|---|---|
+| `connect()` | `a_connect()` | Connect to local ganon node |
+| `disconnect()` | `a_disconnect()` | Disconnect and cleanup |
+| `reconnect()` | `a_reconnect()` | Force reconnection |
+| `ping(node)` | `a_ping(node)` | Ping a remote node |
+| `send_to_node(node, data)` | `a_send_to_node(node, data)` | Send raw data to a node |
+| `create_tunnel(...)` | `a_create_tunnel(...)` | Create a tunnel |
+| `connect_to_node(ip, port)` | `a_connect_to_node(ip, port)` | Instruct a node to connect to a peer |
+| `disconnect_nodes(a, b)` | `a_disconnect_nodes(a, b)` | Disconnect two nodes |
+| `run_command(node, cmd)` | `a_run_command(node, cmd)` | Execute command on remote node |
+| `run(node, cmd)` | `a_run(node, cmd)` | Execute command, return merged output |
+| `upload_file(node, local, remote)` | `a_upload_file(node, local, remote)` | Upload a file |
+| `download_file(node, remote, local)` | `a_download_file(node, remote, local)` | Download a file |
+| `print_network_graph()` | `a_print_network_graph()` | Print topology graph |
+
+`NodeClient` exposes the same dual API for all node-bound operations:
+```python
+nc = c.node(10)
+nc.ping()           # sync
+await nc.a_ping()   # async
+nc.run_command("uptime")           # sync
+await nc.a_run_command("uptime")   # async
+```
+
+### Exception Policy
+
+All methods raise exceptions on failure instead of returning `False`/`None`/dict:
+- `ConnectionError` — not connected, send failure, TCP error
+- `TimeoutError` — no response within timeout
+- `ConnectToNodeError` — remote node reports connection failure (has `.status` and `.error_code`)
+
+### Usage Examples
+
+**Sync usage:**
+```python
+from ganon_client.client import GanonClient
+
+c = GanonClient("127.0.0.1", 5555, 99)
+c.connect()
+print(c.ping(10))
+result = c.run_command(10, "uptime")
+print(result["exit_code"], result["stdout"])
+c.disconnect()
+```
+
+**Async usage:**
+```python
+import asyncio
+from ganon_client.client import GanonClient
+
+c = GanonClient("127.0.0.1", 5555, 99)
+await c.a_connect()
+lat = await c.a_ping(10)
+result = await c.a_run_command(10, "uptime")
+await c.a_disconnect()
+```
+
+**NodeClient:**
+```python
+nc = c.node(10)
+await nc.a_ping()
+await nc.a_run_command("cat /etc/os-release")
+```

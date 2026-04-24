@@ -1,3 +1,4 @@
+import asyncio
 import hashlib
 import os
 import socket
@@ -96,7 +97,7 @@ class Transport:
         return True
 
     # ------------------------------------------------------------------
-    # Encrypted send / recv
+    # Encrypted send / recv (sync, for handshake / legacy use)
     # ------------------------------------------------------------------
 
     def send_encrypted(self, plaintext: bytes) -> bool:
@@ -130,6 +131,73 @@ class Transport:
 
         payload = self._recv_raw(payload_len)
         if payload is None:
+            return None
+
+        nonce = payload[: self._NONCE_SIZE]
+        mac = payload[self._NONCE_SIZE : self._NONCE_SIZE + self._TAG_SIZE]
+        ciphertext = payload[self._NONCE_SIZE + self._TAG_SIZE :]
+
+        # Replay protection
+        counter = int.from_bytes(nonce[16:24], "little")
+        if counter != self._recv_nonce:
+            raise ValueError(
+                f"Replay detected: expected {self._recv_nonce}, got {counter}"
+            )
+        self._recv_nonce += 1
+
+        plaintext = mc.crypto_unlock(self._recv_key, mac, nonce, ciphertext)
+        if plaintext is None:
+            return None
+
+        return plaintext
+
+    # ------------------------------------------------------------------
+    # Async encrypted send / recv (for the main I/O loop)
+    # ------------------------------------------------------------------
+
+    async def a_send_encrypted(self, plaintext: bytes) -> None:
+        """Async version of send_encrypted."""
+        if not self._established:
+            raise RuntimeError("Encryption not established")
+
+        nonce = self._make_nonce(self._send_nonce)
+        self._send_nonce += 1
+
+        mac, ciphertext = mc.crypto_lock(self._send_key, nonce, plaintext)
+
+        payload = nonce + mac + ciphertext
+        length_prefix = struct.pack(">I", len(payload))
+
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.sock_sendall(self._sock, length_prefix + payload)
+        except OSError as e:
+            raise ConnectionError(f"Failed to send encrypted frame: {e}") from e
+
+    async def a_recv_decrypted(self) -> Optional[bytes]:
+        """Async version of recv_decrypted."""
+        if not self._established:
+            raise RuntimeError("Encryption not established")
+
+        loop = asyncio.get_running_loop()
+
+        try:
+            len_bytes = await loop.sock_recv(self._sock, 4)
+        except (OSError, ConnectionResetError):
+            return None
+        if not len_bytes:
+            return None
+
+        payload_len = struct.unpack(">I", len_bytes)[0]
+        min_payload = self._NONCE_SIZE + self._TAG_SIZE
+        if payload_len < min_payload or payload_len > 300_000:
+            return None
+
+        try:
+            payload = await loop.sock_recv(self._sock, payload_len)
+        except (OSError, ConnectionResetError):
+            return None
+        if not payload:
             return None
 
         nonce = payload[: self._NONCE_SIZE]
