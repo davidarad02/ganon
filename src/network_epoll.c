@@ -121,14 +121,8 @@ static void *epoll_thread_func(void *arg) {
                 if (E__SUCCESS != drain_rc) {
                     goto handle_disconnect;
                 }
-
-                if (!would_block && !t->out_has_data) {
-                    /* Disable EPOLLOUT since queue is empty */
-                    struct epoll_event ee;
-                    ee.events = EPOLLIN;
-                    ee.data.ptr = t;
-                    epoll_ctl(g_epoll_fd, EPOLL_CTL_MOD, t->fd, &ee);
-                }
+                /* EPOLLOUT enable/disable is now managed inside drain_outbuf
+                 * under out_mutex, so no extra epoll_ctl needed here. */
             }
 
             continue;

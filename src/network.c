@@ -585,21 +585,20 @@ err_t NETWORK__shutdown(network_t *net) {
         iter = iter->next;
     }
 
-    /* Join all client threads before destroying transports */
-    iter = head;
-    while (NULL != iter) {
-        if (0 != iter->thread) {
-            pthread_join(iter->thread, NULL);
-        }
-        iter = iter->next;
-    }
-
-    /* Now safe to destroy transports */
+    /* Join all client threads.  Each socket_thread_func frees its own
+     * transport and entry in l_cleanup, so we must NOT touch them after
+     * joining.  Capture next before joining in case the thread frees iter. */
     iter = head;
     while (NULL != iter) {
         socket_entry_t *next = iter->next;
-        TRANSPORT__destroy(iter->t);
-        FREE(iter);
+        if (0 != iter->thread) {
+            pthread_join(iter->thread, NULL);
+            /* thread already called TRANSPORT__destroy(iter->t) and FREE(iter) */
+        } else {
+            /* thread was never created — clean up manually */
+            TRANSPORT__destroy(iter->t);
+            FREE(iter);
+        }
         iter = next;
     }
 

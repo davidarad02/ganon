@@ -7,6 +7,7 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -335,9 +336,27 @@ static void *fwd_thread_func(void *arg) {
             } else {
                 /* Stalled state: no route available.
                  * We don't read from socket, letting TCP backpressure build up.
-                 * Periodically try to send a probe to check if route is back. */
-                sleep(1);
-                
+                 * Use select() with a 1-second timeout so we can detect client
+                 * disconnect even while stalled (avoids permanent thread leak). */
+                {
+                    fd_set rfds;
+                    FD_ZERO(&rfds);
+                    FD_SET(ctx->fd, &rfds);
+                    struct timeval tv = {1, 0};
+                    int sel = select(ctx->fd + 1, &rfds, NULL, NULL, &tv);
+                    if (sel > 0) {
+                        /* Socket became readable: either data arrived or EOF/error.
+                         * Peek to distinguish: 0 bytes = EOF, error = disconnect. */
+                        char probe;
+                        ssize_t n = recv(ctx->fd, &probe, 1, MSG_PEEK);
+                        if (n <= 0) {
+                            break; /* client disconnected while stalled */
+                        }
+                        /* Data is waiting; resume normal reads now that route
+                         * may be recovering, or it will trigger stall again. */
+                    }
+                }
+
                 /* Check if route is available */
                 if (ROUTING__has_route(ctx->peer_node_id)) {
                     /* Route is back! Resume normal operation */
@@ -347,8 +366,8 @@ static void *fwd_thread_func(void *arg) {
                     *ctx->p_is_active = 1; /* Back to active */
                 } else {
                     /* Still no route - trigger another RREQ periodically */
-                    static time_t last_rreq = 0;
                     time_t now = time(NULL);
+                    static time_t last_rreq = 0;
                     if (now - last_rreq >= 5) {
                         ROUTING__send_rreq(ctx->peer_node_id);
                         last_rreq = now;

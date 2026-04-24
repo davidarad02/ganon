@@ -159,6 +159,14 @@ Logging is **completely compiled out in Release builds** (`CMAKE_BUILD_TYPE=Rele
 
 **Note**: `tunnel.c` uses LOG_* macros and is added to both Debug and Release sources in `src/CMakeLists.txt` (the macros are no-ops in Release).
 
+### Epoll Event Loop (`network_epoll.c/h`, `network_caps.c/h`)
+
+When available (Linux), the network layer uses a single epoll thread instead of one blocking recv-thread per connection. Key invariants:
+
+- **EPOLLOUT enable/disable is always done inside `out_mutex`** in `TRANSPORT__enqueue_outbuf` and `TRANSPORT__drain_outbuf`. Never call `epoll_ctl` to modify EPOLLIN/EPOLLOUT outside that mutex — the enable and disable operations must be mutually exclusive or data gets stuck in the queue with EPOLLOUT disabled (memory leak + CPU spin).
+- `socket_thread_func` in epoll mode blocks on `epoll_cv` after adding to epoll. When the epoll thread detects a disconnect it sets `epoll_disconnect_flag` and broadcasts; the socket thread then runs its own cleanup (`TRANSPORT__destroy` + `FREE(entry)`). **Do NOT call `TRANSPORT__destroy`/`FREE(entry)` again in `NETWORK__shutdown`** — the threads already did it.
+- `g_epoll_fd` is set to -1 at shutdown. `TRANSPORT__drain_outbuf` and `TRANSPORT__enqueue_outbuf` guard every `epoll_ctl` call with `g_epoll_fd >= 0`.
+
 ### TCP/UDP Tunneling (`tunnel.c/h`)
 
 Ganon supports transparent port-forwarding tunnels through the mesh. A tunnel has a **src node** (listener) and a **dst node** (connector to remote).

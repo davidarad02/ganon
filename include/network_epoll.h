@@ -6,6 +6,8 @@
 
 #ifdef USE_EPOLL
 
+#include <sys/epoll.h>
+
 /* Global epoll instance and thread */
 extern int g_epoll_fd;
 extern pthread_t g_epoll_thread;

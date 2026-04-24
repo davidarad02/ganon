@@ -494,13 +494,17 @@ err_t TRANSPORT__enqueue_outbuf(transport_t *t, uint8_t *data, size_t len) {
         t->out_tail = ob;
     }
     t->out_has_data = 1;
-    pthread_mutex_unlock(&t->out_mutex);
-
 #ifdef USE_EPOLL
-    if (t->is_nonblocking) {
-        NETWORK__epoll_enable_out(t);
+    /* Enable EPOLLOUT inside the mutex so it cannot race with the drain's
+     * disable: enqueue-enable and drain-disable are mutually exclusive. */
+    if (t->is_nonblocking && g_epoll_fd >= 0) {
+        struct epoll_event ee;
+        ee.events = EPOLLIN | EPOLLOUT;
+        ee.data.ptr = t;
+        epoll_ctl(g_epoll_fd, EPOLL_CTL_MOD, t->fd, &ee);
     }
 #endif
+    pthread_mutex_unlock(&t->out_mutex);
 
 l_cleanup:
     return rc;
@@ -544,6 +548,16 @@ err_t TRANSPORT__drain_outbuf(transport_t *t, int *would_block) {
     }
     if (NULL == t->out_head) {
         t->out_has_data = 0;
+#ifdef USE_EPOLL
+        /* Disable EPOLLOUT inside the mutex so it cannot race with the
+         * enqueue's enable (they are mutually exclusive under out_mutex). */
+        if (t->is_nonblocking && g_epoll_fd >= 0) {
+            struct epoll_event ee;
+            ee.events = EPOLLIN;
+            ee.data.ptr = t;
+            epoll_ctl(g_epoll_fd, EPOLL_CTL_MOD, t->fd, &ee);
+        }
+#endif
     }
     pthread_mutex_unlock(&t->out_mutex);
 

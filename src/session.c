@@ -58,6 +58,7 @@ static err_t SESSION__handle_node_init(IN session_t *s, IN transport_t *t, IN ui
             // threads from trying to use the transport we are about to close.
             old_t->node_id = 0;
             close(old_t->fd);
+            old_t->fd = -1;
         }
         rc = ROUTING__add_direct(&s->routing_table, src, t->fd);
         FAIL_IF(E__SUCCESS != rc, rc);
