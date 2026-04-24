@@ -127,6 +127,71 @@ class Tunnel:
                 f"{state})")
 
 
+class NodeClient:
+    """Bound client that targets a specific node for all commands.
+
+    Obtained via ``GanonClient.node(node_id)``.  Every method that normally
+    takes a *target_node_id* as its first argument is pre-filled with the
+    bound node id, so you can write::
+
+        nc = c.node(30)
+        nc.run_command("uptime")
+        nc.upload_file("/local/file.txt", "/remote/file.txt")
+        nc.ping()
+
+    For ``create_tunnel`` the bound node id is used as *src_node_id*, so
+    you only specify the destination side::
+
+        nc.create_tunnel(11, "0.0.0.0", 8000, "127.0.0.1", 9000, "tcp")
+    """
+
+    def __init__(self, client: "GanonClient", node_id: int):
+        self._client = client
+        self.node_id = node_id
+
+    def run_command(self, cmd: str, timeout: float = 30.0) -> dict:
+        return self._client.run_command(self.node_id, cmd, timeout)
+
+    def run(self, cmd: str, timeout: float = 30.0) -> bytes:
+        return self._client.run(self.node_id, cmd, timeout)
+
+    def upload_file(self, local_path: str, remote_path: str,
+                    timeout: float = 60.0) -> dict:
+        return self._client.upload_file(self.node_id, local_path, remote_path, timeout)
+
+    def download_file(self, remote_path: str, local_path: str,
+                      timeout: float = 60.0) -> dict:
+        return self._client.download_file(self.node_id, remote_path, local_path, timeout)
+
+    def ping(self, timeout: float = 5.0, channel_id: int = 0) -> float:
+        return self._client.ping(self.node_id, timeout, channel_id)
+
+    def send_to_node(self, data: bytes, channel_id: int = 0) -> bool:
+        return self._client.send_to_node(self.node_id, data, channel_id)
+
+    def create_tunnel(self, dst_node_id: int,
+                      src_host: str, src_port: int,
+                      remote_host: str, remote_port: int,
+                      protocol: str = "tcp") -> Tunnel:
+        return self._client.create_tunnel(
+            self.node_id, dst_node_id,
+            src_host, src_port, remote_host, remote_port, protocol
+        )
+
+    def connect_to_node(self, ip: str, port: int, timeout: float = 10.0) -> dict:
+        return self._client.connect_to_node(ip, port, self.node_id, timeout)
+
+    def disconnect_nodes(self, node_b: int) -> dict:
+        return self._client.disconnect_nodes(self.node_id, node_b)
+
+    def __getattr__(self, name):
+        """Proxy everything else to the underlying client."""
+        return getattr(self._client, name)
+
+    def __repr__(self) -> str:
+        return f"NodeClient(node_id={self.node_id}, client={self._client!r})"
+
+
 class GanonClient:
     def __init__(
         self,
@@ -711,6 +776,15 @@ class GanonClient:
             if self._reorder_thread is not None:
                 self._reorder_thread.join(timeout=2)
                 self._reorder_thread = None
+
+    def node(self, node_id: int) -> NodeClient:
+        """Return a NodeClient bound to *node_id*.
+
+        All node-targeted methods (run_command, run, upload_file,
+        download_file, ping, send_to_node, create_tunnel, etc.) will
+        automatically use this node id as the target.
+        """
+        return NodeClient(self, node_id)
 
     def is_connected(self) -> bool:
         with self._lock:
