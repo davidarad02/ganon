@@ -170,10 +170,12 @@ Options:
 
 Commands (via Python client):
   c = GanonClient(ip, port, node_id, ..., reorder=False)  # reorder=False (default) = process packets immediately
-  c.connect()                       Connect local node to peer (sync wrapper)
+  c.connect()                       Connect to local ganon node (sync wrapper)
   await c.a_connect()               Async connect variant
   c.disconnect()                    Disconnect from the network
-  c.connect_to_node(ip, port)       Instruct local node to connect to peer at ip:port
+  c.reconnect()                     Force reconnection
+  c.node(node_id, verify=True, timeout=5.0)  Return NodeClient bound to node_id (verifies reachability by default)
+  c.connect_to_node(ip, port)       Instruct local node to connect to peer at ip:port, returns NodeClient
   c.disconnect_nodes(node_a, node_b) Disconnect node_a from node_b
   c.print_network_graph()            Print visual graph of network topology from this node's perspective
 
@@ -1016,12 +1018,24 @@ nc.run_command("uptime")           # sync
 await nc.a_run_command("uptime")   # async
 ```
 
+### `node()` — Reachability Verification
+
+`GanonClient.node(node_id, verify=True, timeout=5.0)` returns a `NodeClient` bound to the specified node id. By default it sends a ping to verify the node is reachable before returning.
+
+```python
+nc = c.node(10)                    # pings node 10 before returning (default)
+nc = c.node(10, verify=False)      # skips ping check
+nc = c.node(10, timeout=2.0)       # custom ping timeout
+```
+
+Raises `TimeoutError` if `verify=True` and the node does not respond within `timeout` seconds.
+
 ### Exception Policy
 
 All methods raise exceptions on failure instead of returning `False`/`None`/dict:
-- `ConnectionError` — not connected, send failure, TCP error
-- `TimeoutError` — no response within timeout
-- `ConnectToNodeError` — remote node reports connection failure (has `.status` and `.error_code`)
+- `ConnectionError` — not connected, send failure, TCP error, handshake failure, reconnect failure
+- `TimeoutError` — no response within timeout (ping, command execution, file transfer, connect_to_node)
+- `ConnectToNodeError` — remote node reports connection failure (has `.status` and `.error_code` attributes)
 
 ### Usage Examples
 
