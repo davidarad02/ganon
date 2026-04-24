@@ -19,6 +19,8 @@ from ganon_client.protocol import (
     DEFAULT_TTL, GANON_PROTOCOL_MAGIC, MsgType, ProtocolHeader,
     TUNNEL_PROTO_TCP, TUNNEL_PROTO_UDP, TunnelOpenPayload, TunnelClosePayload,
     ConnectCmdPayload, ConnectResponsePayload, DisconnectCmdPayload, DisconnectResponsePayload,
+    FILE_STATUS_SUCCESS, FILE_STATUS_NOT_FOUND, FILE_STATUS_NO_SPACE,
+    FILE_STATUS_READ_ONLY, FILE_STATUS_PERMISSION, FILE_STATUS_OTHER,
 )
 from ganon_client.routing import RouteType, RoutingTable
 from ganon_client.transport import Transport
@@ -163,6 +165,12 @@ class GanonClient:
 
         self._pending_pings = {}
         self._ping_lock = threading.Lock()
+
+        self._pending_execs = {}     # request_id -> (event, result_dict)
+        self._pending_uploads = {}   # request_id -> (event, result_dict)
+        self._pending_downloads = {} # request_id -> (event, result_dict)
+        self._rpc_lock = threading.Lock()
+        self._rpc_counter = 0
 
         self._tunnels: dict = {}
         self._tunnel_id_counter = 0
@@ -360,6 +368,59 @@ class GanonClient:
             if data in self._pending_pings:
                 self._pending_pings[data].set()
 
+    def _handle_exec_response(self, orig_src_node_id: int, data: bytes):
+        if len(data) < 16:
+            self._warning("EXEC_RESPONSE too short (%d bytes)", len(data))
+            return
+        request_id = struct.unpack(">I", data[:4])[0]
+        exit_code = struct.unpack(">i", data[4:8])[0]  # signed int for -1
+        stdout_len = struct.unpack(">I", data[8:12])[0]
+        stderr_len = struct.unpack(">I", data[12:16])[0]
+        stdout_data = data[16:16+stdout_len]
+        stderr_data = data[16+stdout_len:16+stdout_len+stderr_len]
+
+        with self._rpc_lock:
+            if request_id in self._pending_execs:
+                event, result = self._pending_execs[request_id]
+                result["exit_code"] = exit_code
+                result["stdout"] = stdout_data
+                result["stderr"] = stderr_data
+                event.set()
+
+    def _handle_file_upload_response(self, orig_src_node_id: int, data: bytes):
+        if len(data) < 8:
+            self._warning("FILE_UPLOAD_RESPONSE too short (%d bytes)", len(data))
+            return
+        request_id = struct.unpack(">I", data[:4])[0]
+        status = struct.unpack(">I", data[4:8])[0]
+        error_msg = data[8:].split(b"\x00")[0].decode("utf-8", errors="replace")
+
+        with self._rpc_lock:
+            if request_id in self._pending_uploads:
+                event, result = self._pending_uploads[request_id]
+                result["status"] = status
+                result["error"] = error_msg if status != 0 else ""
+                event.set()
+
+    def _handle_file_download_response(self, orig_src_node_id: int, data: bytes):
+        if len(data) < 8:
+            self._warning("FILE_DOWNLOAD_RESPONSE too short (%d bytes)", len(data))
+            return
+        request_id = struct.unpack(">I", data[:4])[0]
+        status = struct.unpack(">I", data[4:8])[0]
+
+        with self._rpc_lock:
+            if request_id in self._pending_downloads:
+                event, result = self._pending_downloads[request_id]
+                result["status"] = status
+                if status == 0:
+                    result["data"] = data[8:]
+                    result["error"] = ""
+                else:
+                    result["data"] = b""
+                    result["error"] = data[8:].split(b"\x00")[0].decode("utf-8", errors="replace")
+                event.set()
+
     def _process(self, header: dict, data: bytes):
         orig_src_node_id = header["orig_src_node_id"]
         src_node_id = header["src_node_id"]
@@ -478,6 +539,12 @@ class GanonClient:
             self._handle_pong(orig_src_node_id, src_node_id, message_id, ttl, data)
         elif msg_type == MsgType.RREP:
             self._handle_rrep(orig_src_node_id, src_node_id, message_id, ttl, data)
+        elif msg_type == MsgType.EXEC_RESPONSE:
+            self._handle_exec_response(orig_src_node_id, data)
+        elif msg_type == MsgType.FILE_UPLOAD_RESPONSE:
+            self._handle_file_upload_response(orig_src_node_id, data)
+        elif msg_type == MsgType.FILE_DOWNLOAD_RESPONSE:
+            self._handle_file_download_response(orig_src_node_id, data)
         elif msg_type == MsgType.CONNECTION_REJECTED:
             pass
         elif msg_type in (MsgType.TUNNEL_OPEN, MsgType.TUNNEL_CONN_OPEN, MsgType.TUNNEL_CONN_ACK,
@@ -1027,6 +1094,193 @@ class GanonClient:
         if parallel_routes:
             print(f"         {len(parallel_routes)} nodes have parallel routes")
         print("=" * 70 + "\n")
+
+    def _alloc_request_id(self) -> int:
+        with self._rpc_lock:
+            self._rpc_counter += 1
+            return self._rpc_counter
+
+    @require_connection
+    def run_command(self, target_node_id: int, cmd: str, timeout: float = 30.0) -> dict:
+        """Execute a command on a remote node and return separated stdout/stderr.
+
+        Args:
+            target_node_id: Node to execute the command on.
+            cmd: Shell command to execute.
+            timeout: Maximum time to wait for response in seconds.
+
+        Returns:
+            dict with keys: 'exit_code' (int), 'stdout' (bytes), 'stderr' (bytes)
+
+        Raises:
+            TimeoutError: If no response received within timeout.
+            ConnectionError: If the client is not connected.
+        """
+        request_id = self._alloc_request_id()
+        event = threading.Event()
+        result = {}
+
+        with self._rpc_lock:
+            self._pending_execs[request_id] = (event, result)
+
+        payload = struct.pack(">I", request_id) + cmd.encode("utf-8") + b"\x00"
+        msg_type_bytes = struct.pack(">I", MsgType.EXEC_CMD.value)
+
+        self._info("Executing command on node %d (req=%d): %s", target_node_id, request_id, cmd)
+
+        if not self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0):
+            with self._rpc_lock:
+                self._pending_execs.pop(request_id, None)
+            raise ConnectionError(f"Failed to send EXEC_CMD to node {target_node_id}")
+
+        if not event.wait(timeout):
+            with self._rpc_lock:
+                self._pending_execs.pop(request_id, None)
+            raise TimeoutError(f"Command execution on node {target_node_id} timed out after {timeout}s")
+
+        with self._rpc_lock:
+            self._pending_execs.pop(request_id, None)
+
+        return {
+            "exit_code": result.get("exit_code", -1),
+            "stdout": result.get("stdout", b""),
+            "stderr": result.get("stderr", b""),
+        }
+
+    @require_connection
+    def run(self, target_node_id: int, cmd: str, timeout: float = 30.0) -> bytes:
+        """Execute a command on a remote node and return undifferentiated output.
+
+        This is equivalent to running with '2>&1' — stdout and stderr are merged.
+
+        Args:
+            target_node_id: Node to execute the command on.
+            cmd: Shell command to execute.
+            timeout: Maximum time to wait for response in seconds.
+
+        Returns:
+            Combined stdout and stderr as bytes.
+
+        Raises:
+            TimeoutError: If no response received within timeout.
+            ConnectionError: If the client is not connected.
+        """
+        result = self.run_command(target_node_id, cmd, timeout)
+        return result["stdout"] + result["stderr"]
+
+    @require_connection
+    def upload_file(self, target_node_id: int, local_path: str, remote_path: str,
+                    timeout: float = 60.0) -> dict:
+        """Upload a file to a remote node.
+
+        Args:
+            target_node_id: Node to upload the file to.
+            local_path: Path to the local file.
+            remote_path: Destination path on the remote node.
+            timeout: Maximum time to wait for response in seconds.
+
+        Returns:
+            dict with keys: 'success' (bool), 'error' (str)
+
+        Raises:
+            TimeoutError: If no response received within timeout.
+            ConnectionError: If the client is not connected.
+            FileNotFoundError: If the local file does not exist.
+        """
+        with open(local_path, "rb") as f:
+            file_data = f.read()
+
+        request_id = self._alloc_request_id()
+        event = threading.Event()
+        result = {}
+
+        with self._rpc_lock:
+            self._pending_uploads[request_id] = (event, result)
+
+        path_bytes = remote_path.encode("utf-8")
+        if len(path_bytes) > 255:
+            raise ValueError("remote_path must be <= 255 bytes")
+
+        payload = struct.pack(">I", request_id)
+        payload += path_bytes.ljust(256, b"\x00")
+        payload += file_data
+
+        msg_type_bytes = struct.pack(">I", MsgType.FILE_UPLOAD.value)
+
+        self._info("Uploading %s -> node %d:%s (%d bytes, req=%d)",
+                   local_path, target_node_id, remote_path, len(file_data), request_id)
+
+        if not self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0):
+            with self._rpc_lock:
+                self._pending_uploads.pop(request_id, None)
+            raise ConnectionError(f"Failed to send FILE_UPLOAD to node {target_node_id}")
+
+        if not event.wait(timeout):
+            with self._rpc_lock:
+                self._pending_uploads.pop(request_id, None)
+            raise TimeoutError(f"File upload to node {target_node_id} timed out after {timeout}s")
+
+        with self._rpc_lock:
+            self._pending_uploads.pop(request_id, None)
+
+        status = result.get("status", FILE_STATUS_OTHER)
+        return {
+            "success": status == FILE_STATUS_SUCCESS,
+            "error": result.get("error", "Unknown error"),
+        }
+
+    @require_connection
+    def download_file(self, target_node_id: int, remote_path: str, local_path: str,
+                      timeout: float = 60.0) -> dict:
+        """Download a file from a remote node.
+
+        Args:
+            target_node_id: Node to download the file from.
+            remote_path: Path to the file on the remote node.
+            local_path: Destination path on the local machine.
+            timeout: Maximum time to wait for response in seconds.
+
+        Returns:
+            dict with keys: 'success' (bool), 'error' (str)
+
+        Raises:
+            TimeoutError: If no response received within timeout.
+            ConnectionError: If the client is not connected.
+        """
+        request_id = self._alloc_request_id()
+        event = threading.Event()
+        result = {}
+
+        with self._rpc_lock:
+            self._pending_downloads[request_id] = (event, result)
+
+        payload = struct.pack(">I", request_id) + remote_path.encode("utf-8") + b"\x00"
+        msg_type_bytes = struct.pack(">I", MsgType.FILE_DOWNLOAD.value)
+
+        self._info("Downloading node %d:%s -> %s (req=%d)",
+                   target_node_id, remote_path, local_path, request_id)
+
+        if not self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0):
+            with self._rpc_lock:
+                self._pending_downloads.pop(request_id, None)
+            raise ConnectionError(f"Failed to send FILE_DOWNLOAD to node {target_node_id}")
+
+        if not event.wait(timeout):
+            with self._rpc_lock:
+                self._pending_downloads.pop(request_id, None)
+            raise TimeoutError(f"File download from node {target_node_id} timed out after {timeout}s")
+
+        with self._rpc_lock:
+            self._pending_downloads.pop(request_id, None)
+
+        status = result.get("status", FILE_STATUS_OTHER)
+        if status == FILE_STATUS_SUCCESS:
+            file_data = result.get("data", b"")
+            with open(local_path, "wb") as f:
+                f.write(file_data)
+            return {"success": True, "error": ""}
+        else:
+            return {"success": False, "error": result.get("error", "Unknown error")}
 
     def __enter__(self):
         self.connect()
