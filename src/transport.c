@@ -13,6 +13,10 @@
 #include "transport.h"
 #include "monocypher.h"
 
+#ifdef USE_EPOLL
+#include "network_epoll.h"
+#endif
+
 #ifdef USE_LIBSODIUM
 #include <sodium.h>
 #endif
@@ -26,9 +30,6 @@
 #define TRANSPORT_RECV_STACK_SIZE 131400
 
 /* Encryption frame overhead: 4 (length) + 24 (nonce) + 16 (MAC) = 44 bytes */
-#define ENC_FRAME_OVERHEAD 44
-#define ENC_NONCE_SIZE 24
-#define ENC_MAC_SIZE 16
 
 ssize_t TRANSPORT__recv(int fd, uint8_t *buf, size_t len) {
     return recv(fd, buf, len, 0);
@@ -114,6 +115,7 @@ transport_t *TRANSPORT__create(int fd) {
     t->ctx = NULL;
     t->recv = TRANSPORT__recv;
     t->send = TRANSPORT__send;
+    t->is_nonblocking = 0;
 
     t->enc_state = ENC__INIT;
     memset(t->enc_ephemeral_priv, 0, 32);
@@ -125,6 +127,20 @@ transport_t *TRANSPORT__create(int fd) {
     t->enc_recv_nonce = 0;
     t->enc_is_initiator = 0;
 
+    t->out_head = NULL;
+    t->out_tail = NULL;
+    pthread_mutex_init(&t->out_mutex, NULL);
+    t->out_has_data = 0;
+
+    t->recv_buf = NULL;
+    t->recv_buf_len = 0;
+    t->recv_buf_cap = 0;
+
+    pthread_cond_init(&t->epoll_cv, NULL);
+    pthread_mutex_init(&t->epoll_cv_mutex, NULL);
+    t->epoll_disconnect_flag = 0;
+    t->disconnected_cb_called = 0;
+
     return t;
 }
 
@@ -135,6 +151,25 @@ void TRANSPORT__destroy(transport_t *t) {
     crypto_wipe(t->enc_ephemeral_priv, 32);
     crypto_wipe(t->enc_send_key, 32);
     crypto_wipe(t->enc_recv_key, 32);
+
+    pthread_mutex_lock(&t->out_mutex);
+    while (NULL != t->out_head) {
+        struct transport_outbuf *ob = t->out_head;
+        t->out_head = ob->next;
+        FREE(ob->data);
+        FREE(ob);
+    }
+    t->out_tail = NULL;
+    pthread_mutex_unlock(&t->out_mutex);
+    pthread_mutex_destroy(&t->out_mutex);
+
+    FREE(t->recv_buf);
+    t->recv_buf_len = 0;
+    t->recv_buf_cap = 0;
+
+    pthread_cond_destroy(&t->epoll_cv);
+    pthread_mutex_destroy(&t->epoll_cv_mutex);
+
     if (t->fd >= 0) {
         shutdown(t->fd, SHUT_RDWR);
         close(t->fd);
@@ -294,12 +329,102 @@ l_cleanup:
     return rc;
 }
 
+err_t TRANSPORT__decrypt_frame(transport_t *t, uint8_t *payload, size_t payload_len,
+                                protocol_msg_t *msg, uint8_t **data) {
+    err_t rc = E__SUCCESS;
+    uint8_t *plaintext = NULL;
+
+    VALIDATE_ARGS(t, payload, msg, data);
+
+    *data = NULL;
+
+    if (payload_len < (ENC_NONCE_SIZE + ENC_MAC_SIZE)) {
+        LOG_WARNING("Frame too small for nonce+mac: %zu on fd=%d", payload_len, t->fd);
+        FAIL(E__NET__SOCKET_CONNECT_FAILED);
+    }
+
+    uint8_t *nonce = payload;
+    uint8_t *mac = payload + ENC_NONCE_SIZE;
+    uint8_t *ciphertext = payload + ENC_NONCE_SIZE + ENC_MAC_SIZE;
+    size_t ciphertext_len = payload_len - ENC_NONCE_SIZE - ENC_MAC_SIZE;
+
+    /* Verify nonce: must exactly match expected counter */
+    uint64_t recv_counter = (uint64_t)nonce[16] |
+                           ((uint64_t)nonce[17] << 8) |
+                           ((uint64_t)nonce[18] << 16) |
+                           ((uint64_t)nonce[19] << 24) |
+                           ((uint64_t)nonce[20] << 32) |
+                           ((uint64_t)nonce[21] << 40) |
+                           ((uint64_t)nonce[22] << 48) |
+                           ((uint64_t)nonce[23] << 56);
+
+    if (recv_counter != t->enc_recv_nonce) {
+        LOG_WARNING("Replay detected on fd=%d: expected nonce %llu, got %llu",
+                    t->fd, (unsigned long long)t->enc_recv_nonce,
+                    (unsigned long long)recv_counter);
+        FAIL(E__CRYPTO__REPLAY_DETECTED);
+    }
+    t->enc_recv_nonce++;
+
+    uint8_t plaintext_stack[TRANSPORT_RECV_STACK_SIZE];
+    int plaintext_heap = (ciphertext_len > TRANSPORT_RECV_STACK_SIZE);
+    if (plaintext_heap) {
+        plaintext = malloc(ciphertext_len);
+        if (NULL == plaintext) {
+            FAIL(E__INVALID_ARG_NULL_POINTER);
+        }
+    } else {
+        plaintext = plaintext_stack;
+    }
+
+#ifdef USE_LIBSODIUM
+    if (0 != crypto_aead_xchacha20poly1305_ietf_decrypt_detached(
+            plaintext, NULL, ciphertext, ciphertext_len, mac,
+            NULL, 0, nonce, t->enc_recv_key)) {
+        LOG_WARNING("Decryption failed on fd=%d", t->fd);
+        if (plaintext_heap) FREE(plaintext);
+        FAIL(E__CRYPTO__DECRYPT_FAILED);
+    }
+#else
+    /* Use a local DJB context with the cached subkey.  This is exactly
+     * what crypto_aead_unlock() does internally, minus the redundant
+     * crypto_chacha20_h() call (our nonce prefix is always 16 zeros). */
+    {
+        crypto_aead_ctx ctx;
+        memcpy(ctx.key, t->enc_recv_subkey, 32);
+        memcpy(ctx.nonce, nonce + 16, 8);
+        ctx.counter = 0;
+        if (0 != crypto_aead_read(&ctx, plaintext, mac,
+                                  NULL, 0, ciphertext, ciphertext_len)) {
+            LOG_WARNING("Decryption failed on fd=%d", t->fd);
+            if (plaintext_heap) FREE(plaintext);
+            FAIL(E__CRYPTO__DECRYPT_FAILED);
+        }
+    }
+#endif
+
+    size_t unserialize_data_len = 0;
+    rc = PROTOCOL__unserialize(plaintext, ciphertext_len, msg, data, &unserialize_data_len);
+    if (E__SUCCESS != rc) {
+        LOG_WARNING("Failed to unserialize decrypted message from fd %d", t->fd);
+        if (plaintext_heap) FREE(plaintext);
+        goto l_cleanup;
+    }
+
+    LOG_TRACE("RECV msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u, channel=%u, fd=%d",
+              msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
+              msg->message_id, msg->type, msg->data_length, msg->ttl, msg->channel_id, t->fd);
+
+    if (plaintext_heap) FREE(plaintext);
+l_cleanup:
+    return rc;
+}
+
 err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
     err_t rc = E__SUCCESS;
     uint8_t len_buf[4];
     uint32_t frame_len = 0;
     uint8_t *frame = NULL;
-    uint8_t *plaintext = NULL;
     ssize_t dummy;
 
     VALIDATE_ARGS(t, msg, data);
@@ -338,87 +463,90 @@ err_t TRANSPORT__recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
         goto l_cleanup;
     }
 
-    /* Decrypt frame: nonce(24) || mac(16) || ciphertext(N) */
-    uint8_t *nonce = frame;
-    uint8_t *mac = frame + ENC_NONCE_SIZE;
-    uint8_t *ciphertext = frame + ENC_NONCE_SIZE + ENC_MAC_SIZE;
-    size_t ciphertext_len = frame_len - ENC_NONCE_SIZE - ENC_MAC_SIZE;
+    rc = TRANSPORT__decrypt_frame(t, frame, frame_len, msg, data);
+    if (frame_heap) FREE(frame);
+    FAIL_IF(E__SUCCESS != rc, rc);
 
-    /* Verify nonce: must exactly match expected counter */
-    uint64_t recv_counter = (uint64_t)nonce[16] |
-                           ((uint64_t)nonce[17] << 8) |
-                           ((uint64_t)nonce[18] << 16) |
-                           ((uint64_t)nonce[19] << 24) |
-                           ((uint64_t)nonce[20] << 32) |
-                           ((uint64_t)nonce[21] << 40) |
-                           ((uint64_t)nonce[22] << 48) |
-                           ((uint64_t)nonce[23] << 56);
+l_cleanup:
+    return rc;
+}
 
-    if (recv_counter != t->enc_recv_nonce) {
-        LOG_WARNING("Replay detected on fd=%d: expected nonce %llu, got %llu",
-                    t->fd, (unsigned long long)t->enc_recv_nonce,
-                    (unsigned long long)recv_counter);
-        if (frame_heap) FREE(frame);
-        FAIL(E__CRYPTO__REPLAY_DETECTED);
-    }
-    t->enc_recv_nonce++;
+err_t TRANSPORT__enqueue_outbuf(transport_t *t, uint8_t *data, size_t len) {
+    err_t rc = E__SUCCESS;
+    struct transport_outbuf *ob = NULL;
 
-    uint8_t plaintext_stack[TRANSPORT_RECV_STACK_SIZE];
-    int plaintext_heap = (ciphertext_len > TRANSPORT_RECV_STACK_SIZE);
-    if (plaintext_heap) {
-        plaintext = malloc(ciphertext_len);
-        if (NULL == plaintext) {
-            if (frame_heap) FREE(frame);
-            FAIL(E__INVALID_ARG_NULL_POINTER);
-        }
+    VALIDATE_ARGS(t, data);
+
+    ob = malloc(sizeof(struct transport_outbuf));
+    FAIL_IF(NULL == ob, E__INVALID_ARG_NULL_POINTER);
+
+    ob->data = data;
+    ob->len = len;
+    ob->sent = 0;
+    ob->next = NULL;
+
+    pthread_mutex_lock(&t->out_mutex);
+    if (NULL == t->out_tail) {
+        t->out_head = ob;
+        t->out_tail = ob;
     } else {
-        plaintext = plaintext_stack;
+        t->out_tail->next = ob;
+        t->out_tail = ob;
     }
+    t->out_has_data = 1;
+    pthread_mutex_unlock(&t->out_mutex);
 
-#ifdef USE_LIBSODIUM
-    if (0 != crypto_aead_xchacha20poly1305_ietf_decrypt_detached(
-            plaintext, NULL, ciphertext, ciphertext_len, mac,
-            NULL, 0, nonce, t->enc_recv_key)) {
-        LOG_WARNING("Decryption failed on fd=%d", t->fd);
-        if (frame_heap) FREE(frame);
-        if (plaintext_heap) FREE(plaintext);
-        FAIL(E__CRYPTO__DECRYPT_FAILED);
-    }
-#else
-    /* Use a local DJB context with the cached subkey.  This is exactly
-     * what crypto_aead_unlock() does internally, minus the redundant
-     * crypto_chacha20_h() call (our nonce prefix is always 16 zeros). */
-    {
-        crypto_aead_ctx ctx;
-        memcpy(ctx.key, t->enc_recv_subkey, 32);
-        memcpy(ctx.nonce, nonce + 16, 8);
-        ctx.counter = 0;
-        if (0 != crypto_aead_read(&ctx, plaintext, mac,
-                                  NULL, 0, ciphertext, ciphertext_len)) {
-            LOG_WARNING("Decryption failed on fd=%d", t->fd);
-            if (frame_heap) FREE(frame);
-            if (plaintext_heap) FREE(plaintext);
-            FAIL(E__CRYPTO__DECRYPT_FAILED);
-        }
+#ifdef USE_EPOLL
+    if (t->is_nonblocking) {
+        NETWORK__epoll_enable_out(t);
     }
 #endif
 
-    if (frame_heap) FREE(frame);
+l_cleanup:
+    return rc;
+}
 
-    size_t unserialize_data_len = 0;
-    rc = PROTOCOL__unserialize(plaintext, ciphertext_len, msg, data, &unserialize_data_len);
-    if (E__SUCCESS != rc) {
-        LOG_WARNING("Failed to unserialize decrypted message from fd %d", t->fd);
-        if (plaintext_heap) FREE(plaintext);
-        goto l_cleanup;
+err_t TRANSPORT__drain_outbuf(transport_t *t, int *would_block) {
+    err_t rc = E__SUCCESS;
+
+    if (NULL != would_block) {
+        *would_block = 0;
     }
 
-    LOG_TRACE("RECV msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u, channel=%u, fd=%d",
-              msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
-              msg->message_id, msg->type, msg->data_length, msg->ttl, msg->channel_id, t->fd);
+    if (NULL == t) {
+        return E__INVALID_ARG_NULL_POINTER;
+    }
 
-    if (plaintext_heap) FREE(plaintext);
-l_cleanup:
+    pthread_mutex_lock(&t->out_mutex);
+    while (NULL != t->out_head) {
+        struct transport_outbuf *ob = t->out_head;
+        ssize_t n = send(t->fd, ob->data + ob->sent, ob->len - ob->sent, MSG_NOSIGNAL);
+        if (0 > n) {
+            if (EAGAIN == errno || EWOULDBLOCK == errno) {
+                if (NULL != would_block) {
+                    *would_block = 1;
+                }
+                break;
+            }
+            LOG_WARNING("send failed on fd %d: %s", t->fd, strerror(errno));
+            rc = E__NET__SEND_FAILED;
+            break;
+        }
+        ob->sent += (size_t)n;
+        if (ob->sent >= ob->len) {
+            t->out_head = ob->next;
+            if (NULL == t->out_head) {
+                t->out_tail = NULL;
+            }
+            FREE(ob->data);
+            FREE(ob);
+        }
+    }
+    if (NULL == t->out_head) {
+        t->out_has_data = 0;
+    }
+    pthread_mutex_unlock(&t->out_mutex);
+
     return rc;
 }
 
@@ -498,11 +626,20 @@ err_t TRANSPORT__send_msg(transport_t *t, const protocol_msg_t *msg, const uint8
 
     if (plain_heap) FREE(plain_buf);
 
-    rc = TRANSPORT__send_all(t, frame, total_len, NULL);
-    FREE(frame);
-    FAIL_IF(E__SUCCESS != rc, rc);
+    if (t->is_nonblocking) {
+        /* Epoll mode: hand frame ownership to the outbound queue.
+         * The event loop will free it after sending. */
+        rc = TRANSPORT__enqueue_outbuf(t, frame, total_len);
+        frame = NULL; /* ownership transferred */
+        FAIL_IF(E__SUCCESS != rc, rc);
+    } else {
+        rc = TRANSPORT__send_all(t, frame, total_len, NULL);
+        FREE(frame);
+        FAIL_IF(E__SUCCESS != rc, rc);
+    }
 
 l_cleanup:
+    if (NULL != frame) FREE(frame);
     return rc;
 }
 

@@ -3,9 +3,9 @@ if(NOT TARGET_NAME)
 endif()
 
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c protocol.c loadbalancer.c tunnel.c monocypher.c)
+    set(LOGGING_SOURCES main.c logging.c args.c network.c network_caps.c network_epoll.c session.c transport.c routing.c protocol.c loadbalancer.c tunnel.c monocypher.c)
 else()
-    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c protocol.c loadbalancer.c tunnel.c monocypher.c)
+    set(LOGGING_SOURCES main.c args.c network.c network_caps.c network_epoll.c session.c transport.c routing.c protocol.c loadbalancer.c tunnel.c monocypher.c)
 endif()
 
 find_package(Threads REQUIRED)
@@ -16,6 +16,12 @@ endif()
 add_executable(${TARGET_NAME} ${LOGGING_SOURCES})
 target_link_libraries(${TARGET_NAME} Threads::Threads)
 target_include_directories(${TARGET_NAME} PUBLIC ${CMAKE_SOURCE_DIR}/include)
+
+include(CheckSymbolExists)
+check_symbol_exists(epoll_create "sys/epoll.h" HAVE_EPOLL)
+if(HAVE_EPOLL)
+    target_compile_definitions(${TARGET_NAME} PRIVATE USE_EPOLL)
+endif()
 
 # Optional libsodium for high-performance XChaCha20-Poly1305 on x64
 set(LIBSODIUM_ROOT "${CMAKE_SOURCE_DIR}/third_party/libsodium-install")

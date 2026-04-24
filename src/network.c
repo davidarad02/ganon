@@ -17,6 +17,11 @@
 #include "network.h"
 #include "transport.h"
 #include "tunnel.h"
+#include "network_caps.h"
+
+#ifdef USE_EPOLL
+#include "network_epoll.h"
+#endif
 
 network_t g_network;
 
@@ -189,6 +194,24 @@ static void *socket_thread_func(void *arg) {
         net->connected_cb(t);
     }
 
+#ifdef USE_EPOLL
+    if (g_net_caps.has_epoll && g_epoll_fd >= 0) {
+        int flags = fcntl(t->fd, F_GETFL, 0);
+        if (flags >= 0) {
+            fcntl(t->fd, F_SETFL, flags | O_NONBLOCK);
+        }
+        t->is_nonblocking = 1;
+        if (E__SUCCESS == NETWORK__epoll_add(t)) {
+            pthread_mutex_lock(&t->epoll_cv_mutex);
+            while (!t->epoll_disconnect_flag && net->running) {
+                pthread_cond_wait(&t->epoll_cv, &t->epoll_cv_mutex);
+            }
+            pthread_mutex_unlock(&t->epoll_cv_mutex);
+        }
+        goto l_cleanup;
+    }
+#endif
+
     while (true) {
         protocol_msg_t msg;
         uint8_t *data = NULL;
@@ -207,7 +230,14 @@ static void *socket_thread_func(void *arg) {
 l_cleanup:
     LOG_INFO("Connection %s:%d closed", t->client_ip, t->client_port);
 
-    if (NULL != net->disconnected_cb) {
+    if (t->is_nonblocking) {
+#ifdef USE_EPOLL
+        NETWORK__epoll_remove(t);
+#endif
+    }
+
+    if (NULL != net->disconnected_cb && !t->disconnected_cb_called) {
+        t->disconnected_cb_called = 1;
         net->disconnected_cb(t);
     }
 
@@ -455,6 +485,20 @@ err_t NETWORK__init(OUT network_t *net, IN const args_t *args, IN int node_id, I
 
     net->running = 1;
 
+    NETWORK__probe_caps();
+    NETWORK__log_caps();
+
+#ifdef USE_EPOLL
+    if (g_net_caps.has_epoll) {
+        rc = NETWORK__epoll_init(net);
+        if (E__SUCCESS != rc) {
+            LOG_WARNING("Failed to initialize epoll, falling back to thread-per-connection");
+            g_net_caps.has_epoll = 0;
+            rc = E__SUCCESS;
+        }
+    }
+#endif
+
     if (0 != pthread_create(&net->accept_thread, NULL, accept_thread_func, net)) {
         LOG_ERROR("Failed to create accept thread");
         close(net->listen_fd);
@@ -516,29 +560,47 @@ err_t NETWORK__shutdown(network_t *net) {
         close(net->listen_fd);
     }
 
+#ifdef USE_EPOLL
+    NETWORK__epoll_shutdown();
+#endif
+
     if (0 != pthread_mutex_lock(&net->clients_mutex)) {
         LOG_ERROR("Failed to lock mutex during shutdown");
         FAIL(E__NET__INVALID_SOCKET);
     }
 
     socket_entry_t *head = net->clients;
-    socket_entry_t *iter = head;
     net->clients = NULL;
+    pthread_mutex_unlock(&net->clients_mutex);
 
+    /* Signal all epoll stub threads to exit */
+    socket_entry_t *iter = head;
+    while (NULL != iter) {
+        if (iter->t->is_nonblocking) {
+            pthread_mutex_lock(&iter->t->epoll_cv_mutex);
+            iter->t->epoll_disconnect_flag = 1;
+            pthread_cond_broadcast(&iter->t->epoll_cv);
+            pthread_mutex_unlock(&iter->t->epoll_cv_mutex);
+        }
+        iter = iter->next;
+    }
+
+    /* Join all client threads before destroying transports */
+    iter = head;
+    while (NULL != iter) {
+        if (0 != iter->thread) {
+            pthread_join(iter->thread, NULL);
+        }
+        iter = iter->next;
+    }
+
+    /* Now safe to destroy transports */
+    iter = head;
     while (NULL != iter) {
         socket_entry_t *next = iter->next;
         TRANSPORT__destroy(iter->t);
+        FREE(iter);
         iter = next;
-    }
-
-    pthread_mutex_unlock(&net->clients_mutex);
-
-    while (NULL != head) {
-        socket_entry_t *next = head->next;
-        if (0 != head->thread) {
-            pthread_join(head->thread, NULL);
-        }
-        head = next;
     }
 
     pthread_mutex_destroy(&net->clients_mutex);

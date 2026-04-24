@@ -29,8 +29,10 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `src/args.c` - Argument parsing implementation
 - `src/logging.c` - Logging implementation
 - `src/network.c` - Socket management, accept loop, reconnection logic, global singleton `g_network`
+- `src/network_caps.c` - Runtime kernel capability probing (epoll, sendmmsg, recvmmsg, eventfd, signalfd, timerfd)
+- `src/network_epoll.c` - Epoll event loop backend (non-blocking recv/send, per-transport buffers)
 - `src/session.c` - Protocol logic (NODE_INIT, PEER_INFO, NODE_DISCONNECT, CONNECTION_REJECTED handlers)
-- `src/transport.c` - Buffer layer, recv/send protocol_msg_t, connection abstraction
+- `src/transport.c` - Buffer layer, recv/send protocol_msg_t, connection abstraction, outbound queue
 - `src/protocol.c` - Protocol parsing, serialization, byte order conversion
 - `src/routing.c` - Routing table, ROUTING__on_message for broadcast/forward logic, global singleton `g_node_id`
 - `src/loadbalancer.c` - Multi-route load balancing strategies (round-robin) and reordering buffer logic
@@ -42,6 +44,8 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `include/logging.h` - Logging macros (LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE)
 - `include/args.h` - Argument parsing, addr_t struct, args_t config
 - `include/network.h` - Network initialization, `g_network` global singleton, callbacks
+- `include/network_caps.h` - Runtime capability detection API
+- `include/network_epoll.h` - Epoll event loop interface
 - `include/protocol.h` - Protocol message structs, macros, parsing/serialization functions
 - `include/session.h` - Session protocol handling (SESSION__on_message, SESSION__on_connected, etc.)
 - `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_msg, TRANSPORT__send_msg, peer metadata)
@@ -96,6 +100,23 @@ The architecture is separated into four distinct layers:
    - Transparently broadcast `RREQ` (Route Requests) for unmapped destinations
    - Owns global `g_node_id` and `g_rt` (routing table pointer) singletons
    - `ROUTING__broadcast()` - iterates direct routes, sends to each via transport
+
+### Network Backends
+
+The network layer supports two I/O backends, selected at compile-time and runtime:
+
+1. **Thread-per-connection** (fallback): Each TCP connection gets a dedicated thread that performs blocking `recv()` / `send()`. Used when `USE_EPOLL` is undefined (non-Linux or manual override).
+
+2. **Epoll event loop** (default on Linux): A single epoll thread handles all sockets. After the encryption handshake completes, the socket is switched to non-blocking mode and registered with `epoll`. The event loop:
+   - Reads available data into a per-transport `recv_buf`, parsing complete encrypted frames
+   - Drains per-transport outbound queues via `EPOLLOUT`
+   - Signals a condition variable on disconnect so the per-connection stub thread can exit and the reconnect loop can proceed
+
+`transport_t->is_nonblocking` controls send behavior:
+- `0` (thread mode): `TRANSPORT__send_msg()` calls `send()` directly
+- `1` (epoll mode): `TRANSPORT__send_msg()` enqueues the encrypted frame; the event loop drains it
+
+Dynamic runtime detection (`network_caps.c`) probes the kernel via raw syscalls for `epoll`, `sendmmsg`, `recvmmsg`, `eventfd`, `signalfd`, and `timerfd`. If `epoll` is unavailable, the code falls back to the thread model automatically.
 
 ### Key Design Principles
 
@@ -489,6 +510,47 @@ struct transport {
     void *ctx;
     ssize_t (*recv)(int fd, uint8_t *buf, size_t len);
     ssize_t (*send)(int fd, const uint8_t *buf, size_t len);
+
+    /* Set to 1 when the socket is managed by an epoll event loop.
+     * In this mode TRANSPORT__send_msg() enqueues instead of calling
+     * send() directly, and the event loop drains the outbound queue. */
+    int is_nonblocking;
+
+    /* Transport-layer encryption state */
+    enc_state_t enc_state;
+    uint8_t enc_ephemeral_priv[32];
+    uint8_t enc_ephemeral_pub[32];
+    uint8_t enc_send_key[32];
+    uint8_t enc_recv_key[32];
+    uint64_t enc_send_nonce;
+    uint64_t enc_recv_nonce;
+    uint8_t enc_session_id[8];
+    int enc_is_initiator;
+
+    /* Cached XChaCha20 subkeys for libsodium/Monocypher optimization */
+    uint8_t enc_send_subkey[32];
+    uint8_t enc_recv_subkey[32];
+
+    /* Outbound queue for epoll event-loop mode */
+    struct transport_outbuf {
+        uint8_t *data;
+        size_t len;
+        size_t sent;
+        struct transport_outbuf *next;
+    } *out_head, *out_tail;
+    pthread_mutex_t out_mutex;
+    int out_has_data;
+
+    /* Epoll recv buffer: accumulates partial encrypted frames */
+    uint8_t *recv_buf;
+    size_t recv_buf_len;
+    size_t recv_buf_cap;
+
+    /* Epoll synchronization */
+    pthread_cond_t epoll_cv;
+    pthread_mutex_t epoll_cv_mutex;
+    int epoll_disconnect_flag;
+    int disconnected_cb_called;
 };
 ```
 
@@ -573,6 +635,15 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Create `PERFORMANCE_PLAN.md` with ranked list of future optimizations (io_uring, kTLS, splice, batching, etc.)
 - [x] Add detailed Appendix A to `PERFORMANCE_PLAN.md` covering io_uring on legacy kernels (2.6.x, 3.3.x) and embedded architectures (ARM/MIPS)
 - [x] Add kernel-generation-specific optimization availability table (2.6.x vs 3.3.x vs 5.6+) with estimated impact per generation
+- [x] Implement runtime kernel capability probing (`network_caps.c/h`)
+- [x] Implement epoll event loop foundation (`network_epoll.c/h`) with per-transport recv buffers and outbound queues
+- [x] Refactor `TRANSPORT__recv_msg()` to extract `TRANSPORT__decrypt_frame()` for reuse by epoll loop
+- [x] Build and test epoll mode on localhost (two-node mesh)
+- [x] Build and test thread-per-connection fallback compilation
+- [ ] Phase 2: Implement `sendmmsg`/`recvmmsg` batching in epoll loop
+- [ ] Phase 3: Integrate `eventfd` for cross-thread wakeup (shutdown, outbound queue notify)
+- [ ] Phase 4: Integrate `signalfd`/`timerfd` to move signal and timer handling into epoll loop
+- [ ] Phase 5: Add `SO_BUSY_POLL` support for low-latency socket polling
 
 ## Known Bugs - Multi-Path Tunnel Race Conditions
 
