@@ -165,6 +165,7 @@ Options:
   --reconnect-delay N       Delay between reconnect attempts (default: 5 seconds)
   --lb-strategy STR         Load balancing strategy: 'round-robin' (default) or 'all-routes'
   --tcp-rcvbuf N            TCP receive buffer size in bytes for tunnel connections (0 = system default)
+  --file-chunk-size N       File upload/download chunk size in bytes (default: 262144 = 256KB)
   --reorder                Enable packet reordering/buffering (default: disabled, packets processed immediately)
   -h, --help                Show this help message
 
@@ -486,7 +487,9 @@ Sent to a node to execute a shell command. The target node forks `/bin/sh -c <cm
 ```
 [4 bytes]  request_id
 [256 bytes] remote path (null-padded string)
-[N bytes]  file data
+[4 bytes]  chunk_index (0-based, 0 for single upload)
+[4 bytes]  total_chunks (1 for single upload, >1 for chunked)
+[N bytes]  file data (chunk data for chunked uploads)
 ```
 
 **FILE_UPLOAD_RESPONSE**: data layout:
@@ -500,12 +503,15 @@ Sent to a node to execute a shell command. The target node forks `/bin/sh -c <cm
 ```
 [4 bytes]  request_id
 [N bytes]  path string (null-terminated)
+[4 bytes]  offset (byte offset to start reading, 0 = start of file)
+[4 bytes]  length (bytes to read, 0 = entire file for backwards compat)
 ```
 
 **FILE_DOWNLOAD_RESPONSE**: data layout:
 ```
 [4 bytes]  request_id
 [4 bytes]  status (0=success, 1=not found, 4=permission denied, 5=other)
+[4 bytes]  total_size (total file size on disk, 0 if error)
 [N bytes]  file data (if success) or error message (if failure)
 ```
 
@@ -713,6 +719,10 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [x] Make `node()` verify reachability with a ping before returning (configurable via `verify=` and `timeout=`)
 - [x] Python client: convert silent failures to explicit exceptions - `connect()`, `reconnect()`, `_connect()`, `_send_protocol_message()`, `send_to_node()`, `disconnect_nodes()` all raise `ConnectionError` instead of returning `False`/`None`/dict; `run_command()`, `upload_file()`, `download_file()` no longer manually check send return values
 - [x] Refactor Python client to async-capable architecture - manages internal asyncio event loop in background thread, all I/O methods are async with `a_` prefixes, sync wrappers use `asyncio.run_coroutine_threadsafe()`, response correlation uses `asyncio.Future` instead of `threading.Event`
+- [x] Add pluggable network skins abstraction - `skin_ops_t` vtable for connect/accept/listen/send/recv/teardown, registry by name and ID, multi-listener support, `--skin`/`--default-skin`/`--listen` CLI flags, `ConnectCmdPayload` gains `skin_id` field
+- [x] Implement Python skin abstraction - `NetworkSkin` enum, `NetworkSkinImpl` ABC, `TcpMonocypherSkin` class, skin registry, `GanonClient(skin=NetworkSkin.TCP_MONOCYPHER)` parameter
+- [x] Add file chunking for uploads/downloads - `--file-chunk-size` CLI flag (default 256KB), `FILE_CHUNK_SIZE` env, `GanonClient(file_chunk_size=...)` parameter, chunked FILE_UPLOAD with chunk_index/total_chunks, chunked FILE_DOWNLOAD with offset/length, FILE_DOWNLOAD_RESPONSE includes total_size
+- [x] Replace `run_in_executor` socket connect with native asyncio `loop.sock_connect` in TcpMonocypherSkin
 
 ## Known Bugs - Multi-Path Tunnel Race Conditions
 

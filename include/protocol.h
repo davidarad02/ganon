@@ -61,6 +61,7 @@ typedef struct __attribute__((packed)) {
     uint32_t request_id;  /* correlation id echoed back in response */
     char target_ip[64];
     uint32_t target_port;
+    uint32_t skin_id;     /* 0 = use default skin on the receiving node */
 } connect_cmd_payload_t;
 
 typedef struct __attribute__((packed)) {

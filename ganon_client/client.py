@@ -1,6 +1,5 @@
 import logging
 import asyncio
-import socket
 import struct
 import threading
 import time
@@ -38,9 +37,11 @@ from ganon_client.protocol import (
     CONNECT_STATUS_SUCCESS, CONNECT_STATUS_REFUSED, CONNECT_STATUS_TIMEOUT, CONNECT_STATUS_ERROR,
     FILE_STATUS_SUCCESS, FILE_STATUS_NOT_FOUND, FILE_STATUS_NO_SPACE,
     FILE_STATUS_READ_ONLY, FILE_STATUS_PERMISSION, FILE_STATUS_OTHER,
+    FILE_CHUNK_SIZE, FileUploadPayload, FileDownloadPayload, FileDownloadResponseHeader,
 )
 from ganon_client.routing import RouteType, RoutingTable
-from ganon_client.transport import Transport
+from ganon_client.skin import NetworkSkin, NetworkSkinImpl, get_skin_impl
+import ganon_client.skins  # noqa: F401 — registers all skins
 
 LOG_LEVEL_TRACE = 0
 LOG_LEVEL_DEBUG = 1
@@ -245,11 +246,11 @@ class NodeClient:
             src_host, src_port, remote_host, remote_port, protocol
         )
 
-    def a_connect_to_node(self, ip: str, port: int, timeout: float = 10.0):
-        return self._client.a_connect_to_node(ip, port, self.node_id, timeout)
+    def a_connect_to_node(self, ip: str, port: int, skin: NetworkSkin = None, timeout: float = 10.0):
+        return self._client.a_connect_to_node(ip, port, self.node_id, skin=skin, timeout=timeout)
 
-    def connect_to_node(self, ip: str, port: int, timeout: float = 10.0) -> "NodeClient":
-        return self._client.connect_to_node(ip, port, self.node_id, timeout)
+    def connect_to_node(self, ip: str, port: int, skin: NetworkSkin = None, timeout: float = 10.0) -> "NodeClient":
+        return self._client.connect_to_node(ip, port, target_node_id=self.node_id, skin=skin, timeout=timeout)
 
     def a_disconnect_nodes(self, node_b: int):
         return self._client.a_disconnect_nodes(self.node_id, node_b)
@@ -277,6 +278,8 @@ class GanonClient:
         log_level: int = LOG_LEVEL_DEBUG,
         reorder_timeout: int = 100,
         reorder: bool = False,
+        skin: NetworkSkin = NetworkSkin.TCP_MONOCYPHER,
+        file_chunk_size: int = FILE_CHUNK_SIZE,
     ):
         self.ip = ip
         self.port = port
@@ -287,8 +290,10 @@ class GanonClient:
         self.log_level = log_level
         self.reorder_timeout = reorder_timeout
         self.reorder = reorder
+        self._skin = skin
+        self._file_chunk_size = file_chunk_size
 
-        self._sock: Optional[Transport] = None
+        self._sock: Optional[NetworkSkinImpl] = None
         self._running = False
         self._lock = threading.RLock()
         self._reconnecting = False
@@ -384,39 +389,13 @@ class GanonClient:
     def set_on_reconnected(self, callback: Callable[[], None]):
         self._on_reconnected = callback
 
-    def _connect(self) -> Transport:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.settimeout(self.connect_timeout)
-
-        try:
-            self._info("Connecting to %s:%s...", self.ip, self.port)
-            sock.connect((self.ip, self.port))
-            self._info("Connected to %s:%s", self.ip, self.port)
-            sock.settimeout(None)
-        except socket.timeout:
-            sock.close()
-            raise ConnectionError(
-                f"Connect to {self.ip}:{self.port} timed out after {self.connect_timeout}s"
-            )
-        except socket.error as e:
-            sock.close()
-            raise ConnectionError(
-                f"Failed to connect to {self.ip}:{self.port}: {e}"
-            )
-
-        transport = Transport(sock)
-        self._info("Starting encryption handshake...")
-        if not transport.do_handshake(is_initiator=True):
-            try:
-                sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            sock.close()
-            raise ConnectionError(
-                f"Encryption handshake with {self.ip}:{self.port} failed"
-            )
-        self._info("Encryption handshake complete")
-        sock.setblocking(False)
+    async def _a_open_skin(self) -> NetworkSkinImpl:
+        impl_class = get_skin_impl(self._skin)
+        if impl_class is None:
+            raise ConnectionError(f"No implementation registered for skin {self._skin.name}")
+        self._info("Connecting to %s:%s (skin=%s)...", self.ip, self.port, self._skin.name)
+        transport = await impl_class.open(self.ip, self.port, self.connect_timeout)
+        self._info("Connected and handshake complete: %s:%s", self.ip, self.port)
         return transport
 
     def _handle_node_init(self, orig_src_node_id: int, src_node_id: int, message_id: int, ttl: int, data: bytes):
@@ -551,22 +530,33 @@ class GanonClient:
                 future.set_result(None)
 
     def _handle_file_download_response(self, orig_src_node_id: int, data: bytes):
-        if len(data) < 8:
-            self._warning("FILE_DOWNLOAD_RESPONSE too short (%d bytes)", len(data))
-            return
-        request_id = struct.unpack(">I", data[:4])[0]
-        status = struct.unpack(">I", data[4:8])[0]
+        # Response format: request_id(4) + status(4) + total_size(4) + data
+        if len(data) < 12:
+            # Fallback for legacy format: request_id(4) + status(4) + data
+            if len(data) < 8:
+                self._warning("FILE_DOWNLOAD_RESPONSE too short (%d bytes)", len(data))
+                return
+            request_id = struct.unpack(">I", data[:4])[0]
+            status = struct.unpack(">I", data[4:8])[0]
+            total_size = 0
+            payload = data[8:]
+        else:
+            request_id = struct.unpack(">I", data[:4])[0]
+            status = struct.unpack(">I", data[4:8])[0]
+            total_size = struct.unpack(">I", data[8:12])[0]
+            payload = data[12:]
 
         with self._rpc_lock:
             if request_id in self._pending_downloads:
                 future, result = self._pending_downloads[request_id]
                 result["status"] = status
+                result["total_size"] = total_size
                 if status == 0:
-                    result["data"] = data[8:]
+                    result["data"] = payload
                     result["error"] = ""
                 else:
                     result["data"] = b""
-                    result["error"] = data[8:].split(b"\x00")[0].decode("utf-8", errors="replace")
+                    result["error"] = payload.split(b"\x00")[0].decode("utf-8", errors="replace")
                 future.set_result(None)
 
     def _handle_connect_response(self, orig_src_node_id: int, data: bytes):
@@ -717,7 +707,7 @@ class GanonClient:
     async def _protocol_loop(self):
         while self._running:
             try:
-                plaintext = await self._sock.a_recv_decrypted()
+                plaintext = await self._sock.recv()
             except Exception as e:
                 self._warning("Error in protocol loop recv: %s", e)
                 plaintext = None
@@ -763,14 +753,8 @@ class GanonClient:
         self._close_all_tunnels()
         with self._lock:
             if self._sock:
-                try:
-                    self._sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                try:
-                    self._sock.close()
-                except OSError:
-                    pass
+                self._sock.shutdown()
+                self._sock.close()
                 self._sock = None
 
         if self._running and not self._reconnecting:
@@ -795,7 +779,7 @@ class GanonClient:
                       self.ip, self.port, retry + 1, "" if unlimited else f"/{self.reconnect_retries}")
 
             try:
-                transport = await self._loop.run_in_executor(None, self._connect)
+                transport = await self._a_open_skin()
             except ConnectionError:
                 transport = None
 
@@ -834,7 +818,7 @@ class GanonClient:
             "channel_id": 0,
         })
 
-        await self._sock.a_send_encrypted(header)
+        await self._sock.send(header)
 
     def _start_background_threads(self):
         loop = asyncio.get_running_loop()
@@ -856,7 +840,7 @@ class GanonClient:
         return _AsyncBridge(self._a_connect_impl(), self._loop)
 
     async def _a_connect_impl(self):
-        transport = await self._loop.run_in_executor(None, self._connect)
+        transport = await self._a_open_skin()
         with self._lock:
             self._sock = transport
             self._running = True
@@ -883,14 +867,8 @@ class GanonClient:
 
         if self._sock is not None:
             self._info("Disconnecting from %s:%d", self.ip, self.port)
-            try:
-                self._sock.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
-            try:
-                self._sock.close()
-            except OSError:
-                pass
+            self._sock.shutdown()
+            self._sock.close()
             self._sock = None
 
     def a_disconnect(self):
@@ -901,14 +879,8 @@ class GanonClient:
             self._running = False
             self._reconnecting = False
             if self._sock is not None:
-                try:
-                    self._sock.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                try:
-                    self._sock.close()
-                except OSError:
-                    pass
+                self._sock.shutdown()
+                self._sock.close()
                 self._sock = None
             return
         return self._sync(self._a_disconnect_impl())
@@ -927,10 +899,7 @@ class GanonClient:
             if self._running:
                 self._running = False
                 if self._sock:
-                    try:
-                        self._sock.shutdown(socket.SHUT_RDWR)
-                    except OSError:
-                        pass
+                    self._sock.shutdown()
                     self._sock.close()
                     self._sock = None
 
@@ -946,11 +915,6 @@ class GanonClient:
         if self._loop is None or not self._loop.is_running():
             self._start_event_loop()
         return self._sync(self._a_reconnect_impl())
-
-    @require_connection
-    def send(self, data: bytes) -> int:
-        with self._lock:
-            return self._sock.send(data)
 
     async def _send_protocol_message(self, dst_node_id: int, msg_type: bytes, data: bytes, channel_id: int = 0,
                                       bypass_route_check: bool = False) -> None:
@@ -988,7 +952,7 @@ class GanonClient:
         })
 
         try:
-            await self._sock.a_send_encrypted(header + data)
+            await self._sock.send(header + data)
             msg_type_val = struct.unpack(">I", msg_type)[0]
             msg_type_name = MsgType(msg_type_val).name if msg_type_val in [t.value for t in MsgType] else f"UNKNOWN({msg_type_val})"
             self._info("Protocol SEND: orig_src=%d, src=%d, dst=%d, msg_id=%d, type=%s, ttl=%d, channel=%d, data_len=%d",
@@ -996,11 +960,6 @@ class GanonClient:
             self._debug("Sent message to node %d (type=%s, data_len=%d, channel=%d)", dst_node_id, msg_type.hex(), len(data), channel_id)
         except Exception as e:
             raise ConnectionError(f"Failed to send message to node {dst_node_id}: {e}") from e
-
-    @require_connection
-    def recv(self, bufsize: int = 4096) -> bytes:
-        with self._lock:
-            return self._sock.recv(bufsize)
 
     @require_connection
     def a_send_to_node(self, dst_node_id: int, data: bytes, channel_id: int = 0):
@@ -1106,14 +1065,23 @@ class GanonClient:
         return tunnel
 
     @require_connection
-    def a_connect_to_node(self, ip: str, port: int, target_node_id: int = None, timeout: float = 10.0):
-        return _AsyncBridge(self._a_connect_to_node_impl(ip, port, target_node_id, timeout), self._loop)
+    def a_connect_to_node(self, ip: str, port: int, target_node_id: int = None,
+                          skin: NetworkSkin = None, timeout: float = 10.0):
+        if skin is None:
+            skin = self._skin
+        return _AsyncBridge(self._a_connect_to_node_impl(ip, port, target_node_id, skin, timeout), self._loop)
 
     @require_connection
-    def connect_to_node(self, ip: str, port: int, target_node_id: int = None, timeout: float = 10.0) -> "NodeClient":
-        return self._sync(self._a_connect_to_node_impl(ip, port, target_node_id, timeout))
+    def connect_to_node(self, ip: str, port: int, target_node_id: int = None,
+                        skin: NetworkSkin = None, timeout: float = 10.0) -> "NodeClient":
+        if skin is None:
+            skin = self._skin
+        return self._sync(self._a_connect_to_node_impl(ip, port, target_node_id, skin, timeout))
 
-    async def _a_connect_to_node_impl(self, ip: str, port: int, target_node_id: int = None, timeout: float = 10.0) -> "NodeClient":
+    async def _a_connect_to_node_impl(self, ip: str, port: int, target_node_id: int = None,
+                                       skin: NetworkSkin = None, timeout: float = 10.0) -> "NodeClient":
+        if skin is None:
+            skin = self._skin
         executor_node = target_node_id if target_node_id is not None else self.node_id
         request_id = self._alloc_request_id()
         future = asyncio.get_running_loop().create_future()
@@ -1126,6 +1094,7 @@ class GanonClient:
             "request_id": request_id,
             "target_ip": ip,
             "target_port": port,
+            "skin_id": int(skin),
         })
 
         self._info("Requesting node %d to connect to %s:%d (req=%d)", executor_node, ip, port, request_id)
@@ -1417,51 +1386,74 @@ class GanonClient:
 
     async def _a_upload_file_impl(self, target_node_id: int, local_path: str, remote_path: str,
                                    timeout: float = 60.0) -> dict:
-        with open(local_path, "rb") as f:
-            file_data = f.read()
+        import os
+        import math
 
-        request_id = self._alloc_request_id()
-        future = asyncio.get_running_loop().create_future()
-        result = {}
-
-        with self._rpc_lock:
-            self._pending_uploads[request_id] = (future, result)
+        file_size = os.path.getsize(local_path)
+        chunk_size = self._file_chunk_size
+        total_chunks = max(1, math.ceil(file_size / chunk_size)) if file_size > 0 else 1
 
         path_bytes = remote_path.encode("utf-8")
         if len(path_bytes) > 255:
             raise ValueError("remote_path must be <= 255 bytes")
 
-        payload = struct.pack(">I", request_id)
-        payload += path_bytes.ljust(256, b"\x00")
-        payload += file_data
-
         msg_type_bytes = struct.pack(">I", MsgType.FILE_UPLOAD.value)
 
-        self._info("Uploading %s -> node %d:%s (%d bytes, req=%d)",
-                   local_path, target_node_id, remote_path, len(file_data), request_id)
+        self._info("Uploading %s -> node %d:%s (%d bytes, %d chunks of %d bytes)",
+                   local_path, target_node_id, remote_path, file_size, total_chunks, chunk_size)
 
-        try:
-            await self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0)
-        except Exception:
-            with self._rpc_lock:
-                self._pending_uploads.pop(request_id, None)
-            raise
+        with open(local_path, "rb") as f:
+            for chunk_index in range(total_chunks):
+                chunk_data = f.read(chunk_size)
+                if not chunk_data and chunk_index < total_chunks - 1:
+                    break
 
-        try:
-            await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
-            with self._rpc_lock:
-                self._pending_uploads.pop(request_id, None)
-            raise TimeoutError(f"File upload to node {target_node_id} timed out after {timeout}s")
+                request_id = self._alloc_request_id()
+                future = asyncio.get_running_loop().create_future()
+                result = {}
 
-        with self._rpc_lock:
-            self._pending_uploads.pop(request_id, None)
+                with self._rpc_lock:
+                    self._pending_uploads[request_id] = (future, result)
 
-        status = result.get("status", FILE_STATUS_OTHER)
-        return {
-            "success": status == FILE_STATUS_SUCCESS,
-            "error": result.get("error", "Unknown error"),
-        }
+                payload = struct.pack(">I", request_id)
+                payload += path_bytes.ljust(256, b"\x00")
+                payload += struct.pack(">I", chunk_index)
+                payload += struct.pack(">I", total_chunks)
+                payload += chunk_data
+
+                self._debug("Uploading chunk %d/%d (%d bytes, req=%d)",
+                            chunk_index + 1, total_chunks, len(chunk_data), request_id)
+
+                try:
+                    await self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0)
+                except Exception:
+                    with self._rpc_lock:
+                        self._pending_uploads.pop(request_id, None)
+                    raise
+
+                try:
+                    await asyncio.wait_for(future, timeout=timeout)
+                except asyncio.TimeoutError:
+                    with self._rpc_lock:
+                        self._pending_uploads.pop(request_id, None)
+                    raise TimeoutError(
+                        f"File upload chunk {chunk_index + 1}/{total_chunks} to node {target_node_id} "
+                        f"timed out after {timeout}s"
+                    )
+
+                with self._rpc_lock:
+                    self._pending_uploads.pop(request_id, None)
+
+                status = result.get("status", FILE_STATUS_OTHER)
+                if status != FILE_STATUS_SUCCESS:
+                    return {
+                        "success": False,
+                        "error": result.get("error", "Unknown error"),
+                        "chunk": chunk_index + 1,
+                        "total_chunks": total_chunks,
+                    }
+
+        return {"success": True, "error": ""}
 
     @require_connection
     def a_download_file(self, target_node_id: int, remote_path: str, local_path: str,
@@ -1475,44 +1467,78 @@ class GanonClient:
 
     async def _a_download_file_impl(self, target_node_id: int, remote_path: str, local_path: str,
                                      timeout: float = 60.0) -> dict:
-        request_id = self._alloc_request_id()
-        future = asyncio.get_running_loop().create_future()
-        result = {}
+        import math
 
-        with self._rpc_lock:
-            self._pending_downloads[request_id] = (future, result)
-
-        payload = struct.pack(">I", request_id) + remote_path.encode("utf-8") + b"\x00"
+        chunk_size = self._file_chunk_size
         msg_type_bytes = struct.pack(">I", MsgType.FILE_DOWNLOAD.value)
 
-        self._info("Downloading node %d:%s -> %s (req=%d)",
-                   target_node_id, remote_path, local_path, request_id)
+        self._info("Downloading node %d:%s -> %s (chunk_size=%d)",
+                   target_node_id, remote_path, local_path, chunk_size)
 
-        try:
-            await self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0)
-        except Exception:
+        # First chunk request: offset=0, length=chunk_size
+        offset = 0
+        all_data = b""
+        total_size = 0
+
+        while True:
+            request_id = self._alloc_request_id()
+            future = asyncio.get_running_loop().create_future()
+            result = {}
+
+            with self._rpc_lock:
+                self._pending_downloads[request_id] = (future, result)
+
+            # Build payload: request_id(4) + path(null-term) + offset(4) + length(4)
+            payload = struct.pack(">I", request_id) + remote_path.encode("utf-8") + b"\x00"
+            payload += struct.pack(">I", offset)
+            payload += struct.pack(">I", chunk_size)
+
+            self._debug("Downloading chunk at offset %d (length=%d, req=%d)", offset, chunk_size, request_id)
+
+            try:
+                await self._send_protocol_message(target_node_id, msg_type_bytes, payload, channel_id=0)
+            except Exception:
+                with self._rpc_lock:
+                    self._pending_downloads.pop(request_id, None)
+                raise
+
+            try:
+                await asyncio.wait_for(future, timeout=timeout)
+            except asyncio.TimeoutError:
+                with self._rpc_lock:
+                    self._pending_downloads.pop(request_id, None)
+                raise TimeoutError(
+                    f"File download chunk at offset {offset} from node {target_node_id} timed out after {timeout}s"
+                )
+
             with self._rpc_lock:
                 self._pending_downloads.pop(request_id, None)
-            raise
 
-        try:
-            await asyncio.wait_for(future, timeout=timeout)
-        except asyncio.TimeoutError:
-            with self._rpc_lock:
-                self._pending_downloads.pop(request_id, None)
-            raise TimeoutError(f"File download from node {target_node_id} timed out after {timeout}s")
+            status = result.get("status", FILE_STATUS_OTHER)
+            if status != FILE_STATUS_SUCCESS:
+                return {"success": False, "error": result.get("error", "Unknown error")}
 
-        with self._rpc_lock:
-            self._pending_downloads.pop(request_id, None)
+            chunk_data = result.get("data", b"")
+            total_size = result.get("total_size", 0)
 
-        status = result.get("status", FILE_STATUS_OTHER)
-        if status == FILE_STATUS_SUCCESS:
-            file_data = result.get("data", b"")
-            with open(local_path, "wb") as f:
-                f.write(file_data)
-            return {"success": True, "error": ""}
-        else:
-            return {"success": False, "error": result.get("error", "Unknown error")}
+            if not chunk_data:
+                # Empty chunk means we're done (or file was empty)
+                break
+
+            all_data += chunk_data
+
+            # Check if we've received all the data
+            if len(all_data) >= total_size or len(chunk_data) < chunk_size:
+                break
+
+            offset += len(chunk_data)
+
+        # Write the complete file
+        with open(local_path, "wb") as f:
+            f.write(all_data)
+
+        self._info("Download complete: %s (%d bytes)", remote_path, len(all_data))
+        return {"success": True, "error": ""}
 
     def __enter__(self):
         self.connect()

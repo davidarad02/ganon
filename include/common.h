@@ -8,6 +8,13 @@
 
 typedef bool bool_t;
 
+/* Network address (IP + port).  Defined here so both args.h and skin.h can
+ * use it without creating a circular include dependency. */
+typedef struct {
+    char *ip;
+    int port;
+} addr_t;
+
 #define FAIL_IF(condition, error) \
     if (condition) { rc = error; goto l_cleanup; }
 

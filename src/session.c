@@ -21,6 +21,11 @@
 
 static session_t g_session;
 static uint32_t g_msg_seq_id = 0;
+int g_session_file_chunk_size = 0;  /* 0 = use default 256KB */
+
+void SESSION__set_file_chunk_size(int chunk_size) {
+    g_session_file_chunk_size = chunk_size;
+}
 
 /* ---- pending connect responses (CONNECT_CMD -> wait for NODE_INIT) ---- */
 
@@ -206,15 +211,19 @@ static err_t SESSION__handle_connect_cmd(IN session_t *s, IN transport_t *t, IN 
     strncpy(ip, p->target_ip, 64);
     ip[64] = '\0';
     uint32_t port = ntohl(p->target_port);
+    uint32_t skin_id = ntohl(p->skin_id);
 
-    LOG_INFO("Received CONNECT_CMD from node %u (req=%u): connect to %s:%u",
-             msg->orig_src_node_id, request_id, ip, port);
+    const skin_ops_t *skin = (0 != skin_id) ? SKIN__by_id(skin_id) : NULL;
+    if (NULL == skin) skin = SKIN__default();
+
+    LOG_INFO("Received CONNECT_CMD from node %u (req=%u): connect to %s:%u (skin=%u)",
+             msg->orig_src_node_id, request_id, ip, port, skin_id);
 
     int status = CONNECT_STATUS_SUCCESS;
     uint32_t error_code = 0;
     int new_fd = -1;
 
-    err_t connect_rc = NETWORK__connect_to_peer(s->net, ip, (int)port, &status, &error_code, &new_fd);
+    err_t connect_rc = NETWORK__connect_to_peer(s->net, ip, (int)port, skin, &status, &error_code, &new_fd);
     if (E__SUCCESS != connect_rc) {
         /* Immediate failure (TCP refused, timeout, etc.) – send response now */
         send_connect_response(s, msg->orig_src_node_id, request_id, status, error_code, 0);
@@ -521,7 +530,11 @@ static err_t SESSION__handle_file_upload(IN session_t *s, IN const protocol_msg_
     uint32_t status = FILE_STATUS_SUCCESS;
     const char *error_msg = "";
     file_upload_response_payload_t resp;
+    uint32_t chunk_index = 0;
+    uint32_t total_chunks = 1;
+    int is_chunked = 0;
 
+    /* Minimum payload: request_id(4) + path(256) + file_data(at least 1 byte) = 261 */
     if (data_len < 261) {
         LOG_WARNING("FILE_UPLOAD payload too small (%zu bytes)", data_len);
         FAIL(E__SESSION__INVALID_MESSAGE);
@@ -539,15 +552,34 @@ static err_t SESSION__handle_file_upload(IN session_t *s, IN const protocol_msg_
         goto send_response;
     }
 
-    file_data = data + 4 + 256;
-    if (data_len > 4 + 256) {
-        file_data_len = data_len - (4 + 256);
+    /* Check for chunk metadata: request_id(4) + path(256) + chunk_index(4) + total_chunks(4) = 268 */
+    if (data_len >= 268) {
+        chunk_index = ntohl(*(const uint32_t *)(data + 4 + 256));
+        total_chunks = ntohl(*(const uint32_t *)(data + 4 + 256 + 4));
+        is_chunked = (total_chunks > 1);
+        file_data = data + 4 + 256 + 4 + 4;
+        if (data_len > 4 + 256 + 4 + 4) {
+            file_data_len = data_len - (4 + 256 + 4 + 4);
+        }
+    } else {
+        /* Legacy format: no chunk metadata */
+        file_data = data + 4 + 256;
+        if (data_len > 4 + 256) {
+            file_data_len = data_len - (4 + 256);
+        }
     }
 
-    LOG_INFO("FILE_UPLOAD from node %u (req=%u): %s (%zu bytes)",
-             msg->orig_src_node_id, request_id, path, file_data_len);
+    if (is_chunked) {
+        LOG_INFO("FILE_UPLOAD chunk %u/%u from node %u (req=%u): %s (%zu bytes)",
+                 chunk_index + 1, total_chunks, msg->orig_src_node_id, request_id, path, file_data_len);
+    } else {
+        LOG_INFO("FILE_UPLOAD from node %u (req=%u): %s (%zu bytes)",
+                 msg->orig_src_node_id, request_id, path, file_data_len);
+    }
 
-    FILE *fp = fopen(path, "wb");
+    /* Open file: "wb" for first chunk or legacy, "ab" for subsequent chunks */
+    const char *mode = (chunk_index == 0) ? "wb" : "ab";
+    FILE *fp = fopen(path, mode);
     if (NULL == fp) {
         switch (errno) {
         case ENOSPC:
@@ -603,7 +635,12 @@ static err_t SESSION__handle_file_upload(IN session_t *s, IN const protocol_msg_
         goto send_response;
     }
 
-    LOG_INFO("FILE_UPLOAD complete: %s", path);
+    if (is_chunked && chunk_index < total_chunks - 1) {
+        /* Not the last chunk - send a success response to acknowledge receipt */
+        LOG_INFO("FILE_UPLOAD chunk %u/%u complete: %s", chunk_index + 1, total_chunks, path);
+    } else {
+        LOG_INFO("FILE_UPLOAD complete: %s", path);
+    }
 
 l_cleanup:
 send_response:
@@ -628,8 +665,12 @@ static err_t SESSION__handle_file_download(IN session_t *s, IN const protocol_ms
     const char *error_msg = "";
     uint8_t *file_buf = NULL;
     long file_size = 0;
+    long total_file_size = 0;  /* Total size on disk (for chunked responses) */
     uint8_t *response = NULL;
     size_t response_len = 0;
+    uint32_t offset = 0;
+    uint32_t length = 0;
+    int is_chunked = 0;
 
     if (data_len < 5) {
         LOG_WARNING("FILE_DOWNLOAD payload too small (%zu bytes)", data_len);
@@ -647,8 +688,21 @@ static err_t SESSION__handle_file_download(IN session_t *s, IN const protocol_ms
         goto send_response;
     }
 
-    LOG_INFO("FILE_DOWNLOAD from node %u (req=%u): %s",
-             msg->orig_src_node_id, request_id, path);
+    /* Check for chunk metadata after the null terminator: offset(4) + length(4) */
+    size_t path_field_end = 4 + path_len + 1;  /* request_id + path + null terminator */
+    if (data_len >= path_field_end + 8) {
+        offset = ntohl(*(const uint32_t *)(data + path_field_end));
+        length = ntohl(*(const uint32_t *)(data + path_field_end + 4));
+        is_chunked = 1;
+    }
+
+    if (is_chunked) {
+        LOG_INFO("FILE_DOWNLOAD chunk from node %u (req=%u): %s (offset=%u, length=%u)",
+                 msg->orig_src_node_id, request_id, path, offset, length);
+    } else {
+        LOG_INFO("FILE_DOWNLOAD from node %u (req=%u): %s",
+                 msg->orig_src_node_id, request_id, path);
+    }
 
     FILE *fp = fopen(path, "rb");
     if (NULL == fp) {
@@ -671,6 +725,7 @@ static err_t SESSION__handle_file_download(IN session_t *s, IN const protocol_ms
         goto send_response;
     }
 
+    /* Get total file size */
     if (0 != fseek(fp, 0, SEEK_END)) {
         status = FILE_STATUS_OTHER;
         error_msg = "Failed to determine file size";
@@ -678,39 +733,69 @@ static err_t SESSION__handle_file_download(IN session_t *s, IN const protocol_ms
         goto send_response;
     }
 
-    file_size = ftell(fp);
-    if (0 > file_size) {
+    total_file_size = ftell(fp);
+    if (0 > total_file_size) {
         status = FILE_STATUS_OTHER;
         error_msg = "Failed to determine file size";
         fclose(fp);
         goto send_response;
     }
 
-    rewind(fp);
+    /* Validate offset and length for chunked requests */
+    if (is_chunked) {
+        if ((long)offset >= total_file_size) {
+            /* Offset beyond EOF - return empty data with success status */
+            fclose(fp);
+            file_size = 0;
+            goto send_response;
+        }
+        /* Clamp length to remaining file data */
+        long remaining = total_file_size - (long)offset;
+        if (length == 0 || (long)length > remaining) {
+            length = (uint32_t)remaining;
+        }
+    } else {
+        /* Legacy: read entire file */
+        offset = 0;
+        length = (uint32_t)total_file_size;
+    }
 
-    if (file_size > 0) {
-        file_buf = malloc((size_t)file_size);
+    /* Seek to offset */
+    if (0 != fseek(fp, (long)offset, SEEK_SET)) {
+        status = FILE_STATUS_OTHER;
+        error_msg = "Failed to seek in file";
+        fclose(fp);
+        goto send_response;
+    }
+
+    /* Read the requested chunk */
+    if (length > 0) {
+        file_buf = malloc(length);
         if (NULL == file_buf) {
             status = FILE_STATUS_OTHER;
-            error_msg = "Failed to allocate memory for file";
+            error_msg = "Failed to allocate memory for file chunk";
             fclose(fp);
             goto send_response;
         }
 
-        size_t read_total = fread(file_buf, 1, (size_t)file_size, fp);
-        if ((long)read_total != file_size) {
+        size_t read_total = fread(file_buf, 1, length, fp);
+        if (read_total != length) {
             status = FILE_STATUS_OTHER;
             error_msg = "Failed to read file";
             fclose(fp);
             goto send_response;
         }
+        file_size = (long)length;  /* Actual bytes read for response */
+    } else {
+        file_size = 0;
     }
 
     fclose(fp);
 
 l_cleanup:
 send_response:
-    response_len = 8 + (status == FILE_STATUS_SUCCESS ? (size_t)file_size : strlen(error_msg) + 1);
+    /* Response format: request_id(4) + status(4) + total_size(4) + data */
+    response_len = 12 + (status == FILE_STATUS_SUCCESS ? (size_t)file_size : strlen(error_msg) + 1);
     response = malloc(response_len);
     if (NULL == response) {
         LOG_ERROR("Failed to allocate download response buffer");
@@ -720,13 +805,15 @@ send_response:
 
     *(uint32_t *)response = htonl(request_id);
     *(uint32_t *)(response + 4) = htonl(status);
+    /* total_size: total file size on disk (for client to calculate chunks) */
+    *(uint32_t *)(response + 8) = htonl((uint32_t)total_file_size);
 
     if (status == FILE_STATUS_SUCCESS) {
         if (file_size > 0) {
-            memcpy(response + 8, file_buf, (size_t)file_size);
+            memcpy(response + 12, file_buf, (size_t)file_size);
         }
     } else {
-        memcpy(response + 8, error_msg, strlen(error_msg) + 1);
+        memcpy(response + 12, error_msg, strlen(error_msg) + 1);
     }
 
     send_response_to_node(s, msg->orig_src_node_id, MSG__FILE_DOWNLOAD_RESPONSE,

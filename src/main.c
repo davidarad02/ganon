@@ -16,6 +16,7 @@
 #include "transport.h"
 #include "loadbalancer.h"
 #include "tunnel.h"
+#include "skins/skin_tcp_monocypher.h"
 
 static volatile sig_atomic_t g_shutdown_requested = 0;
 
@@ -27,6 +28,8 @@ static void signal_handler(int sig) {
 int main(int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
     args_t args;
+
+    SKIN_TCPM__register();
 
     rc = ARGS__parse(&args, argc, argv);
     FAIL_IF(E__SUCCESS != rc, rc);
@@ -57,6 +60,7 @@ int main(int argc, char *argv[]) {
     SESSION__set_network(SESSION__get_session(), &g_network);
 
     TUNNEL__init(args.tcp_rcvbuf);
+    SESSION__set_file_chunk_size(args.file_chunk_size);
     LB__init(args.lb_strategy, args.reorder_timeout, args.rr_count, args.reorder);
     ROUTING__init_globals(SESSION__get_routing_table(SESSION__get_session()), SESSION__on_message);
 
@@ -65,12 +69,21 @@ int main(int argc, char *argv[]) {
 
     LOG_INFO("Network initialized");
     LOG_INFO("Node ID: %d", g_node_id);
-    LOG_INFO("Listen: %s:%d", args.listen_addr.ip, args.listen_addr.port);
+    for (int i = 0; i < args.listener_count; i++) {
+        LOG_INFO("Listen[%d]: %s:%d (skin_id=%u)", i,
+                 args.listeners[i].addr.ip, args.listeners[i].addr.port,
+                 args.listeners[i].skin_id);
+    }
     if (args.tcp_rcvbuf > 0) {
         LOG_INFO("TCP receive buffer: %d bytes", args.tcp_rcvbuf);
     }
+    if (args.file_chunk_size > 0) {
+        LOG_INFO("File chunk size: %d bytes", args.file_chunk_size);
+    }
     for (int i = 0; i < args.connect_count; i++) {
-        LOG_INFO("Connect[%d]: %s:%d", i, args.connect_addrs[i].ip, args.connect_addrs[i].port);
+        LOG_INFO("Connect[%d]: %s:%d (skin_id=%u)", i,
+                 args.connect_addrs[i].addr.ip, args.connect_addrs[i].addr.port,
+                 args.connect_addrs[i].skin_id);
     }
 
     while (!g_shutdown_requested) {

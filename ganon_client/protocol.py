@@ -73,6 +73,7 @@ ConnectCmdPayload = ct.Struct(
     "request_id" / ct.Int32ub,
     "target_ip" / ct.PaddedString(64, "ascii"),
     "target_port" / ct.Int32ub,
+    "skin_id" / ct.Int32ub,  # 0 = use default skin on the receiving node
 )
 
 # Connect response payload
@@ -108,3 +109,33 @@ FILE_STATUS_NO_SPACE = 2
 FILE_STATUS_READ_ONLY = 3
 FILE_STATUS_PERMISSION = 4
 FILE_STATUS_OTHER = 5
+
+# File chunk size for chunked transfers (256 KB)
+# Must fit within a single encrypted frame: max plaintext ~299,656 bytes
+FILE_CHUNK_SIZE = 256 * 1024  # 262,144 bytes
+
+# File upload payload (chunked)
+# Layout: request_id(4) + path(256) + chunk_index(4) + total_chunks(4) + file_data
+FileUploadPayload = ct.Struct(
+    "request_id" / ct.Int32ub,
+    "path" / ct.PaddedString(256, "ascii"),
+    "chunk_index" / ct.Int32ub,   # 0-based chunk index
+    "total_chunks" / ct.Int32ub,  # total chunks (1 = single upload, backwards compat)
+)
+
+# File download request payload (chunked)
+# Layout: request_id(4) + path(null-term) + offset(4) + length(4)
+FileDownloadPayload = ct.Struct(
+    "request_id" / ct.Int32ub,
+    "path" / ct.CString("ascii"),
+    "offset" / ct.Int32ub,  # byte offset to start reading (0 = start of file)
+    "length" / ct.Int32ub,  # bytes to read (0 = entire file, backwards compat)
+)
+
+# File download response header (chunked)
+# Layout: request_id(4) + status(4) + total_size(4) + data
+FileDownloadResponseHeader = ct.Struct(
+    "request_id" / ct.Int32ub,
+    "status" / ct.Int32ub,
+    "total_size" / ct.Int32ub,  # total file size on disk (0 if error)
+)

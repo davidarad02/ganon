@@ -15,7 +15,9 @@
 #include "common.h"
 #include "logging.h"
 #include "network.h"
+#include "routing.h"
 #include "transport.h"
+#include "skin.h"
 #include "tunnel.h"
 #include "network_caps.h"
 
@@ -25,140 +27,10 @@
 
 network_t g_network;
 
-static int create_listen_socket(const char *ip, int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (0 > fd) {
-        LOG_ERROR("Failed to create socket: %s", strerror(errno));
-        return -1;
-    }
-
-    int opt = 1;
-    if (0 != setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt))) {
-        LOG_ERROR("Failed to set SO_REUSEADDR: %s", strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-
-    if (0 == strcmp(ip, "0.0.0.0") || 0 == strcmp(ip, "*")) {
-        addr.sin_addr.s_addr = INADDR_ANY;
-    } else {
-        if (0 == inet_pton(AF_INET, ip, &addr.sin_addr)) {
-            LOG_ERROR("Invalid listen IP: %s", ip);
-            close(fd);
-            return -1;
-        }
-    }
-
-    if (0 != bind(fd, (struct sockaddr *)&addr, sizeof(addr))) {
-        LOG_ERROR("Failed to bind to %s:%d: %s", ip, port, strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    if (0 != listen(fd, SOMAXCONN)) {
-        LOG_ERROR("Failed to listen on %s:%d: %s", ip, port, strerror(errno));
-        close(fd);
-        return -1;
-    }
-
-    LOG_INFO("Listening on %s:%d", ip, port);
-    return fd;
-}
-
-static int connect_to_addr(const char *ip, int port, int timeout_sec) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (0 > fd) {
-        LOG_ERROR("Failed to create socket: %s", strerror(errno));
-        return -1;
-    }
-
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (-1 == flags) {
-        close(fd);
-        return -1;
-    }
-    if (-1 == fcntl(fd, F_SETFL, flags | O_NONBLOCK)) {
-        close(fd);
-        return -1;
-    }
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-
-    if (0 == inet_pton(AF_INET, ip, &addr.sin_addr)) {
-        struct hostent *he = gethostbyname(ip);
-        if (NULL == he) {
-            LOG_ERROR("Failed to resolve host: %s", ip);
-            close(fd);
-            return -1;
-        }
-        memcpy(&addr.sin_addr, he->h_addr_list[0], (size_t)he->h_length);
-    }
-
-    LOG_INFO("Connecting to %s:%d...", ip, port);
-    if (0 != connect(fd, (struct sockaddr *)&addr, sizeof(addr))) {
-        if (EINPROGRESS == errno) {
-            fd_set write_fds;
-            FD_ZERO(&write_fds);
-            FD_SET(fd, &write_fds);
-            struct timeval tv;
-            tv.tv_sec = timeout_sec;
-            tv.tv_usec = 0;
-            int sel = select(fd + 1, NULL, &write_fds, NULL, &tv);
-            if (0 > sel) {
-                LOG_WARNING("Connect to %s:%d timed out", ip, port);
-                close(fd);
-                return -1;
-            } else if (0 == sel) {
-                LOG_WARNING("Connect to %s:%d timed out after %ds", ip, port, timeout_sec);
-                close(fd);
-                return -1;
-            }
-
-            int err = 0;
-            socklen_t errlen = sizeof(err);
-            if (0 != getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen)) {
-                LOG_WARNING("Connect to %s:%d failed: getsockopt error", ip, port);
-                close(fd);
-                return -1;
-            }
-            if (0 != err) {
-                LOG_WARNING("Connect to %s:%d failed: %s", ip, port, strerror(err));
-                close(fd);
-                return -1;
-            }
-        } else {
-            LOG_WARNING("Failed to connect to %s:%d: %s", ip, port, strerror(errno));
-            close(fd);
-            return -1;
-        }
-    }
-
-    int nodelay = 1;
-    if (0 != setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay))) {
-        LOG_WARNING("Failed to set TCP_NODELAY on connected socket: %s", strerror(errno));
-    }
-
-    if (-1 == fcntl(fd, F_SETFL, flags)) {
-        close(fd);
-        return -1;
-    }
-
-    return fd;
-}
-
 static void socket_entry_remove_locked(network_t *net, socket_entry_t *entry) {
     if (NULL == net || NULL == entry) {
         return;
     }
-
     socket_entry_t **prev = &net->clients;
     while (NULL != *prev) {
         if (*prev == entry) {
@@ -180,15 +52,7 @@ static void *socket_thread_func(void *arg) {
         LOG_INFO("Connected to %s:%d (fd=%d)", t->client_ip, t->client_port, t->fd);
     }
 
-    /* Transport-layer encryption handshake MUST complete before any
-     * protocol traffic (including NODE_INIT sent by connected_cb). */
-    {
-        err_t enc_rc = TRANSPORT__do_handshake(t, !t->is_incoming);
-        if (E__SUCCESS != enc_rc) {
-            LOG_ERROR("Encryption handshake failed on fd=%d, closing connection", t->fd);
-            goto l_cleanup;
-        }
-    }
+    /* Handshake is already done by skin->connect or skin->listener_accept. */
 
     if (NULL != net->connected_cb) {
         net->connected_cb(t);
@@ -219,11 +83,9 @@ static void *socket_thread_func(void *arg) {
         if (E__SUCCESS != rc) {
             break;
         }
-
         if (NULL != net->message_cb) {
             net->message_cb(t, &msg, data, msg.data_length);
         }
-
         free(data);
     }
 
@@ -245,139 +107,100 @@ l_cleanup:
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_remove_locked(net, entry);
     pthread_mutex_unlock(&net->clients_mutex);
-
     FREE(entry);
     return NULL;
 }
 
+/* ---- Accept thread (one per listener) ----------------------------------- */
+
 static void *accept_thread_func(void *arg) {
-    network_t *net = (network_t *)arg;
-    int listen_fd = net->listen_fd;
+    listener_t *listener = (listener_t *)arg;
+    network_t  *net      = listener->net;
 
-    LOG_INFO("Accept thread started");
+    LOG_INFO("Accept thread started for %s:%d (skin=%s)",
+             listener->addr.ip, listener->addr.port, listener->skin->name);
 
-    while (net->running) {
-        struct sockaddr_in client_addr;
-        socklen_t client_len = sizeof(client_addr);
-        memset(&client_addr, 0, sizeof(client_addr));
-
-        fd_set read_fds;
-        FD_ZERO(&read_fds);
-        FD_SET(listen_fd, &read_fds);
-        struct timeval tv;
-        tv.tv_sec = 1;
-        tv.tv_usec = 0;
-
-        int ready = select(listen_fd + 1, &read_fds, NULL, NULL, &tv);
-        if (0 > ready) {
-            if (EINTR == errno) {
-                continue;
+    while (listener->running && net->running) {
+        /* listener_accept blocks until a connection + handshake completes */
+        transport_t *t = NULL;
+        err_t rc = listener->skin->listener_accept(listener->skin_listener, &t);
+        if (E__SUCCESS != rc) {
+            if (!net->running || !listener->running) {
+                break;
             }
-            LOG_ERROR("Select failed: %s", strerror(errno));
+            /* Transient error (EINTR, etc.) — retry */
             continue;
         }
-        if (0 == ready) {
+        if (NULL == t) {
             continue;
-        }
-        if (!FD_ISSET(listen_fd, &read_fds)) {
-            continue;
-        }
-
-        int client_fd = accept(listen_fd, (struct sockaddr *)&client_addr, &client_len);
-        if (0 > client_fd) {
-            if (EINTR == errno) {
-                continue;
-            }
-            LOG_ERROR("Accept failed: %s", strerror(errno));
-            continue;
-        }
-
-        int nodelay = 1;
-        if (0 != setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay))) {
-            LOG_WARNING("Failed to set TCP_NODELAY on accepted socket: %s", strerror(errno));
         }
 
         socket_entry_t *entry = malloc(sizeof(socket_entry_t));
         if (NULL == entry) {
             LOG_ERROR("Failed to allocate socket entry");
-            close(client_fd);
+            TRANSPORT__destroy(t);
             continue;
         }
-
-        entry->t = TRANSPORT__create(client_fd);
-        if (NULL == entry->t) {
-            LOG_ERROR("Failed to create transport for fd %d", client_fd);
-            close(client_fd);
-            FREE(entry);
-            continue;
-        }
-        entry->t->is_incoming = 1;
-        inet_ntop(AF_INET, &client_addr.sin_addr, entry->t->client_ip, INET_ADDRSTRLEN);
-        entry->t->client_port = ntohs(client_addr.sin_port);
-        entry->net = net;
+        entry->t    = t;
+        entry->net  = net;
         entry->next = NULL;
 
-        if (0 != pthread_mutex_lock(&net->clients_mutex)) {
-            LOG_ERROR("Failed to lock mutex");
-            close(client_fd);
-            FREE(entry);
-            continue;
-        }
-
+        pthread_mutex_lock(&net->clients_mutex);
         socket_entry_t *tail = net->clients;
         if (NULL == tail) {
             net->clients = entry;
         } else {
-            while (NULL != tail->next) {
-                tail = tail->next;
-            }
+            while (NULL != tail->next) tail = tail->next;
             tail->next = entry;
         }
 
         if (0 != pthread_create(&entry->thread, NULL, socket_thread_func, entry)) {
             LOG_ERROR("Failed to create client thread");
-            close(client_fd);
-            FREE(entry);
+            socket_entry_remove_locked(net, entry);
             pthread_mutex_unlock(&net->clients_mutex);
+            TRANSPORT__destroy(t);
+            FREE(entry);
             continue;
         }
-
         pthread_mutex_unlock(&net->clients_mutex);
     }
 
-    LOG_INFO("Accept thread stopped");
+    LOG_INFO("Accept thread stopped for %s:%d", listener->addr.ip, listener->addr.port);
     return NULL;
 }
 
-typedef struct connect_thread_arg {
-    addr_t addr;
-    int connect_timeout;
-    int reconnect_retries;
-    int reconnect_delay;
-    network_t *net;
+/* ---- Outbound connect thread -------------------------------------------- */
+
+typedef struct {
+    connect_entry_t entry;
+    int             connect_timeout;
+    int             reconnect_retries;
+    int             reconnect_delay;
+    const skin_ops_t *skin;
+    network_t       *net;
 } connect_thread_arg_t;
 
 static void *connect_and_run_thread(void *arg) {
     connect_thread_arg_t *targ = (connect_thread_arg_t *)arg;
-    char *ip = targ->addr.ip;
-    int port = targ->addr.port;
-    int connect_timeout = targ->connect_timeout;
-    int reconnect_retries = targ->reconnect_retries;
-    int reconnect_delay = targ->reconnect_delay;
-    network_t *net = targ->net;
+    const char  *ip              = targ->entry.addr.ip;
+    int          port            = targ->entry.addr.port;
+    int          connect_timeout = targ->connect_timeout;
+    int          reconnect_retries = targ->reconnect_retries;
+    int          reconnect_delay   = targ->reconnect_delay;
+    const skin_ops_t *skin         = targ->skin;
+    network_t   *net               = targ->net;
     int retries_remaining = reconnect_retries;
 
     while (true) {
-        int fd = connect_to_addr(ip, port, connect_timeout);
-        if (0 > fd) {
+        transport_t *t = NULL;
+        err_t rc = skin->connect(ip, port, connect_timeout, &t);
+        if (E__SUCCESS != rc || NULL == t) {
             if (retries_remaining == 0) {
                 LOG_WARNING("Failed to connect to %s:%d, giving up", ip, port);
                 FREE(arg);
                 return NULL;
             }
-            if (retries_remaining > 0) {
-                retries_remaining--;
-            }
+            if (retries_remaining > 0) retries_remaining--;
             LOG_WARNING("Failed to connect to %s:%d, retrying in %ds...", ip, port, reconnect_delay);
             sleep((unsigned int)reconnect_delay);
             continue;
@@ -386,44 +209,22 @@ static void *connect_and_run_thread(void *arg) {
         socket_entry_t *entry = malloc(sizeof(socket_entry_t));
         if (NULL == entry) {
             LOG_ERROR("Failed to allocate socket entry");
-            close(fd);
+            TRANSPORT__destroy(t);
             FREE(arg);
             return NULL;
         }
-
-        entry->t = TRANSPORT__create(fd);
-        if (NULL == entry->t) {
-            LOG_ERROR("Failed to create transport for fd %d", fd);
-            close(fd);
-            FREE(entry);
-            FREE(arg);
-            return NULL;
-        }
-        entry->t->is_incoming = 0;
-        strncpy(entry->t->client_ip, ip, INET_ADDRSTRLEN - 1);
-        entry->t->client_ip[INET_ADDRSTRLEN - 1] = '\0';
-        entry->t->client_port = port;
-        entry->net = net;
+        entry->t    = t;
+        entry->net  = net;
         entry->next = NULL;
 
-        if (0 != pthread_mutex_lock(&net->clients_mutex)) {
-            LOG_ERROR("Failed to lock mutex");
-            close(fd);
-            FREE(entry);
-            FREE(arg);
-            return NULL;
-        }
-
+        pthread_mutex_lock(&net->clients_mutex);
         socket_entry_t *tail = net->clients;
         if (NULL == tail) {
             net->clients = entry;
         } else {
-            while (NULL != tail->next) {
-                tail = tail->next;
-            }
+            while (NULL != tail->next) tail = tail->next;
             tail->next = entry;
         }
-
         pthread_mutex_unlock(&net->clients_mutex);
 
         pthread_t socket_thread;
@@ -432,7 +233,7 @@ static void *connect_and_run_thread(void *arg) {
             pthread_mutex_lock(&net->clients_mutex);
             socket_entry_remove_locked(net, entry);
             pthread_mutex_unlock(&net->clients_mutex);
-            close(fd);
+            TRANSPORT__destroy(t);
             FREE(entry);
             FREE(arg);
             return NULL;
@@ -447,13 +248,16 @@ static void *connect_and_run_thread(void *arg) {
             FREE(arg);
             return NULL;
         }
-        if (retries_remaining > 0) {
-            retries_remaining--;
-        }
+        if (retries_remaining > 0) retries_remaining--;
     }
 }
 
-err_t NETWORK__init(OUT network_t *net, IN const args_t *args, IN int node_id, IN network_message_cb_t msg_cb, IN network_disconnected_cb_t disc_cb, IN network_connected_cb_t conn_cb) {
+/* ---- NETWORK__init ------------------------------------------------------- */
+
+err_t NETWORK__init(network_t *net, const args_t *args, int node_id,
+                    network_message_cb_t msg_cb,
+                    network_disconnected_cb_t disc_cb,
+                    network_connected_cb_t conn_cb) {
     err_t rc = E__SUCCESS;
 
     if (NULL == net || NULL == args) {
@@ -461,26 +265,29 @@ err_t NETWORK__init(OUT network_t *net, IN const args_t *args, IN int node_id, I
     }
 
     memset(net, 0, sizeof(network_t));
-    net->listen_addr = args->listen_addr;
-    net->connect_addrs = (addr_t *)args->connect_addrs;
-    net->connect_count = args->connect_count;
-    net->connect_timeout = args->connect_timeout;
+    net->connect_count    = args->connect_count;
+    net->connect_timeout  = args->connect_timeout;
     net->reconnect_retries = args->reconnect_retries;
-    net->reconnect_delay = args->reconnect_delay;
-    net->node_id = node_id;
-    net->message_cb = msg_cb;
-    net->disconnected_cb = disc_cb;
-    net->connected_cb = conn_cb;
+    net->reconnect_delay  = args->reconnect_delay;
+    net->node_id          = node_id;
+    net->default_skin_id  = args->default_skin_id;
+    net->message_cb       = msg_cb;
+    net->disconnected_cb  = disc_cb;
+    net->connected_cb     = conn_cb;
 
     if (0 != pthread_mutex_init(&net->clients_mutex, NULL)) {
         LOG_ERROR("Failed to initialize mutex");
         FAIL(E__NET__THREAD_CREATE_FAILED);
     }
 
-    net->listen_fd = create_listen_socket(net->listen_addr.ip, net->listen_addr.port);
-    if (0 > net->listen_fd) {
-        pthread_mutex_destroy(&net->clients_mutex);
-        FAIL(E__NET__SOCKET_BIND_FAILED);
+    /* Allocate listeners array */
+    net->listener_count = args->listener_count;
+    if (net->listener_count > 0) {
+        net->listeners = calloc((size_t)net->listener_count, sizeof(listener_t));
+        if (NULL == net->listeners) {
+            pthread_mutex_destroy(&net->clients_mutex);
+            FAIL(E__INVALID_ARG_NULL_POINTER);
+        }
     }
 
     net->running = 1;
@@ -499,21 +306,45 @@ err_t NETWORK__init(OUT network_t *net, IN const args_t *args, IN int node_id, I
     }
 #endif
 
-    if (0 != pthread_create(&net->accept_thread, NULL, accept_thread_func, net)) {
-        LOG_ERROR("Failed to create accept thread");
-        close(net->listen_fd);
-        pthread_mutex_destroy(&net->clients_mutex);
-        FAIL(E__NET__THREAD_CREATE_FAILED);
+    /* Create listeners */
+    for (int i = 0; i < net->listener_count; i++) {
+        listener_t *li = &net->listeners[i];
+        const listener_entry_t *ae = &args->listeners[i];
+
+        uint32_t skin_id = ae->skin_id ? ae->skin_id : args->default_skin_id;
+        li->skin = SKIN__by_id(skin_id);
+        if (NULL == li->skin) {
+            LOG_ERROR("Unknown skin_id %u for listener %d", skin_id, i);
+            rc = E__INVALID_ARG_NULL_POINTER;
+            goto l_cleanup;
+        }
+        li->addr    = ae->addr;
+        li->net     = net;
+        li->running = 1;
+
+        int listen_fd = -1;
+        rc = li->skin->listener_create(&li->addr, &li->skin_listener, &listen_fd);
+        if (E__SUCCESS != rc) {
+            LOG_ERROR("Failed to create listener %d (%s:%d)",
+                      i, ae->addr.ip, ae->addr.port);
+            goto l_cleanup;
+        }
+        li->listen_fd = listen_fd;
+
+        if (0 != pthread_create(&li->accept_thread, NULL, accept_thread_func, li)) {
+            LOG_ERROR("Failed to create accept thread for listener %d", i);
+            li->skin->listener_destroy(li->skin_listener);
+            li->skin_listener = NULL;
+            FAIL(E__NET__THREAD_CREATE_FAILED);
+        }
     }
 
+    /* Create outbound connect threads */
     if (net->connect_count > 0) {
+        net->connect_entries = (connect_entry_t *)args->connect_addrs;
         net->connect_threads = malloc((size_t)net->connect_count * sizeof(pthread_t));
         if (NULL == net->connect_threads) {
             LOG_ERROR("Failed to allocate connect threads array");
-            net->running = 0;
-            pthread_join(net->accept_thread, NULL);
-            close(net->listen_fd);
-            pthread_mutex_destroy(&net->clients_mutex);
             FAIL(E__INVALID_ARG_NULL_POINTER);
         }
 
@@ -523,14 +354,26 @@ err_t NETWORK__init(OUT network_t *net, IN const args_t *args, IN int node_id, I
                 LOG_ERROR("Failed to allocate connect thread arg");
                 continue;
             }
-            targ->addr = net->connect_addrs[i];
+            targ->entry           = args->connect_addrs[i];
             targ->connect_timeout = net->connect_timeout;
             targ->reconnect_retries = net->reconnect_retries;
             targ->reconnect_delay = net->reconnect_delay;
-            targ->net = net;
+            targ->net             = net;
 
-            if (0 != pthread_create(&net->connect_threads[i], NULL, connect_and_run_thread, targ)) {
-                LOG_ERROR("Failed to create connect thread for %s:%d", targ->addr.ip, targ->addr.port);
+            /* Resolve skin for this connect entry */
+            uint32_t skin_id = targ->entry.skin_id ? targ->entry.skin_id
+                                                    : args->default_skin_id;
+            targ->skin = SKIN__by_id(skin_id);
+            if (NULL == targ->skin) {
+                LOG_ERROR("Unknown skin_id %u for connect entry %d", skin_id, i);
+                FREE(targ);
+                continue;
+            }
+
+            if (0 != pthread_create(&net->connect_threads[i], NULL,
+                                    connect_and_run_thread, targ)) {
+                LOG_ERROR("Failed to create connect thread for %s:%d",
+                          targ->entry.addr.ip, targ->entry.addr.port);
                 FREE(targ);
                 continue;
             }
@@ -539,8 +382,25 @@ err_t NETWORK__init(OUT network_t *net, IN const args_t *args, IN int node_id, I
     }
 
 l_cleanup:
+    if (E__SUCCESS != rc && NULL != net->listeners) {
+        /* clean up any listeners already started */
+        for (int i = 0; i < net->listener_count; i++) {
+            listener_t *li = &net->listeners[i];
+            if (NULL != li->skin_listener && NULL != li->skin) {
+                li->running = 0;
+                if (0 != li->accept_thread) {
+                    pthread_join(li->accept_thread, NULL);
+                }
+                li->skin->listener_destroy(li->skin_listener);
+            }
+        }
+        FREE(net->listeners);
+        pthread_mutex_destroy(&net->clients_mutex);
+    }
     return rc;
 }
+
+/* ---- NETWORK__shutdown --------------------------------------------------- */
 
 err_t NETWORK__shutdown(network_t *net) {
     err_t rc = E__SUCCESS;
@@ -552,23 +412,28 @@ err_t NETWORK__shutdown(network_t *net) {
     LOG_INFO("Shutting down network...");
     net->running = 0;
 
-    if (0 != net->accept_thread) {
-        pthread_join(net->accept_thread, NULL);
+    /* Stop accept threads */
+    for (int i = 0; i < net->listener_count; i++) {
+        listener_t *li = &net->listeners[i];
+        li->running = 0;
+        /* listener_destroy closes the listen_fd which unblocks accept() */
+        if (NULL != li->skin && NULL != li->skin_listener) {
+            li->skin->listener_destroy(li->skin_listener);
+            li->skin_listener = NULL;
+        }
+        if (0 != li->accept_thread) {
+            pthread_join(li->accept_thread, NULL);
+            li->accept_thread = 0;
+        }
     }
-
-    if (0 != net->listen_fd) {
-        close(net->listen_fd);
-    }
+    FREE(net->listeners);
+    net->listener_count = 0;
 
 #ifdef USE_EPOLL
     NETWORK__epoll_shutdown();
 #endif
 
-    if (0 != pthread_mutex_lock(&net->clients_mutex)) {
-        LOG_ERROR("Failed to lock mutex during shutdown");
-        FAIL(E__NET__INVALID_SOCKET);
-    }
-
+    pthread_mutex_lock(&net->clients_mutex);
     socket_entry_t *head = net->clients;
     net->clients = NULL;
     pthread_mutex_unlock(&net->clients_mutex);
@@ -585,17 +450,12 @@ err_t NETWORK__shutdown(network_t *net) {
         iter = iter->next;
     }
 
-    /* Join all client threads.  Each socket_thread_func frees its own
-     * transport and entry in l_cleanup, so we must NOT touch them after
-     * joining.  Capture next before joining in case the thread frees iter. */
     iter = head;
     while (NULL != iter) {
         socket_entry_t *next = iter->next;
         if (0 != iter->thread) {
             pthread_join(iter->thread, NULL);
-            /* thread already called TRANSPORT__destroy(iter->t) and FREE(iter) */
         } else {
-            /* thread was never created — clean up manually */
             TRANSPORT__destroy(iter->t);
             FREE(iter);
         }
@@ -617,10 +477,10 @@ l_cleanup:
     return rc;
 }
 
+/* ---- Accessors ---------------------------------------------------------- */
+
 transport_t *NETWORK__get_transport(network_t *net, uint32_t node_id) {
-    if (NULL == net) {
-        return NULL;
-    }
+    if (NULL == net) return NULL;
 
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_t *entry = net->clients;
@@ -637,9 +497,7 @@ transport_t *NETWORK__get_transport(network_t *net, uint32_t node_id) {
 
 void NETWORK__close_transport(network_t *net, transport_t *t) {
     (void)net;
-    if (NULL == t) {
-        return;
-    }
+    if (NULL == t) return;
     if (t->fd >= 0) {
         shutdown(t->fd, SHUT_RDWR);
         close(t->fd);
@@ -647,191 +505,129 @@ void NETWORK__close_transport(network_t *net, transport_t *t) {
     }
 }
 
+/* ---- NETWORK__connect_to_peer ------------------------------------------- */
+
 err_t NETWORK__connect_to_peer(network_t *net, const char *ip, int port,
+                                const skin_ops_t *skin,
                                 int *status, uint32_t *error_code, int *out_fd) {
     err_t rc = E__SUCCESS;
-    int sock_fd = -1;
 
-    if (NULL != out_fd) {
-        *out_fd = -1;
-    }
+    if (NULL != out_fd) *out_fd = -1;
 
     if (NULL == net || NULL == ip || NULL == status || NULL == error_code) {
-        *status = CONNECT_STATUS_ERROR;
+        if (NULL != status) *status = CONNECT_STATUS_ERROR;
+        if (NULL != error_code) *error_code = E__INVALID_ARG_NULL_POINTER;
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+
+    *status     = CONNECT_STATUS_SUCCESS;
+    *error_code = 0;
+
+    if (NULL == skin) {
+        skin = SKIN__default();
+    }
+    if (NULL == skin) {
+        LOG_ERROR("No skin available for connect_to_peer");
+        *status     = CONNECT_STATUS_ERROR;
         *error_code = E__INVALID_ARG_NULL_POINTER;
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
 
-    *status = CONNECT_STATUS_SUCCESS;
-    *error_code = 0;
-    
-    LOG_INFO("Connecting to peer %s:%d", ip, port);
-    
-    /* Create socket */
-    sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (0 > sock_fd) {
-        LOG_ERROR("Socket creation failed: %s", strerror(errno));
-        *status = CONNECT_STATUS_ERROR;
-        *error_code = E__NET__SOCKET_CREATE_FAILED;
-        FAIL(E__NET__SOCKET_CREATE_FAILED);
-    }
-    
-    /* Set connect timeout */
-    struct timeval tv;
-    tv.tv_sec = net->connect_timeout;
-    tv.tv_usec = 0;
-    if (0 > setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv))) {
-        LOG_WARNING("Failed to set send timeout: %s", strerror(errno));
-    }
-    
-    /* Resolve address */
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons((uint16_t)port);
-    
-    if (1 != inet_pton(AF_INET, ip, &addr.sin_addr)) {
-        LOG_ERROR("Invalid IP address: %s", ip);
-        *status = CONNECT_STATUS_ERROR;
-        *error_code = E__ARGS__INVALID_FORMAT;
-        FAIL(E__ARGS__INVALID_FORMAT);
-    }
-    
-    /* Connect */
-    if (0 > connect(sock_fd, (struct sockaddr *)&addr, sizeof(addr))) {
-        if (ETIMEDOUT == errno || EINPROGRESS == errno) {
-            LOG_WARNING("Connection to %s:%d timed out", ip, port);
-            *status = CONNECT_STATUS_TIMEOUT;
-            *error_code = (uint32_t)errno;
-        } else if (ECONNREFUSED == errno) {
-            LOG_WARNING("Connection to %s:%d refused", ip, port);
+    LOG_INFO("Connecting to peer %s:%d (skin=%s)", ip, port, skin->name);
+
+    transport_t *t = NULL;
+    rc = skin->connect(ip, port, net->connect_timeout, &t);
+    if (E__SUCCESS != rc || NULL == t) {
+        LOG_WARNING("Failed to connect to %s:%d: rc=%d", ip, port, (int)rc);
+        *status     = CONNECT_STATUS_ERROR;
+        *error_code = (uint32_t)rc;
+        /* Map common errors to status codes */
+        if (E__NET__SOCKET_CONNECT_FAILED == rc) {
             *status = CONNECT_STATUS_REFUSED;
-            *error_code = (uint32_t)errno;
-        } else {
-            LOG_ERROR("Connection to %s:%d failed: %s", ip, port, strerror(errno));
-            *status = CONNECT_STATUS_ERROR;
-            *error_code = (uint32_t)errno;
         }
-        close(sock_fd);
-        FAIL(E__NET__SOCKET_CONNECT_FAILED);
+        FAIL(rc);
     }
-    
-    /* Create socket entry */
+
+    if (NULL != out_fd) {
+        *out_fd = t->fd;
+    }
+
     socket_entry_t *entry = malloc(sizeof(socket_entry_t));
     if (NULL == entry) {
         LOG_ERROR("Failed to allocate socket entry");
-        close(sock_fd);
-        *status = CONNECT_STATUS_ERROR;
+        TRANSPORT__destroy(t);
+        *status     = CONNECT_STATUS_ERROR;
         *error_code = E__INVALID_ARG_NULL_POINTER;
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
-    
-    entry->t = TRANSPORT__create(sock_fd);
-    if (NULL == entry->t) {
-        LOG_ERROR("Failed to create transport");
-        close(sock_fd);
-        FREE(entry);
-        *status = CONNECT_STATUS_ERROR;
-        *error_code = E__NET__INVALID_SOCKET;
-        FAIL(E__NET__INVALID_SOCKET);
-    }
-    
-    entry->t->is_incoming = 0;
-    strncpy(entry->t->client_ip, ip, INET_ADDRSTRLEN - 1);
-    entry->t->client_ip[INET_ADDRSTRLEN - 1] = '\0';
-    entry->t->client_port = port;
-    entry->net = net;
+    entry->t    = t;
+    entry->net  = net;
     entry->next = NULL;
-    
-    /* Add to clients list */
-    if (0 != pthread_mutex_lock(&net->clients_mutex)) {
-        LOG_ERROR("Failed to lock mutex");
-        TRANSPORT__destroy(entry->t);
-        FREE(entry);
-        *status = CONNECT_STATUS_ERROR;
-        *error_code = E__NET__THREAD_CREATE_FAILED;
-        FAIL(E__NET__THREAD_CREATE_FAILED);
-    }
-    
+
+    pthread_mutex_lock(&net->clients_mutex);
     socket_entry_t *tail = net->clients;
     if (NULL == tail) {
         net->clients = entry;
     } else {
-        while (NULL != tail->next) {
-            tail = tail->next;
-        }
+        while (NULL != tail->next) tail = tail->next;
         tail->next = entry;
     }
-    
     pthread_mutex_unlock(&net->clients_mutex);
-    
-    /* Create thread */
+
     if (0 != pthread_create(&entry->thread, NULL, socket_thread_func, entry)) {
         LOG_ERROR("Failed to create socket thread");
         pthread_mutex_lock(&net->clients_mutex);
-        /* Remove from list */
-        socket_entry_t **current = &net->clients;
-        while (*current != entry) {
-            current = &(*current)->next;
-        }
-        *current = entry->next;
+        socket_entry_t **cur = &net->clients;
+        while (*cur != entry) cur = &(*cur)->next;
+        *cur = entry->next;
         pthread_mutex_unlock(&net->clients_mutex);
-        
-        TRANSPORT__destroy(entry->t);
+        TRANSPORT__destroy(t);
         FREE(entry);
-        *status = CONNECT_STATUS_ERROR;
+        *status     = CONNECT_STATUS_ERROR;
         *error_code = E__NET__THREAD_CREATE_FAILED;
         FAIL(E__NET__THREAD_CREATE_FAILED);
     }
-    
-    LOG_INFO("Connected to peer %s:%d", ip, port);
 
-    if (NULL != out_fd) {
-        *out_fd = sock_fd;
-    }
+    LOG_INFO("Connected to peer %s:%d", ip, port);
 
 l_cleanup:
     return rc;
 }
 
+/* ---- NETWORK__disconnect_from_peer -------------------------------------- */
+
 err_t NETWORK__disconnect_from_peer(network_t *net, uint32_t node_id,
                                      int *status, uint32_t *error_code) {
     err_t rc = E__SUCCESS;
-    
+
     if (NULL == net || NULL == status || NULL == error_code) {
-        *status = DISCONNECT_STATUS_ERROR;
-        *error_code = E__INVALID_ARG_NULL_POINTER;
+        if (NULL != status) *status = DISCONNECT_STATUS_ERROR;
+        if (NULL != error_code) *error_code = E__INVALID_ARG_NULL_POINTER;
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
-    
-    *status = DISCONNECT_STATUS_SUCCESS;
+
+    *status     = DISCONNECT_STATUS_SUCCESS;
     *error_code = 0;
-    
+
     LOG_INFO("Disconnecting from peer %u", node_id);
-    
-    /* Find the transport */
+
     transport_t *t = NETWORK__get_transport(net, node_id);
     if (NULL == t) {
         LOG_WARNING("No direct connection to node %u", node_id);
-        *status = DISCONNECT_STATUS_NOT_CONNECTED;
+        *status     = DISCONNECT_STATUS_NOT_CONNECTED;
         *error_code = E__ROUTING__NODE_NOT_FOUND;
         FAIL(E__ROUTING__NODE_NOT_FOUND);
     }
-    
-    /* Close the transport */
+
     NETWORK__close_transport(net, t);
-    
-    /* Remove from clients list */
+
     pthread_mutex_lock(&net->clients_mutex);
     socket_entry_t **current = &net->clients;
-    while (*current != NULL) {
+    while (NULL != *current) {
         if ((*current)->t == t) {
             socket_entry_t *to_remove = *current;
             *current = (*current)->next;
-            
-            /* Wait for thread to finish */
             pthread_join(to_remove->thread, NULL);
-            
             TRANSPORT__destroy(to_remove->t);
             FREE(to_remove);
             break;
@@ -839,13 +635,12 @@ err_t NETWORK__disconnect_from_peer(network_t *net, uint32_t node_id,
         current = &(*current)->next;
     }
     pthread_mutex_unlock(&net->clients_mutex);
-    
-    /* Update routing */
+
     ROUTING__handle_disconnect(node_id);
     TUNNEL__handle_disconnect(node_id);
-    
+
     LOG_INFO("Disconnected from peer %u", node_id);
-    
+
 l_cleanup:
     return rc;
 }

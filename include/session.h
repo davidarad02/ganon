@@ -34,4 +34,8 @@ void SESSION__on_disconnected(IN transport_t *t);
 int SESSION__get_node_id(IN session_t *s);
 routing_table_t *SESSION__get_routing_table(IN session_t *s);
 
+/* File chunk size for chunked uploads/downloads (0 = use default 256KB) */
+extern int g_session_file_chunk_size;
+void SESSION__set_file_chunk_size(int chunk_size);
+
 #endif /* #ifndef GANON_SESSION_H */
