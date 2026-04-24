@@ -24,6 +24,12 @@ class MsgType(IntEnum):
     CONNECT_RESPONSE = 15
     DISCONNECT_CMD = 16
     DISCONNECT_RESPONSE = 17
+    EXEC_CMD = 18
+    EXEC_RESPONSE = 19
+    FILE_UPLOAD = 20
+    FILE_UPLOAD_RESPONSE = 21
+    FILE_DOWNLOAD = 22
+    FILE_DOWNLOAD_RESPONSE = 23
 
 
 ProtocolHeader = ct.Struct(
@@ -85,3 +91,11 @@ DisconnectResponsePayload = ct.Struct(
     "status" / ct.Int32ub,  # 0 = success, 1 = not connected, 2 = other error
     "error_code" / ct.Int32ub,
 )
+
+# File operation status codes
+FILE_STATUS_SUCCESS = 0
+FILE_STATUS_NOT_FOUND = 1
+FILE_STATUS_NO_SPACE = 2
+FILE_STATUS_READ_ONLY = 3
+FILE_STATUS_PERMISSION = 4
+FILE_STATUS_OTHER = 5

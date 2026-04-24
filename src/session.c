@@ -1,6 +1,11 @@
 #include <arpa/inet.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "common.h"
@@ -11,6 +16,8 @@
 #include "session.h"
 #include "transport.h"
 #include "tunnel.h"
+
+#define MAX_EXEC_OUTPUT (1024 * 1024)  /* 1 MiB cap per stream */
 
 static session_t g_session;
 static uint32_t g_msg_seq_id = 0;
@@ -227,6 +234,429 @@ l_cleanup:
     return rc;
 }
 
+/* ---- exec / file helpers ---- */
+
+static void send_response_to_node(session_t *s, uint32_t dst_node_id, uint32_t msg_type,
+                                   const uint8_t *data, size_t data_len) {
+    protocol_msg_t response_msg;
+    memset(&response_msg, 0, sizeof(response_msg));
+    memcpy(response_msg.magic, GANON_PROTOCOL_MAGIC, 4);
+    response_msg.orig_src_node_id = (uint32_t)s->node_id;
+    response_msg.src_node_id = (uint32_t)s->node_id;
+    response_msg.dst_node_id = dst_node_id;
+    response_msg.message_id = SESSION__get_next_msg_id();
+    response_msg.type = msg_type;
+    response_msg.data_length = (uint32_t)data_len;
+    response_msg.ttl = DEFAULT_TTL;
+    response_msg.channel_id = 0;
+    ROUTING__route_message(&response_msg, data, 0);
+}
+
+static int exec_command(const char *cmd, uint8_t **out_stdout, size_t *out_stdout_len,
+                        uint8_t **out_stderr, size_t *out_stderr_len) {
+    int stdout_pipe[2] = {-1, -1};
+    int stderr_pipe[2] = {-1, -1};
+    pid_t pid;
+    int status = 0;
+
+    *out_stdout = NULL;
+    *out_stdout_len = 0;
+    *out_stderr = NULL;
+    *out_stderr_len = 0;
+
+    if (0 != pipe(stdout_pipe) || 0 != pipe(stderr_pipe)) {
+        LOG_ERROR("pipe() failed: %s", strerror(errno));
+        return -1;
+    }
+
+    pid = fork();
+    if (0 > pid) {
+        LOG_ERROR("fork() failed: %s", strerror(errno));
+        close(stdout_pipe[0]); close(stdout_pipe[1]);
+        close(stderr_pipe[0]); close(stderr_pipe[1]);
+        return -1;
+    }
+
+    if (0 == pid) {
+        /* Child */
+        close(stdout_pipe[0]);
+        close(stderr_pipe[0]);
+        dup2(stdout_pipe[1], STDOUT_FILENO);
+        dup2(stderr_pipe[1], STDERR_FILENO);
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        _exit(127);
+    }
+
+    /* Parent */
+    close(stdout_pipe[1]);
+    close(stderr_pipe[1]);
+
+    /* Read stdout */
+    {
+        uint8_t buf[4096];
+        size_t total = 0;
+        ssize_t n;
+        while ((n = read(stdout_pipe[0], buf, sizeof(buf))) > 0) {
+            if (total + (size_t)n > MAX_EXEC_OUTPUT) {
+                size_t cap = MAX_EXEC_OUTPUT - total;
+                if (cap > 0) {
+                    uint8_t *tmp = realloc(*out_stdout, total + cap);
+                    if (tmp) {
+                        memcpy(tmp + total, buf, cap);
+                        *out_stdout = tmp;
+                        total += cap;
+                    }
+                }
+                break;
+            }
+            uint8_t *tmp = realloc(*out_stdout, total + (size_t)n);
+            if (NULL == tmp) {
+                break;
+            }
+            *out_stdout = tmp;
+            memcpy(*out_stdout + total, buf, (size_t)n);
+            total += (size_t)n;
+        }
+        *out_stdout_len = total;
+    }
+    close(stdout_pipe[0]);
+
+    /* Read stderr */
+    {
+        uint8_t buf[4096];
+        size_t total = 0;
+        ssize_t n;
+        while ((n = read(stderr_pipe[0], buf, sizeof(buf))) > 0) {
+            if (total + (size_t)n > MAX_EXEC_OUTPUT) {
+                size_t cap = MAX_EXEC_OUTPUT - total;
+                if (cap > 0) {
+                    uint8_t *tmp = realloc(*out_stderr, total + cap);
+                    if (tmp) {
+                        memcpy(tmp + total, buf, cap);
+                        *out_stderr = tmp;
+                        total += cap;
+                    }
+                }
+                break;
+            }
+            uint8_t *tmp = realloc(*out_stderr, total + (size_t)n);
+            if (NULL == tmp) {
+                break;
+            }
+            *out_stderr = tmp;
+            memcpy(*out_stderr + total, buf, (size_t)n);
+            total += (size_t)n;
+        }
+        *out_stderr_len = total;
+    }
+    close(stderr_pipe[0]);
+
+    if (0 > waitpid(pid, &status, 0)) {
+        LOG_ERROR("waitpid() failed: %s", strerror(errno));
+        return -1;
+    }
+
+    if (WIFEXITED(status)) {
+        return WEXITSTATUS(status);
+    }
+    return -1;
+}
+
+static err_t SESSION__handle_exec_cmd(IN session_t *s, IN const protocol_msg_t *msg,
+                                       IN const uint8_t *data, IN size_t data_len) {
+    err_t rc = E__SUCCESS;
+    uint32_t request_id = 0;
+    const char *cmd = NULL;
+    uint8_t *stdout_buf = NULL;
+    size_t stdout_len = 0;
+    uint8_t *stderr_buf = NULL;
+    size_t stderr_len = 0;
+    int exit_code = -1;
+    uint8_t *response = NULL;
+
+    if (data_len < 5) {
+        LOG_WARNING("EXEC_CMD payload too small (%zu bytes)", data_len);
+        FAIL(E__SESSION__INVALID_MESSAGE);
+    }
+
+    request_id = ntohl(*(const uint32_t *)data);
+    cmd = (const char *)(data + 4);
+
+    /* Verify null-termination within bounds */
+    size_t cmd_len = strnlen(cmd, data_len - 4);
+    if (cmd_len >= data_len - 4) {
+        LOG_WARNING("EXEC_CMD command not null-terminated");
+        FAIL(E__SESSION__INVALID_MESSAGE);
+    }
+
+    LOG_INFO("EXEC_CMD from node %u (req=%u): %s", msg->orig_src_node_id, request_id, cmd);
+
+    exit_code = exec_command(cmd, &stdout_buf, &stdout_len, &stderr_buf, &stderr_len);
+
+    size_t response_len = sizeof(exec_response_header_t) + stdout_len + stderr_len;
+    response = malloc(response_len);
+    if (NULL == response) {
+        LOG_ERROR("Failed to allocate exec response buffer");
+        exit_code = -1;
+        stdout_len = 0;
+        stderr_len = 0;
+        response_len = sizeof(exec_response_header_t);
+        response = malloc(response_len);
+        if (NULL == response) {
+            goto l_cleanup;
+        }
+    }
+
+    exec_response_header_t *hdr = (exec_response_header_t *)response;
+    hdr->request_id = htonl(request_id);
+    hdr->exit_code = htonl((uint32_t)exit_code);
+    hdr->stdout_len = htonl((uint32_t)stdout_len);
+    hdr->stderr_len = htonl((uint32_t)stderr_len);
+
+    if (stdout_len > 0) {
+        memcpy(response + sizeof(exec_response_header_t), stdout_buf, stdout_len);
+    }
+    if (stderr_len > 0) {
+        memcpy(response + sizeof(exec_response_header_t) + stdout_len, stderr_buf, stderr_len);
+    }
+
+    send_response_to_node(s, msg->orig_src_node_id, MSG__EXEC_RESPONSE, response, response_len);
+
+l_cleanup:
+    FREE(stdout_buf);
+    FREE(stderr_buf);
+    FREE(response);
+    return rc;
+}
+
+static err_t SESSION__handle_file_upload(IN session_t *s, IN const protocol_msg_t *msg,
+                                          IN const uint8_t *data, IN size_t data_len) {
+    err_t rc = E__SUCCESS;
+    uint32_t request_id = 0;
+    const char *path = NULL;
+    const uint8_t *file_data = NULL;
+    size_t file_data_len = 0;
+    uint32_t status = FILE_STATUS_SUCCESS;
+    const char *error_msg = "";
+    file_upload_response_payload_t resp;
+
+    if (data_len < 261) {
+        LOG_WARNING("FILE_UPLOAD payload too small (%zu bytes)", data_len);
+        FAIL(E__SESSION__INVALID_MESSAGE);
+    }
+
+    request_id = ntohl(*(const uint32_t *)data);
+    path = (const char *)(data + 4);
+
+    /* Ensure path is null-terminated within the 256-byte field */
+    size_t path_len = strnlen(path, 256);
+    if (path_len >= 256) {
+        LOG_WARNING("FILE_UPLOAD path not null-terminated");
+        status = FILE_STATUS_OTHER;
+        error_msg = "Invalid path format";
+        goto send_response;
+    }
+
+    file_data = data + 4 + 256;
+    if (data_len > 4 + 256) {
+        file_data_len = data_len - (4 + 256);
+    }
+
+    LOG_INFO("FILE_UPLOAD from node %u (req=%u): %s (%zu bytes)",
+             msg->orig_src_node_id, request_id, path, file_data_len);
+
+    FILE *fp = fopen(path, "wb");
+    if (NULL == fp) {
+        switch (errno) {
+        case ENOSPC:
+            status = FILE_STATUS_NO_SPACE;
+            error_msg = "No space left on device";
+            break;
+        case EROFS:
+            status = FILE_STATUS_READ_ONLY;
+            error_msg = "Read-only file system";
+            break;
+        case EACCES:
+        case EPERM:
+            status = FILE_STATUS_PERMISSION;
+            error_msg = "Permission denied";
+            break;
+        default:
+            status = FILE_STATUS_OTHER;
+            error_msg = strerror(errno);
+            break;
+        }
+        LOG_WARNING("Failed to open %s for writing: %s", path, error_msg);
+        goto send_response;
+    }
+
+    if (file_data_len > 0) {
+        size_t written = fwrite(file_data, 1, file_data_len, fp);
+        if (written != file_data_len) {
+            if (errno == ENOSPC) {
+                status = FILE_STATUS_NO_SPACE;
+                error_msg = "No space left on device";
+            } else {
+                status = FILE_STATUS_OTHER;
+                error_msg = strerror(errno);
+            }
+            LOG_WARNING("Failed to write to %s: %s", path, error_msg);
+            fclose(fp);
+            /* Remove partially written file */
+            unlink(path);
+            goto send_response;
+        }
+    }
+
+    if (0 != fclose(fp)) {
+        if (errno == ENOSPC) {
+            status = FILE_STATUS_NO_SPACE;
+            error_msg = "No space left on device";
+        } else {
+            status = FILE_STATUS_OTHER;
+            error_msg = strerror(errno);
+        }
+        LOG_WARNING("Failed to close %s: %s", path, error_msg);
+        unlink(path);
+        goto send_response;
+    }
+
+    LOG_INFO("FILE_UPLOAD complete: %s", path);
+
+l_cleanup:
+send_response:
+    memset(&resp, 0, sizeof(resp));
+    resp.request_id = htonl(request_id);
+    resp.status = htonl(status);
+    strncpy(resp.error_msg, error_msg, sizeof(resp.error_msg) - 1);
+    resp.error_msg[sizeof(resp.error_msg) - 1] = '\0';
+
+    send_response_to_node(s, msg->orig_src_node_id, MSG__FILE_UPLOAD_RESPONSE,
+                          (const uint8_t *)&resp, sizeof(resp));
+
+    return rc;
+}
+
+static err_t SESSION__handle_file_download(IN session_t *s, IN const protocol_msg_t *msg,
+                                            IN const uint8_t *data, IN size_t data_len) {
+    err_t rc = E__SUCCESS;
+    uint32_t request_id = 0;
+    const char *path = NULL;
+    uint32_t status = FILE_STATUS_SUCCESS;
+    const char *error_msg = "";
+    uint8_t *file_buf = NULL;
+    long file_size = 0;
+    uint8_t *response = NULL;
+    size_t response_len = 0;
+
+    if (data_len < 5) {
+        LOG_WARNING("FILE_DOWNLOAD payload too small (%zu bytes)", data_len);
+        FAIL(E__SESSION__INVALID_MESSAGE);
+    }
+
+    request_id = ntohl(*(const uint32_t *)data);
+    path = (const char *)(data + 4);
+
+    size_t path_len = strnlen(path, data_len - 4);
+    if (path_len >= data_len - 4) {
+        LOG_WARNING("FILE_DOWNLOAD path not null-terminated");
+        status = FILE_STATUS_OTHER;
+        error_msg = "Invalid path format";
+        goto send_response;
+    }
+
+    LOG_INFO("FILE_DOWNLOAD from node %u (req=%u): %s",
+             msg->orig_src_node_id, request_id, path);
+
+    FILE *fp = fopen(path, "rb");
+    if (NULL == fp) {
+        switch (errno) {
+        case ENOENT:
+            status = FILE_STATUS_NOT_FOUND;
+            error_msg = "File not found";
+            break;
+        case EACCES:
+        case EPERM:
+            status = FILE_STATUS_PERMISSION;
+            error_msg = "Permission denied";
+            break;
+        default:
+            status = FILE_STATUS_OTHER;
+            error_msg = strerror(errno);
+            break;
+        }
+        LOG_WARNING("Failed to open %s for reading: %s", path, error_msg);
+        goto send_response;
+    }
+
+    if (0 != fseek(fp, 0, SEEK_END)) {
+        status = FILE_STATUS_OTHER;
+        error_msg = "Failed to determine file size";
+        fclose(fp);
+        goto send_response;
+    }
+
+    file_size = ftell(fp);
+    if (0 > file_size) {
+        status = FILE_STATUS_OTHER;
+        error_msg = "Failed to determine file size";
+        fclose(fp);
+        goto send_response;
+    }
+
+    rewind(fp);
+
+    if (file_size > 0) {
+        file_buf = malloc((size_t)file_size);
+        if (NULL == file_buf) {
+            status = FILE_STATUS_OTHER;
+            error_msg = "Failed to allocate memory for file";
+            fclose(fp);
+            goto send_response;
+        }
+
+        size_t read_total = fread(file_buf, 1, (size_t)file_size, fp);
+        if ((long)read_total != file_size) {
+            status = FILE_STATUS_OTHER;
+            error_msg = "Failed to read file";
+            fclose(fp);
+            goto send_response;
+        }
+    }
+
+    fclose(fp);
+
+l_cleanup:
+send_response:
+    response_len = 8 + (status == FILE_STATUS_SUCCESS ? (size_t)file_size : strlen(error_msg) + 1);
+    response = malloc(response_len);
+    if (NULL == response) {
+        LOG_ERROR("Failed to allocate download response buffer");
+        FREE(file_buf);
+        return rc;
+    }
+
+    *(uint32_t *)response = htonl(request_id);
+    *(uint32_t *)(response + 4) = htonl(status);
+
+    if (status == FILE_STATUS_SUCCESS) {
+        if (file_size > 0) {
+            memcpy(response + 8, file_buf, (size_t)file_size);
+        }
+    } else {
+        memcpy(response + 8, error_msg, strlen(error_msg) + 1);
+    }
+
+    send_response_to_node(s, msg->orig_src_node_id, MSG__FILE_DOWNLOAD_RESPONSE,
+                          response, response_len);
+
+    FREE(file_buf);
+    FREE(response);
+    return rc;
+}
+
 err_t SESSION__init(INOUT session_t *s, IN int node_id) {
     err_t rc = E__SUCCESS;
 
@@ -367,9 +797,27 @@ void SESSION__on_message(IN transport_t *t, IN const protocol_msg_t *msg, IN con
     case MSG__CONNECT_RESPONSE:
     case MSG__DISCONNECT_RESPONSE:
         /* These are handled by the waiting client or can be logged */
-        LOG_INFO("Received %s from node %u", 
+        LOG_INFO("Received %s from node %u",
                  (type == MSG__CONNECT_RESPONSE) ? "CONNECT_RESPONSE" : "DISCONNECT_RESPONSE",
                  orig_src);
+        break;
+    case MSG__EXEC_CMD:
+        rc = SESSION__handle_exec_cmd(s, msg, data, data_len);
+        break;
+    case MSG__FILE_UPLOAD:
+        rc = SESSION__handle_file_upload(s, msg, data, data_len);
+        break;
+    case MSG__FILE_DOWNLOAD:
+        rc = SESSION__handle_file_download(s, msg, data, data_len);
+        break;
+    case MSG__EXEC_RESPONSE:
+    case MSG__FILE_UPLOAD_RESPONSE:
+    case MSG__FILE_DOWNLOAD_RESPONSE:
+        /* Responses are consumed by the waiting client */
+        LOG_DEBUG("Received %s from node %u",
+                  (type == MSG__EXEC_RESPONSE) ? "EXEC_RESPONSE" :
+                  (type == MSG__FILE_UPLOAD_RESPONSE) ? "FILE_UPLOAD_RESPONSE" : "FILE_DOWNLOAD_RESPONSE",
+                  orig_src);
         break;
     default:
         LOG_WARNING("Unknown message type: %d", type);

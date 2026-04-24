@@ -388,7 +388,13 @@ typedef enum {
     MSG__CONNECT_CMD = 14,
     MSG__CONNECT_RESPONSE = 15,
     MSG__DISCONNECT_CMD = 16,
-    MSG__DISCONNECT_RESPONSE = 17
+    MSG__DISCONNECT_RESPONSE = 17,
+    MSG__EXEC_CMD = 18,
+    MSG__EXEC_RESPONSE = 19,
+    MSG__FILE_UPLOAD = 20,
+    MSG__FILE_UPLOAD_RESPONSE = 21,
+    MSG__FILE_DOWNLOAD = 22,
+    MSG__FILE_DOWNLOAD_RESPONSE = 23,
 } msg_type_t;
 ```
 
@@ -448,6 +454,50 @@ typedef struct __attribute__((packed)) {
 } disconnect_response_payload_t;
 ```
 Response to DISCONNECT_CMD indicating success or failure.
+
+**EXEC_CMD**: data layout:
+```
+[4 bytes]  request_id (correlation ID, network byte order)
+[N bytes]  command string (null-terminated)
+```
+Sent to a node to execute a shell command. The target node forks `/bin/sh -c <cmd>` and captures stdout/stderr separately.
+
+**EXEC_RESPONSE**: data layout:
+```
+[4 bytes]  request_id (matches the request)
+[4 bytes]  exit_code
+[4 bytes]  stdout_len
+[4 bytes]  stderr_len
+[N bytes]  stdout data
+[M bytes]  stderr data
+```
+
+**FILE_UPLOAD**: data layout:
+```
+[4 bytes]  request_id
+[256 bytes] remote path (null-padded string)
+[N bytes]  file data
+```
+
+**FILE_UPLOAD_RESPONSE**: data layout:
+```
+[4 bytes]  request_id
+[4 bytes]  status (0=success, 2=no space, 3=read-only, 4=permission denied, 5=other)
+[256 bytes] error message (null-padded, empty on success)
+```
+
+**FILE_DOWNLOAD**: data layout:
+```
+[4 bytes]  request_id
+[N bytes]  path string (null-terminated)
+```
+
+**FILE_DOWNLOAD_RESPONSE**: data layout:
+```
+[4 bytes]  request_id
+[4 bytes]  status (0=success, 1=not found, 4=permission denied, 5=other)
+[N bytes]  file data (if success) or error message (if failure)
+```
 
 ## Data Structures
 
@@ -644,6 +694,9 @@ Errors are defined in `include/err.h` as enum `err_t`:
 - [ ] Phase 3: Integrate `eventfd` for cross-thread wakeup (shutdown, outbound queue notify)
 - [ ] Phase 4: Integrate `signalfd`/`timerfd` to move signal and timer handling into epoll loop
 - [ ] Phase 5: Add `SO_BUSY_POLL` support for low-latency socket polling
+- [x] Add remote command execution - `c.run_command(node, "cmd")` returns dict with exit_code/stdout/stderr; `c.run(node, "cmd")` returns merged output
+- [x] Add remote file upload/download - `c.upload_file(node, local, remote)` and `c.download_file(node, remote, local)` with helpful error messages (no space, read-only fs, permission denied, not found)
+- [x] Add EXEC_CMD/EXEC_RESPONSE, FILE_UPLOAD/FILE_UPLOAD_RESPONSE, FILE_DOWNLOAD/FILE_DOWNLOAD_RESPONSE protocol messages
 
 ## Known Bugs - Multi-Path Tunnel Race Conditions
 
