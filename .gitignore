@@ -15,3 +15,5 @@ third_party/libsodium/*.pc
 third_party/libsodium/src/Makefile
 third_party/libsodium/src/libsodium/Makefile
 third_party/libsodium/libtool
+third_party/*-install-*/
+third_party/*-build*/

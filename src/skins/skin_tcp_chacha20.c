@@ -1,12 +1,17 @@
 /*
- * tcp-monocypher skin:
- *   TCP transport + X25519 key-exchange + BLAKE2b KDF + XChaCha20-Poly1305.
+ * tcp-chacha20 skin:
+ *   TCP transport + X25519 key-exchange + BLAKE2b KDF + ChaCha20 stream cipher.
+ *
+ *   Uses the same ephemeral X25519 handshake as tcp-monocypher, but instead
+ *   of XChaCha20-Poly1305 AEAD it uses ChaCha20 as a raw stream cipher
+ *   (no authentication).  This provides per-connection obfuscation at
+ *   roughly 2-3x the throughput of the AEAD skin because the Poly1305 MAC
+ *   computation and 44-byte frame overhead are eliminated.
  *
  * Wire frame format (after handshake):
- *   [4  bytes] big-endian payload length (= nonce + mac + ciphertext)
- *   [24 bytes] nonce (16 zero bytes || 8-byte little-endian counter)
- *   [16 bytes] Poly1305 MAC
- *   [N  bytes] ciphertext of serialised protocol_msg_t + data
+ *   [4 bytes] big-endian payload length
+ *   [8 bytes] nonce (little-endian message counter)
+ *   [N bytes] ChaCha20-obfuscated serialized protocol_msg_t + data
  */
 
 #include <arpa/inet.h>
@@ -15,10 +20,8 @@
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -29,52 +32,33 @@
 #include "monocypher.h"
 #include "protocol.h"
 #include "skin.h"
-#include "skins/skin_tcp_monocypher.h"
+#include "skins/skin_tcp_chacha20.h"
 #include "transport.h"
 
 #ifdef USE_LIBSODIUM
 #include <sodium.h>
 #endif
 
-/* ---- Constants ---------------------------------------------------------- */
-
-#define TCPM_NONCE_SIZE     24
-#define TCPM_MAC_SIZE       16
-#define TCPM_FRAME_OVERHEAD 44   /* nonce + mac */
-
-/* Stack buffer caps to avoid malloc on the hot path. */
-#define TCPM_SEND_STACK_SIZE 131328
-#define TCPM_RECV_STACK_SIZE 131400
-
 /* ---- Per-connection opaque context -------------------------------------- */
 
-typedef enum {
-    TCPM_ENC__INIT = 0,
-    TCPM_ENC__ESTABLISHED,
-} tcpm_enc_state_t;
-
 typedef struct {
-    tcpm_enc_state_t enc_state;
     uint8_t enc_ephemeral_priv[32];
     uint8_t enc_ephemeral_pub[32];
     uint8_t enc_send_key[32];
     uint8_t enc_recv_key[32];
-    uint64_t enc_send_nonce;
-    uint64_t enc_recv_nonce;
-    uint8_t enc_session_id[8];
-    int enc_is_initiator;
-    uint8_t enc_send_subkey[32];
-    uint8_t enc_recv_subkey[32];
-} skin_tcpm_ctx_t;
+    int     enc_is_initiator;
+    uint64_t enc_send_counter;
+    uint64_t enc_recv_counter;
+} skin_tcp_chacha20_ctx_t;
 
 /* ---- Per-listener state ------------------------------------------------- */
 
 typedef struct {
-    int      listen_fd;
-    addr_t   addr;
-} skin_tcpm_listener_t;
+    int    listen_fd;
+    addr_t addr;
+} skin_tcp_chacha20_listener_t;
 
-/* ---- Helpers: random, key-derivation, nonce ----------------------------- */
+/* ---- Helpers: random, key-derivation ------------------------------------ */
 
 static int get_random_bytes(uint8_t *buf, size_t len) {
 #if defined(__linux__) && defined(SYS_getrandom)
@@ -103,12 +87,10 @@ static int get_random_bytes(uint8_t *buf, size_t len) {
 }
 
 static void derive_keys(const uint8_t shared[32],
-                        uint8_t send_key[32], uint8_t recv_key[32],
-                        uint8_t session_id[8]) {
+                        uint8_t send_key[32], uint8_t recv_key[32]) {
     uint8_t out[32];
     const char send_ctx = 'S';
     const char recv_ctx = 'R';
-    const char sess_ctx = 'I';
 
     crypto_blake2b_keyed(out, 32, shared, 32, (const uint8_t *)&send_ctx, 1);
     memcpy(send_key, out, 32);
@@ -116,27 +98,12 @@ static void derive_keys(const uint8_t shared[32],
     crypto_blake2b_keyed(out, 32, shared, 32, (const uint8_t *)&recv_ctx, 1);
     memcpy(recv_key, out, 32);
 
-    crypto_blake2b_keyed(out, 32, shared, 32, (const uint8_t *)&sess_ctx, 1);
-    memcpy(session_id, out, 8);
-
     crypto_wipe(out, sizeof(out));
-}
-
-static void build_nonce(uint8_t nonce[24], uint64_t counter) {
-    memset(nonce, 0, 24);
-    nonce[16] = (uint8_t)(counter);
-    nonce[17] = (uint8_t)(counter >> 8);
-    nonce[18] = (uint8_t)(counter >> 16);
-    nonce[19] = (uint8_t)(counter >> 24);
-    nonce[20] = (uint8_t)(counter >> 32);
-    nonce[21] = (uint8_t)(counter >> 40);
-    nonce[22] = (uint8_t)(counter >> 48);
-    nonce[23] = (uint8_t)(counter >> 56);
 }
 
 /* ---- Raw TCP recv/send (blocking) --------------------------------------- */
 
-static err_t tcpm_recv_all(int fd, uint8_t *buf, size_t len) {
+static err_t ch20_recv_all(int fd, uint8_t *buf, size_t len) {
     err_t rc = E__SUCCESS;
     size_t total = 0;
     while (total < len) {
@@ -155,7 +122,7 @@ l_cleanup:
     return rc;
 }
 
-static err_t tcpm_send_all(int fd, const uint8_t *buf, size_t len) {
+static err_t ch20_send_all(int fd, const uint8_t *buf, size_t len) {
     err_t rc = E__SUCCESS;
     size_t total = 0;
     while (total < len) {
@@ -171,9 +138,30 @@ l_cleanup:
     return rc;
 }
 
+/* ---- ChaCha20 stream cipher --------------------------------------------- */
+
+static void ch20_crypt(uint8_t *buf, size_t len,
+                        const uint8_t key[32], uint64_t counter) {
+    uint8_t nonce[8];
+    nonce[0] = (uint8_t)(counter);
+    nonce[1] = (uint8_t)(counter >> 8);
+    nonce[2] = (uint8_t)(counter >> 16);
+    nonce[3] = (uint8_t)(counter >> 24);
+    nonce[4] = (uint8_t)(counter >> 32);
+    nonce[5] = (uint8_t)(counter >> 40);
+    nonce[6] = (uint8_t)(counter >> 48);
+    nonce[7] = (uint8_t)(counter >> 56);
+
+#ifdef USE_LIBSODIUM
+    crypto_stream_chacha20_xor(buf, buf, len, nonce, key);
+#else
+    crypto_chacha20_djb(buf, buf, len, key, nonce, 0);
+#endif
+}
+
 /* ---- Transport allocation helpers --------------------------------------- */
 
-static transport_t *tcpm_alloc_transport(int fd, int is_incoming,
+static transport_t *ch20_alloc_transport(int fd, int is_incoming,
                                           const char *ip, int port,
                                           const skin_ops_t *skin) {
     transport_t *t = TRANSPORT__alloc_base(fd, skin);
@@ -189,8 +177,8 @@ static transport_t *tcpm_alloc_transport(int fd, int is_incoming,
     return t;
 }
 
-static skin_tcpm_ctx_t *tcpm_ctx_alloc(void) {
-    skin_tcpm_ctx_t *ctx = malloc(sizeof(skin_tcpm_ctx_t));
+static skin_tcp_chacha20_ctx_t *ch20_ctx_alloc(void) {
+    skin_tcp_chacha20_ctx_t *ctx = malloc(sizeof(skin_tcp_chacha20_ctx_t));
     if (NULL == ctx) {
         return NULL;
     }
@@ -198,7 +186,7 @@ static skin_tcpm_ctx_t *tcpm_ctx_alloc(void) {
     return ctx;
 }
 
-static void tcpm_ctx_free(skin_tcpm_ctx_t *ctx) {
+static void ch20_ctx_free(skin_tcp_chacha20_ctx_t *ctx) {
     if (NULL == ctx) {
         return;
     }
@@ -210,9 +198,9 @@ static void tcpm_ctx_free(skin_tcpm_ctx_t *ctx) {
 
 /* ---- Handshake ---------------------------------------------------------- */
 
-static err_t tcpm_do_handshake(transport_t *t, int is_initiator) {
+static err_t ch20_do_handshake(transport_t *t, int is_initiator) {
     err_t rc = E__SUCCESS;
-    skin_tcpm_ctx_t *ctx = (skin_tcpm_ctx_t *)t->skin_ctx;
+    skin_tcp_chacha20_ctx_t *ctx = (skin_tcp_chacha20_ctx_t *)t->skin_ctx;
     uint8_t peer_pub[32];
     uint8_t shared[32];
 
@@ -227,162 +215,64 @@ static err_t tcpm_do_handshake(transport_t *t, int is_initiator) {
     ctx->enc_is_initiator = is_initiator;
 
     if (is_initiator) {
-        rc = tcpm_send_all(t->fd, ctx->enc_ephemeral_pub, 32);
+        rc = ch20_send_all(t->fd, ctx->enc_ephemeral_pub, 32);
         FAIL_IF(E__SUCCESS != rc, rc);
-        rc = tcpm_recv_all(t->fd, peer_pub, 32);
+        rc = ch20_recv_all(t->fd, peer_pub, 32);
         FAIL_IF(E__SUCCESS != rc, rc);
     } else {
-        rc = tcpm_recv_all(t->fd, peer_pub, 32);
+        rc = ch20_recv_all(t->fd, peer_pub, 32);
         FAIL_IF(E__SUCCESS != rc, rc);
-        rc = tcpm_send_all(t->fd, ctx->enc_ephemeral_pub, 32);
+        rc = ch20_send_all(t->fd, ctx->enc_ephemeral_pub, 32);
         FAIL_IF(E__SUCCESS != rc, rc);
     }
 
     crypto_x25519(shared, ctx->enc_ephemeral_priv, peer_pub);
 
     if (is_initiator) {
-        derive_keys(shared, ctx->enc_send_key, ctx->enc_recv_key, ctx->enc_session_id);
+        derive_keys(shared, ctx->enc_send_key, ctx->enc_recv_key);
     } else {
-        derive_keys(shared, ctx->enc_recv_key, ctx->enc_send_key, ctx->enc_session_id);
+        derive_keys(shared, ctx->enc_recv_key, ctx->enc_send_key);
     }
 
-    ctx->enc_send_nonce = 0;
-    ctx->enc_recv_nonce = 0;
-    ctx->enc_state = TCPM_ENC__ESTABLISHED;
+    ctx->enc_send_counter = 0;
+    ctx->enc_recv_counter = 0;
 
-#ifndef USE_LIBSODIUM
-    {
-        uint8_t zero_nonce_prefix[16] = {0};
-        crypto_chacha20_h(ctx->enc_send_subkey, ctx->enc_send_key, zero_nonce_prefix);
-        crypto_chacha20_h(ctx->enc_recv_subkey, ctx->enc_recv_key, zero_nonce_prefix);
-    }
-#endif
-
-    LOG_DEBUG("Encryption handshake complete on fd=%d (session_id=%02x%02x%02x%02x)",
-              t->fd, ctx->enc_session_id[0], ctx->enc_session_id[1],
-              ctx->enc_session_id[2], ctx->enc_session_id[3]);
+    LOG_DEBUG("ChaCha20 handshake complete on fd=%d", t->fd);
 
 l_cleanup:
     crypto_wipe(shared, sizeof(shared));
     return rc;
 }
 
-/* ---- Decrypt a single complete encrypted frame -------------------------- */
+/* ---- listener_create ---------------------------------------------------- */
 
-static err_t tcpm_decrypt_frame(transport_t *t, uint8_t *payload, size_t payload_len,
-                                 protocol_msg_t *msg, uint8_t **data) {
-    err_t rc = E__SUCCESS;
-    skin_tcpm_ctx_t *ctx = (skin_tcpm_ctx_t *)t->skin_ctx;
-    uint8_t *plaintext = NULL;
-
-    VALIDATE_ARGS(t, payload, msg, data);
-
-    *data = NULL;
-
-    if (payload_len < (TCPM_NONCE_SIZE + TCPM_MAC_SIZE)) {
-        LOG_WARNING("Frame too small for nonce+mac: %zu on fd=%d", payload_len, t->fd);
-        FAIL(E__NET__SOCKET_CONNECT_FAILED);
-    }
-
-    uint8_t *nonce      = payload;
-    uint8_t *mac        = payload + TCPM_NONCE_SIZE;
-    uint8_t *ciphertext = payload + TCPM_NONCE_SIZE + TCPM_MAC_SIZE;
-    size_t ciphertext_len = payload_len - TCPM_NONCE_SIZE - TCPM_MAC_SIZE;
-
-    uint64_t recv_counter = (uint64_t)nonce[16] |
-                           ((uint64_t)nonce[17] << 8)  |
-                           ((uint64_t)nonce[18] << 16) |
-                           ((uint64_t)nonce[19] << 24) |
-                           ((uint64_t)nonce[20] << 32) |
-                           ((uint64_t)nonce[21] << 40) |
-                           ((uint64_t)nonce[22] << 48) |
-                           ((uint64_t)nonce[23] << 56);
-
-    if (recv_counter != ctx->enc_recv_nonce) {
-        LOG_WARNING("Replay detected on fd=%d: expected %llu, got %llu",
-                    t->fd, (unsigned long long)ctx->enc_recv_nonce,
-                    (unsigned long long)recv_counter);
-        FAIL(E__CRYPTO__REPLAY_DETECTED);
-    }
-    ctx->enc_recv_nonce++;
-
-    uint8_t plaintext_stack[TCPM_RECV_STACK_SIZE];
-    int plaintext_heap = (ciphertext_len > TCPM_RECV_STACK_SIZE);
-    if (plaintext_heap) {
-        plaintext = malloc(ciphertext_len);
-        FAIL_IF(NULL == plaintext, E__INVALID_ARG_NULL_POINTER);
-    } else {
-        plaintext = plaintext_stack;
-    }
-
-#ifdef USE_LIBSODIUM
-    if (0 != crypto_aead_xchacha20poly1305_ietf_decrypt_detached(
-            plaintext, NULL, ciphertext, ciphertext_len, mac,
-            NULL, 0, nonce, ctx->enc_recv_key)) {
-        LOG_WARNING("Decryption failed on fd=%d", t->fd);
-        if (plaintext_heap) FREE(plaintext);
-        FAIL(E__CRYPTO__DECRYPT_FAILED);
-    }
-#else
-    {
-        crypto_aead_ctx aead;
-        memcpy(aead.key, ctx->enc_recv_subkey, 32);
-        memcpy(aead.nonce, nonce + 16, 8);
-        aead.counter = 0;
-        if (0 != crypto_aead_read(&aead, plaintext, mac,
-                                  NULL, 0, ciphertext, ciphertext_len)) {
-            LOG_WARNING("Decryption failed on fd=%d", t->fd);
-            if (plaintext_heap) FREE(plaintext);
-            FAIL(E__CRYPTO__DECRYPT_FAILED);
-        }
-    }
-#endif
-
-    size_t unserialize_data_len = 0;
-    rc = PROTOCOL__unserialize(plaintext, ciphertext_len, msg, data, &unserialize_data_len);
-    if (E__SUCCESS != rc) {
-        LOG_WARNING("Failed to unserialize decrypted message from fd %d", t->fd);
-        if (plaintext_heap) FREE(plaintext);
-        goto l_cleanup;
-    }
-
-    LOG_TRACE("RECV msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, data_len=%u, ttl=%u, channel=%u, fd=%d",
-              msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
-              msg->message_id, msg->type, msg->data_length, msg->ttl, msg->channel_id, t->fd);
-
-    if (plaintext_heap) FREE(plaintext);
-
-l_cleanup:
-    return rc;
-}
-
-/* ---- Vtable implementations --------------------------------------------- */
-
-/* listener_create */
-static err_t tcpm_listener_create(const addr_t *addr,
+static err_t ch20_listener_create(const addr_t *addr,
                                    skin_listener_t **out_listener,
                                    int *out_listen_fd) {
     err_t rc = E__SUCCESS;
+    skin_tcp_chacha20_listener_t *l = NULL;
+    int fd = -1;
 
     VALIDATE_ARGS(addr, out_listener, out_listen_fd);
 
     *out_listener  = NULL;
     *out_listen_fd = -1;
 
-    skin_tcpm_listener_t *l = malloc(sizeof(skin_tcpm_listener_t));
-    FAIL_IF(NULL == l, E__INVALID_ARG_NULL_POINTER);
+    l = malloc(sizeof(skin_tcp_chacha20_listener_t));
+    if (NULL == l) {
+        FAIL(E__INVALID_ARG_NULL_POINTER);
+    }
+    memset(l, 0, sizeof(*l));
 
-    l->addr = *addr;
-
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    fd = socket(AF_INET, SOCK_STREAM, 0);
     if (0 > fd) {
-        LOG_ERROR("Failed to create listen socket: %s", strerror(errno));
+        LOG_ERROR("Failed to create socket: %s", strerror(errno));
         FREE(l);
         FAIL(E__NET__SOCKET_CREATE_FAILED);
     }
 
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    int reuse = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
     struct sockaddr_in sa;
     memset(&sa, 0, sizeof(sa));
@@ -414,13 +304,12 @@ static err_t tcpm_listener_create(const addr_t *addr,
         FAIL(E__NET__SOCKET_LISTEN_FAILED);
     }
 
-    /* Non-blocking accept so the accept thread can poll the running flag. */
     int nb_flags = fcntl(fd, F_GETFL, 0);
     if (nb_flags >= 0) {
         fcntl(fd, F_SETFL, nb_flags | O_NONBLOCK);
     }
 
-    LOG_INFO("Listening on %s:%d (tcp-monocypher)", addr->ip, addr->port);
+    LOG_INFO("Listening on %s:%d (tcp-chacha20)", addr->ip, addr->port);
 
     l->listen_fd   = fd;
     *out_listen_fd = fd;
@@ -431,19 +320,18 @@ l_cleanup:
 }
 
 /* listener_accept */
-static err_t tcpm_listener_accept(skin_listener_t *sl,
+static err_t ch20_listener_accept(skin_listener_t *sl,
                                    transport_t **out_transport) {
     err_t rc = E__SUCCESS;
-    skin_tcpm_listener_t *l = (skin_tcpm_listener_t *)sl;
+    skin_tcp_chacha20_listener_t *l = (skin_tcp_chacha20_listener_t *)sl;
     transport_t *t = NULL;
-    skin_tcpm_ctx_t *ctx = NULL;
+    skin_tcp_chacha20_ctx_t *ctx = NULL;
     int client_fd = -1;
 
     VALIDATE_ARGS(l, out_transport);
 
     *out_transport = NULL;
 
-    /* accept() — blocks until a connection arrives */
     struct sockaddr_in client_addr;
     socklen_t client_len = sizeof(client_addr);
     memset(&client_addr, 0, sizeof(client_addr));
@@ -460,7 +348,7 @@ static err_t tcpm_listener_accept(skin_listener_t *sl,
     int nodelay = 1;
     setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
-    ctx = tcpm_ctx_alloc();
+    ctx = ch20_ctx_alloc();
     if (NULL == ctx) {
         close(client_fd);
         FAIL(E__INVALID_ARG_NULL_POINTER);
@@ -470,9 +358,10 @@ static err_t tcpm_listener_accept(skin_listener_t *sl,
     inet_ntop(AF_INET, &client_addr.sin_addr, ip_str, INET_ADDRSTRLEN);
     int client_port = ntohs(client_addr.sin_port);
 
-    t = tcpm_alloc_transport(client_fd, 1, ip_str, client_port, SKIN_TCPM__ops());
+    t = ch20_alloc_transport(client_fd, 1, ip_str, client_port,
+                              SKIN_TCP_CHACHA20__ops());
     if (NULL == t) {
-        tcpm_ctx_free(ctx);
+        ch20_ctx_free(ctx);
         close(client_fd);
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
@@ -480,12 +369,12 @@ static err_t tcpm_listener_accept(skin_listener_t *sl,
 
     LOG_INFO("Accepted connection from %s:%d (fd=%d)", ip_str, client_port, client_fd);
 
-    rc = tcpm_do_handshake(t, 0 /* responder */);
+    rc = ch20_do_handshake(t, 0 /* responder */);
     if (E__SUCCESS != rc) {
         LOG_ERROR("Handshake failed for accepted connection fd=%d", client_fd);
-        t->skin_ctx = NULL;   /* ctx freed below */
+        t->skin_ctx = NULL;
         TRANSPORT__free_base(t);
-        tcpm_ctx_free(ctx);
+        ch20_ctx_free(ctx);
         close(client_fd);
         goto l_cleanup;
     }
@@ -497,8 +386,8 @@ l_cleanup:
 }
 
 /* listener_destroy */
-static void tcpm_listener_destroy(skin_listener_t *sl) {
-    skin_tcpm_listener_t *l = (skin_tcpm_listener_t *)sl;
+static void ch20_listener_destroy(skin_listener_t *sl) {
+    skin_tcp_chacha20_listener_t *l = (skin_tcp_chacha20_listener_t *)sl;
     if (NULL == l) {
         return;
     }
@@ -510,12 +399,12 @@ static void tcpm_listener_destroy(skin_listener_t *sl) {
 }
 
 /* connect */
-static err_t tcpm_connect(const char *ip, int port, int connect_timeout_sec,
+static err_t ch20_connect(const char *ip, int port, int connect_timeout_sec,
                            transport_t **out_transport) {
     err_t rc = E__SUCCESS;
     int fd = -1;
     transport_t *t = NULL;
-    skin_tcpm_ctx_t *ctx = NULL;
+    skin_tcp_chacha20_ctx_t *ctx = NULL;
 
     VALIDATE_ARGS(ip, out_transport);
 
@@ -527,7 +416,6 @@ static err_t tcpm_connect(const char *ip, int port, int connect_timeout_sec,
         FAIL(E__NET__SOCKET_CREATE_FAILED);
     }
 
-    /* Non-blocking connect with timeout */
     int flags = fcntl(fd, F_GETFL, 0);
     if (-1 == flags || -1 == fcntl(fd, F_SETFL, flags | O_NONBLOCK)) {
         close(fd);
@@ -583,32 +471,31 @@ static err_t tcpm_connect(const char *ip, int port, int connect_timeout_sec,
     int nodelay = 1;
     setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay));
 
-    /* Restore blocking mode for the handshake */
     if (-1 == fcntl(fd, F_SETFL, flags)) {
         close(fd);
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 
-    ctx = tcpm_ctx_alloc();
+    ctx = ch20_ctx_alloc();
     if (NULL == ctx) {
         close(fd);
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
 
-    t = tcpm_alloc_transport(fd, 0, ip, port, SKIN_TCPM__ops());
+    t = ch20_alloc_transport(fd, 0, ip, port, SKIN_TCP_CHACHA20__ops());
     if (NULL == t) {
-        tcpm_ctx_free(ctx);
+        ch20_ctx_free(ctx);
         close(fd);
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
     t->skin_ctx = ctx;
 
-    rc = tcpm_do_handshake(t, 1 /* initiator */);
+    rc = ch20_do_handshake(t, 1 /* initiator */);
     if (E__SUCCESS != rc) {
         LOG_ERROR("Handshake failed connecting to %s:%d", ip, port);
         t->skin_ctx = NULL;
         TRANSPORT__free_base(t);
-        tcpm_ctx_free(ctx);
+        ch20_ctx_free(ctx);
         close(fd);
         goto l_cleanup;
     }
@@ -621,11 +508,11 @@ l_cleanup:
 }
 
 /* send_msg */
-static err_t tcpm_send_msg(transport_t *t, const protocol_msg_t *msg,
+static err_t ch20_send_msg(transport_t *t, const protocol_msg_t *msg,
                             const uint8_t *data) {
     err_t rc = E__SUCCESS;
-    skin_tcpm_ctx_t *ctx = (skin_tcpm_ctx_t *)t->skin_ctx;
-    uint8_t *frame = NULL;
+    skin_tcp_chacha20_ctx_t *ctx = (skin_tcp_chacha20_ctx_t *)t->skin_ctx;
+    uint8_t *obf = NULL;
 
     VALIDATE_ARGS(t, msg, ctx);
 
@@ -640,82 +527,57 @@ static err_t tcpm_send_msg(transport_t *t, const protocol_msg_t *msg,
         plain_len += msg->data_length;
     }
 
-    uint8_t  plain_stack[TCPM_SEND_STACK_SIZE];
-    uint8_t *plain_buf;
-    int      plain_heap = (plain_len > TCPM_SEND_STACK_SIZE);
-    if (plain_heap) {
-        plain_buf = malloc(plain_len);
-        FAIL_IF(NULL == plain_buf, E__INVALID_ARG_NULL_POINTER);
-    } else {
-        plain_buf = plain_stack;
-    }
-
-    size_t bytes_written = 0;
-    rc = PROTOCOL__serialize(msg, data, plain_buf, plain_len, &bytes_written);
-    if (E__SUCCESS != rc) {
-        if (plain_heap) FREE(plain_buf);
-        goto l_cleanup;
-    }
-
-    size_t ciphertext_len = bytes_written;
-    size_t payload_len    = TCPM_NONCE_SIZE + TCPM_MAC_SIZE + ciphertext_len;
-    size_t total_len      = 4 + payload_len;
-
-    frame = malloc(total_len);
-    if (NULL == frame) {
-        if (plain_heap) FREE(plain_buf);
+    obf = malloc(plain_len);
+    if (NULL == obf) {
         FAIL(E__INVALID_ARG_NULL_POINTER);
     }
 
-    uint32_t net_len = htonl((uint32_t)payload_len);
-    memcpy(frame, &net_len, 4);
-
-    uint8_t *nonce      = frame + 4;
-    uint8_t *mac        = frame + 4 + TCPM_NONCE_SIZE;
-    uint8_t *ciphertext = frame + 4 + TCPM_NONCE_SIZE + TCPM_MAC_SIZE;
-
-    build_nonce(nonce, ctx->enc_send_nonce);
-    ctx->enc_send_nonce++;
-
-#ifdef USE_LIBSODIUM
-    crypto_aead_xchacha20poly1305_ietf_encrypt_detached(
-        ciphertext, mac, NULL,
-        plain_buf, bytes_written,
-        NULL, 0, NULL, nonce, ctx->enc_send_key);
-#else
-    {
-        crypto_aead_ctx aead;
-        memcpy(aead.key, ctx->enc_send_subkey, 32);
-        memcpy(aead.nonce, nonce + 16, 8);
-        aead.counter = 0;
-        crypto_aead_write(&aead, ciphertext, mac, NULL, 0,
-                          plain_buf, bytes_written);
+    size_t bytes_written = 0;
+    rc = PROTOCOL__serialize(msg, data, obf, plain_len, &bytes_written);
+    if (E__SUCCESS != rc) {
+        FREE(obf);
+        goto l_cleanup;
     }
-#endif
 
-    if (plain_heap) FREE(plain_buf);
+    uint64_t counter = ctx->enc_send_counter++;
+    ch20_crypt(obf, bytes_written, ctx->enc_send_key, counter);
 
-    rc = tcpm_send_all(t->fd, frame, total_len);
-    FREE(frame);
+    uint32_t net_len = htonl((uint32_t)bytes_written);
+    rc = ch20_send_all(t->fd, (uint8_t *)&net_len, 4);
+    if (E__SUCCESS != rc) {
+        FREE(obf);
+        goto l_cleanup;
+    }
+
+    rc = ch20_send_all(t->fd, (uint8_t *)&counter, 8);
+    if (E__SUCCESS != rc) {
+        FREE(obf);
+        goto l_cleanup;
+    }
+
+    rc = ch20_send_all(t->fd, obf, bytes_written);
+    FREE(obf);
     FAIL_IF(E__SUCCESS != rc, rc);
 
 l_cleanup:
-    if (NULL != frame) FREE(frame);
+    if (NULL != obf) FREE(obf);
     return rc;
 }
 
 /* recv_msg */
-static err_t tcpm_recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
+static err_t ch20_recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) {
     err_t rc = E__SUCCESS;
+    skin_tcp_chacha20_ctx_t *ctx = (skin_tcp_chacha20_ctx_t *)t->skin_ctx;
     uint8_t len_buf[4];
+    uint8_t nonce_buf[8];
     uint32_t frame_len = 0;
     uint8_t *frame = NULL;
 
-    VALIDATE_ARGS(t, msg, data);
+    VALIDATE_ARGS(t, msg, data, ctx);
 
     *data = NULL;
 
-    rc = tcpm_recv_all(t->fd, len_buf, 4);
+    rc = ch20_recv_all(t->fd, len_buf, 4);
     FAIL_IF(E__SUCCESS != rc, rc);
 
     frame_len = ((uint32_t)len_buf[0] << 24) |
@@ -723,40 +585,61 @@ static err_t tcpm_recv_msg(transport_t *t, protocol_msg_t *msg, uint8_t **data) 
                 ((uint32_t)len_buf[2] <<  8) |
                 ((uint32_t)len_buf[3]);
 
-    if (frame_len < (TCPM_NONCE_SIZE + TCPM_MAC_SIZE) || frame_len > 300000) {
-        LOG_WARNING("Invalid encrypted frame length: %u on fd=%d", frame_len, t->fd);
+    if (frame_len < PROTOCOL_HEADER_SIZE || frame_len > 300000) {
+        LOG_WARNING("Invalid frame length: %u on fd=%d", frame_len, t->fd);
         FAIL(E__NET__SOCKET_CONNECT_FAILED);
     }
 
-    uint8_t frame_stack[TCPM_RECV_STACK_SIZE];
-    int frame_heap = (frame_len > TCPM_RECV_STACK_SIZE);
-    if (frame_heap) {
-        frame = malloc(frame_len);
-        FAIL_IF(NULL == frame, E__INVALID_ARG_NULL_POINTER);
-    } else {
-        frame = frame_stack;
+    rc = ch20_recv_all(t->fd, nonce_buf, 8);
+    FAIL_IF(E__SUCCESS != rc, rc);
+
+    uint64_t counter = ((uint64_t)nonce_buf[0]) |
+                       ((uint64_t)nonce_buf[1] << 8) |
+                       ((uint64_t)nonce_buf[2] << 16) |
+                       ((uint64_t)nonce_buf[3] << 24) |
+                       ((uint64_t)nonce_buf[4] << 32) |
+                       ((uint64_t)nonce_buf[5] << 40) |
+                       ((uint64_t)nonce_buf[6] << 48) |
+                       ((uint64_t)nonce_buf[7] << 56);
+
+    frame = malloc(frame_len);
+    if (NULL == frame) {
+        FAIL(E__INVALID_ARG_NULL_POINTER);
     }
 
-    rc = tcpm_recv_all(t->fd, frame, frame_len);
+    rc = ch20_recv_all(t->fd, frame, frame_len);
+    FAIL_IF(E__SUCCESS != rc, rc);
+
+    ch20_crypt(frame, frame_len, ctx->enc_recv_key, counter);
+
+    size_t unserialize_data_len = 0;
+    rc = PROTOCOL__unserialize(frame, frame_len, msg, data, &unserialize_data_len);
     if (E__SUCCESS != rc) {
-        if (frame_heap) FREE(frame);
+        LOG_WARNING("Failed to unserialize message from fd %d", t->fd);
+        FREE(frame);
         goto l_cleanup;
     }
 
-    rc = tcpm_decrypt_frame(t, frame, frame_len, msg, data);
-    if (frame_heap) FREE(frame);
+    LOG_TRACE("RECV msg: orig_src=%u, src=%u, dst=%u, msg_id=%u, type=%u, "
+              "data_len=%u, ttl=%u, channel=%u, fd=%d",
+              msg->orig_src_node_id, msg->src_node_id, msg->dst_node_id,
+              msg->message_id, msg->type, msg->data_length,
+              msg->ttl, msg->channel_id, t->fd);
+
+    FREE(frame);
 
 l_cleanup:
+    if (NULL != frame) FREE(frame);
     return rc;
 }
 
 /* transport_destroy */
-static void tcpm_transport_destroy(transport_t *t) {
+static void ch20_transport_destroy(transport_t *t) {
     if (NULL == t) {
         return;
     }
-    skin_tcpm_ctx_t *ctx = (skin_tcpm_ctx_t *)t->skin_ctx;
-    tcpm_ctx_free(ctx);
+    skin_tcp_chacha20_ctx_t *ctx = (skin_tcp_chacha20_ctx_t *)t->skin_ctx;
+    ch20_ctx_free(ctx);
     t->skin_ctx = NULL;
 
     if (t->fd >= 0) {
@@ -768,22 +651,22 @@ static void tcpm_transport_destroy(transport_t *t) {
 
 /* ---- Vtable singleton --------------------------------------------------- */
 
-static const skin_ops_t g_tcpm_skin = {
-    .skin_id            = SKIN_ID__TCP_MONOCYPHER,
-    .name               = "tcp-monocypher",
-    .listener_create    = tcpm_listener_create,
-    .listener_accept    = tcpm_listener_accept,
-    .listener_destroy   = tcpm_listener_destroy,
-    .connect            = tcpm_connect,
-    .send_msg           = tcpm_send_msg,
-    .recv_msg           = tcpm_recv_msg,
-    .transport_destroy  = tcpm_transport_destroy,
+static const skin_ops_t g_tcp_chacha20_skin = {
+    .skin_id            = SKIN_ID__TCP_CHACHA20,
+    .name               = "tcp-chacha20",
+    .listener_create    = ch20_listener_create,
+    .listener_accept    = ch20_listener_accept,
+    .listener_destroy   = ch20_listener_destroy,
+    .connect            = ch20_connect,
+    .send_msg           = ch20_send_msg,
+    .recv_msg           = ch20_recv_msg,
+    .transport_destroy  = ch20_transport_destroy,
 };
 
-const skin_ops_t *SKIN_TCPM__ops(void) {
-    return &g_tcpm_skin;
+const skin_ops_t *SKIN_TCP_CHACHA20__ops(void) {
+    return &g_tcp_chacha20_skin;
 }
 
-err_t SKIN_TCPM__register(void) {
-    return SKIN__register(&g_tcpm_skin);
+err_t SKIN_TCP_CHACHA20__register(void) {
+    return SKIN__register(&g_tcp_chacha20_skin);
 }

@@ -246,10 +246,10 @@ class NodeClient:
             src_host, src_port, remote_host, remote_port, protocol
         )
 
-    def a_connect_to_node(self, ip: str, port: int, skin: NetworkSkin = None, timeout: float = 10.0):
+    def a_connect_to_node(self, ip: str, port: int, skin: NetworkSkin = NetworkSkin.TCP_MONOCYPHER, timeout: float = 10.0):
         return self._client.a_connect_to_node(ip, port, self.node_id, skin=skin, timeout=timeout)
 
-    def connect_to_node(self, ip: str, port: int, skin: NetworkSkin = None, timeout: float = 10.0) -> "NodeClient":
+    def connect_to_node(self, ip: str, port: int, skin: NetworkSkin = NetworkSkin.TCP_MONOCYPHER, timeout: float = 10.0) -> "NodeClient":
         return self._client.connect_to_node(ip, port, target_node_id=self.node_id, skin=skin, timeout=timeout)
 
     def a_disconnect_nodes(self, node_b: int):
@@ -1066,22 +1066,16 @@ class GanonClient:
 
     @require_connection
     def a_connect_to_node(self, ip: str, port: int, target_node_id: int = None,
-                          skin: NetworkSkin = None, timeout: float = 10.0):
-        if skin is None:
-            skin = self._skin
+                          skin: NetworkSkin = NetworkSkin.TCP_MONOCYPHER, timeout: float = 10.0):
         return _AsyncBridge(self._a_connect_to_node_impl(ip, port, target_node_id, skin, timeout), self._loop)
 
     @require_connection
     def connect_to_node(self, ip: str, port: int, target_node_id: int = None,
-                        skin: NetworkSkin = None, timeout: float = 10.0) -> "NodeClient":
-        if skin is None:
-            skin = self._skin
+                        skin: NetworkSkin = NetworkSkin.TCP_MONOCYPHER, timeout: float = 10.0) -> "NodeClient":
         return self._sync(self._a_connect_to_node_impl(ip, port, target_node_id, skin, timeout))
 
     async def _a_connect_to_node_impl(self, ip: str, port: int, target_node_id: int = None,
-                                       skin: NetworkSkin = None, timeout: float = 10.0) -> "NodeClient":
-        if skin is None:
-            skin = self._skin
+                                       skin: NetworkSkin = NetworkSkin.TCP_MONOCYPHER, timeout: float = 10.0) -> "NodeClient":
         executor_node = target_node_id if target_node_id is not None else self.node_id
         request_id = self._alloc_request_id()
         future = asyncio.get_running_loop().create_future()

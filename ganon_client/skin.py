@@ -5,6 +5,11 @@ from typing import Optional
 
 class NetworkSkin(IntEnum):
     TCP_MONOCYPHER = 1
+    TCP_PLAIN = 2
+    TCP_XOR = 3
+    TCP_CHACHA20 = 4
+    SSH = 5
+    UDP_QUIC = 6
 
 
 class NetworkSkinImpl(ABC):

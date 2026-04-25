@@ -19,11 +19,6 @@
 #include "transport.h"
 #include "skin.h"
 #include "tunnel.h"
-#include "network_caps.h"
-
-#ifdef USE_EPOLL
-#include "network_epoll.h"
-#endif
 
 network_t g_network;
 
@@ -58,24 +53,6 @@ static void *socket_thread_func(void *arg) {
         net->connected_cb(t);
     }
 
-#ifdef USE_EPOLL
-    if (g_net_caps.has_epoll && g_epoll_fd >= 0) {
-        int flags = fcntl(t->fd, F_GETFL, 0);
-        if (flags >= 0) {
-            fcntl(t->fd, F_SETFL, flags | O_NONBLOCK);
-        }
-        t->is_nonblocking = 1;
-        if (E__SUCCESS == NETWORK__epoll_add(t)) {
-            pthread_mutex_lock(&t->epoll_cv_mutex);
-            while (!t->epoll_disconnect_flag && net->running) {
-                pthread_cond_wait(&t->epoll_cv, &t->epoll_cv_mutex);
-            }
-            pthread_mutex_unlock(&t->epoll_cv_mutex);
-        }
-        goto l_cleanup;
-    }
-#endif
-
     while (true) {
         protocol_msg_t msg;
         uint8_t *data = NULL;
@@ -89,25 +66,14 @@ static void *socket_thread_func(void *arg) {
         free(data);
     }
 
-l_cleanup:
     LOG_INFO("Connection %s:%d closed", t->client_ip, t->client_port);
 
-    if (t->is_nonblocking) {
-#ifdef USE_EPOLL
-        NETWORK__epoll_remove(t);
-#endif
-    }
-
-    if (NULL != net->disconnected_cb && !t->disconnected_cb_called) {
-        t->disconnected_cb_called = 1;
+    if (NULL != net->disconnected_cb) {
         net->disconnected_cb(t);
     }
 
-    TRANSPORT__destroy(t);
-    pthread_mutex_lock(&net->clients_mutex);
-    socket_entry_remove_locked(net, entry);
-    pthread_mutex_unlock(&net->clients_mutex);
-    FREE(entry);
+    /* Owner (connect_and_run_thread for outgoing, NETWORK__shutdown for
+     * incoming) handles cleanup to avoid races. */
     return NULL;
 }
 
@@ -121,14 +87,16 @@ static void *accept_thread_func(void *arg) {
              listener->addr.ip, listener->addr.port, listener->skin->name);
 
     while (listener->running && net->running) {
-        /* listener_accept blocks until a connection + handshake completes */
+        /* listener_accept is non-blocking; it returns quickly when no
+         * connection is pending so we can poll the running flag. */
         transport_t *t = NULL;
         err_t rc = listener->skin->listener_accept(listener->skin_listener, &t);
         if (E__SUCCESS != rc) {
             if (!net->running || !listener->running) {
                 break;
             }
-            /* Transient error (EINTR, etc.) — retry */
+            /* Transient error (EAGAIN, EINTR, etc.) — brief sleep before retry */
+            usleep(50000);
             continue;
         }
         if (NULL == t) {
@@ -191,10 +159,13 @@ static void *connect_and_run_thread(void *arg) {
     network_t   *net               = targ->net;
     int retries_remaining = reconnect_retries;
 
-    while (true) {
+    while (net->running) {
         transport_t *t = NULL;
         err_t rc = skin->connect(ip, port, connect_timeout, &t);
         if (E__SUCCESS != rc || NULL == t) {
+            if (!net->running) {
+                break;
+            }
             if (retries_remaining == 0) {
                 LOG_WARNING("Failed to connect to %s:%d, giving up", ip, port);
                 FREE(arg);
@@ -213,9 +184,10 @@ static void *connect_and_run_thread(void *arg) {
             FREE(arg);
             return NULL;
         }
-        entry->t    = t;
-        entry->net  = net;
-        entry->next = NULL;
+        entry->t       = t;
+        entry->net     = net;
+        entry->next    = NULL;
+        entry->thread  = 0;
 
         pthread_mutex_lock(&net->clients_mutex);
         socket_entry_t *tail = net->clients;
@@ -238,10 +210,23 @@ static void *connect_and_run_thread(void *arg) {
             FREE(arg);
             return NULL;
         }
+        entry->thread = socket_thread;
 
         pthread_join(socket_thread, NULL);
+        entry->thread = 0;
+
+        if (!net->running) {
+            /* Shutdown: NETWORK__shutdown will clean up the entry. */
+            break;
+        }
 
         LOG_INFO("Connection to %s:%d closed, reconnecting...", ip, port);
+
+        TRANSPORT__destroy(entry->t);
+        pthread_mutex_lock(&net->clients_mutex);
+        socket_entry_remove_locked(net, entry);
+        pthread_mutex_unlock(&net->clients_mutex);
+        FREE(entry);
 
         if (retries_remaining == 0) {
             LOG_WARNING("Reconnect retries exhausted for %s:%d", ip, port);
@@ -249,7 +234,12 @@ static void *connect_and_run_thread(void *arg) {
             return NULL;
         }
         if (retries_remaining > 0) retries_remaining--;
+
+        sleep((unsigned int)reconnect_delay);
     }
+
+    FREE(arg);
+    return NULL;
 }
 
 /* ---- NETWORK__init ------------------------------------------------------- */
@@ -291,20 +281,6 @@ err_t NETWORK__init(network_t *net, const args_t *args, int node_id,
     }
 
     net->running = 1;
-
-    NETWORK__probe_caps();
-    NETWORK__log_caps();
-
-#ifdef USE_EPOLL
-    if (g_net_caps.has_epoll) {
-        rc = NETWORK__epoll_init(net);
-        if (E__SUCCESS != rc) {
-            LOG_WARNING("Failed to initialize epoll, falling back to thread-per-connection");
-            g_net_caps.has_epoll = 0;
-            rc = E__SUCCESS;
-        }
-    }
-#endif
 
     /* Create listeners */
     for (int i = 0; i < net->listener_count; i++) {
@@ -415,61 +391,77 @@ err_t NETWORK__shutdown(network_t *net) {
     /* Stop accept threads */
     for (int i = 0; i < net->listener_count; i++) {
         listener_t *li = &net->listeners[i];
+        LOG_INFO("Stopping accept thread %d for %s:%d", i, li->addr.ip, li->addr.port);
         li->running = 0;
-        /* listener_destroy closes the listen_fd which unblocks accept() */
         if (NULL != li->skin && NULL != li->skin_listener) {
+            LOG_INFO("Calling listener_destroy for %s:%d", li->addr.ip, li->addr.port);
             li->skin->listener_destroy(li->skin_listener);
             li->skin_listener = NULL;
         }
         if (0 != li->accept_thread) {
+            LOG_INFO("Joining accept thread %d", i);
             pthread_join(li->accept_thread, NULL);
+            LOG_INFO("Accept thread %d joined", i);
             li->accept_thread = 0;
         }
     }
+    LOG_INFO("All accept threads stopped");
     FREE(net->listeners);
     net->listener_count = 0;
 
-#ifdef USE_EPOLL
-    NETWORK__epoll_shutdown();
-#endif
-
+    LOG_INFO("About to lock clients_mutex");
     pthread_mutex_lock(&net->clients_mutex);
+    LOG_INFO("clients_mutex locked");
     socket_entry_t *head = net->clients;
     net->clients = NULL;
     pthread_mutex_unlock(&net->clients_mutex);
+    LOG_INFO("clients_mutex unlocked, head=%p", (void*)head);
 
-    /* Signal all epoll stub threads to exit */
+    /* Close all sockets first so threads blocked in recv()/send()
+     * get EBADF and can exit before we pthread_join them. */
     socket_entry_t *iter = head;
     while (NULL != iter) {
-        if (iter->t->is_nonblocking) {
-            pthread_mutex_lock(&iter->t->epoll_cv_mutex);
-            iter->t->epoll_disconnect_flag = 1;
-            pthread_cond_broadcast(&iter->t->epoll_cv);
-            pthread_mutex_unlock(&iter->t->epoll_cv_mutex);
+        if (iter->t->fd >= 0) {
+            shutdown(iter->t->fd, SHUT_RDWR);
+            close(iter->t->fd);
+            iter->t->fd = -1;
         }
         iter = iter->next;
     }
+    LOG_INFO("All client fds closed");
+
+    /* Join connect threads first so they finish joining their socket threads
+     * (outgoing).  After this, any remaining thread != 0 must be incoming. */
+    for (int i = 0; i < net->connect_thread_count; i++) {
+        if (0 != net->connect_threads[i]) {
+            LOG_INFO("Joining connect thread %d", i);
+            pthread_join(net->connect_threads[i], NULL);
+            LOG_INFO("Connect thread %d joined", i);
+            net->connect_threads[i] = 0;
+        }
+    }
+    LOG_INFO("All connect threads joined");
 
     iter = head;
     while (NULL != iter) {
         socket_entry_t *next = iter->next;
         if (0 != iter->thread) {
+            LOG_INFO("Joining incoming client thread %lu (node_id=%u)",
+                      (unsigned long)iter->thread, iter->t->node_id);
             pthread_join(iter->thread, NULL);
-        } else {
-            TRANSPORT__destroy(iter->t);
-            FREE(iter);
+            LOG_INFO("Incoming client thread joined");
         }
+        TRANSPORT__destroy(iter->t);
+        FREE(iter);
         iter = next;
     }
+    LOG_INFO("All client entries freed");
 
     pthread_mutex_destroy(&net->clients_mutex);
+    LOG_INFO("clients_mutex destroyed");
 
-    for (int i = 0; i < net->connect_thread_count; i++) {
-        if (0 != net->connect_threads[i]) {
-            pthread_detach(net->connect_threads[i]);
-        }
-    }
     FREE(net->connect_threads);
+    LOG_INFO("Connect threads freed");
 
     LOG_INFO("Network shutdown complete");
 

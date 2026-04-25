@@ -29,100 +29,105 @@ This ensures AGENTS.md stays in sync with the codebase.
 - `src/args.c` - Argument parsing implementation
 - `src/logging.c` - Logging implementation
 - `src/network.c` - Socket management, accept loop, reconnection logic, global singleton `g_network`
-- `src/network_caps.c` - Runtime kernel capability probing (epoll, sendmmsg, recvmmsg, eventfd, signalfd, timerfd)
-- `src/network_epoll.c` - Epoll event loop backend (non-blocking recv/send, per-transport buffers)
 - `src/session.c` - Protocol logic (NODE_INIT, PEER_INFO, NODE_DISCONNECT, CONNECTION_REJECTED handlers)
 - `src/transport.c` - Buffer layer, recv/send protocol_msg_t, connection abstraction, outbound queue
 - `src/protocol.c` - Protocol parsing, serialization, byte order conversion
 - `src/routing.c` - Routing table, ROUTING__on_message for broadcast/forward logic, global singleton `g_node_id`
-- `src/loadbalancer.c` - Multi-route load balancing strategies (round-robin) and reordering buffer logic
+- `src/loadbalancer.c` - Multi-route load balancing strategies (round-robin, all-routes, sticky) and reordering buffer logic
+- `src/tunnel.c` - TCP/UDP tunnel implementation (TUNNEL_OPEN, CONN_OPEN, CONN_ACK, DATA, CONN_CLOSE, CLOSE)
+- `src/skin.c` - Skin registry (SKIN__register, SKIN__by_id, SKIN__by_name)
+- `src/skins/skin_tcp_monocypher.c` - Default skin: TCP + X25519 handshake + XChaCha20-Poly1305 encryption
+- `src/skins/skin_tcp_plain.c` - Plain TCP skin: no encryption, length-prefixed raw protocol frames
+- `src/skins/skin_tcp_xor.c` - XOR-obfuscated TCP skin: X25519 handshake + repeating-key XOR (obfuscation only, not secure)
+- `src/skins/skin_tcp_chacha20.c` - ChaCha20 stream-cipher TCP skin: X25519 handshake + ChaCha20 (no MAC, ~1.5x throughput of monocypher)
+- `src/monocypher.c` - Vendored Monocypher library (X25519, BLAKE2b, AEAD fallback)
 
 ### C Header Files
 
 - `include/err.h` - Error codes enum
 - `include/common.h` - Common macros (FAIL_IF, FAIL, BREAK_IF, CONTINUE_IF, FREE, VALIDATE_ARGS, IN, OUT, INOUT)
 - `include/logging.h` - Logging macros (LOG_ERROR, LOG_WARN, LOG_INFO, LOG_DEBUG, LOG_TRACE)
-- `include/args.h` - Argument parsing, addr_t struct, args_t config
-- `include/network.h` - Network initialization, `g_network` global singleton, callbacks
-- `include/network_caps.h` - Runtime capability detection API
-- `include/network_epoll.h` - Epoll event loop interface
-- `include/protocol.h` - Protocol message structs, macros, parsing/serialization functions
-- `include/session.h` - Session protocol handling (SESSION__on_message, SESSION__on_connected, etc.)
+- `include/args.h` - Argument parsing, addr_t struct, args_t config, listener_entry_t, connect_entry_t
+- `include/network.h` - Network initialization, `g_network` global singleton, callbacks, multi-listener support
+- `include/protocol.h` - Protocol message structs, macros, parsing/serialization functions, connect/disconnect/exec/file payloads
+- `include/session.h` - Session protocol handling (SESSION__on_message, SESSION__on_connected, etc.), file chunk size
 - `include/transport.h` - Transport layer (transport_t, TRANSPORT__recv_msg, TRANSPORT__send_msg, peer metadata)
 - `include/routing.h` - Routing table (routing_table_t, route_entry_t, route_type_t), `g_node_id` global singleton
 - `include/loadbalancer.h` - Load balancer interface and strategy enums
+- `include/tunnel.h` - Tunnel API (TUNNEL__init, TUNNEL__on_message, TUNNEL__handle_disconnect)
+- `include/skin.h` - Skin abstraction (skin_ops_t vtable, skin_id_t, registry)
 
 ## Architecture
 
 ### Layer Separation
 
-The architecture is separated into four distinct layers:
+The architecture is separated into six distinct layers:
 
 ```
-+-------------------+     +-------------------+     +-------------------+     +-------------------+
-|      Network      | --> |     Transport     | --> |     Protocol       | --> |     Session       |
-| (socket mgmt,    |     |  (buffer layer,   |     | (byte order,      |     | (protocol logic,  |
-|  accept/reconnect)|     |   recv/send msg) |     |  validation)       |     |  handle messages) |
-+-------------------+     +-------------------+     +-------------------+     +-------------------+
-
-                        +-------------------+
-                        |     Routing       |
-                        | (broadcast/forward|
-                        |  routing table)   |
-                        +-------------------+
++-------------------+     +-------------------+     +-------------------+     +-------------------+     +-------------------+
+|      Network      | --> |       Skin        | --> |     Transport     | --> |     Protocol       | --> |     Session       |
+| (socket mgmt,    |     | (connect/accept,  |     |  (buffer layer,   |     | (byte order,      |     | (protocol logic,  |
+|  accept/reconnect)|     |  handshake,       |     |   recv/send msg) |     |  validation)       |     |  handle messages) |
+|                  |     |  encrypt/decrypt) |     |                   |     |                    |     |                   |
++-------------------+     +-------------------+     +-------------------+     +-------------------+     +-------------------+
+                                                                                ^
+                                                                                |
+                                                                         +-------------------+
+                                                                         |     Routing       |
+                                                                         | (broadcast/forward|
+                                                                         |  routing table)   |
+                                                                         +-------------------+
 ```
 
-1. **Network Layer** (`network.c/h`): Socket management only
-   - Creates listening socket, accepts connections
-   - Manages client threads and reconnection logic
+1. **Network Layer** (`network.c/h`): Socket management and multi-listener support
+   - Creates listening endpoints (one per `listener_t`), accepts connections
+   - Manages client threads and reconnection logic per peer
    - Owns global `g_network` singleton
    - Does NOT know about node IDs or protocol logic
+   - Supports multiple simultaneous listeners bound to different skins
 
-2. **Transport Layer** (`transport.c/h`): Buffer between logic and network
-   - `TRANSPORT__recv_msg()` - receives a complete protocol_msg_t, calls `PROTOCOL__unserialize()`
-   - `TRANSPORT__send_msg()` - sends a complete protocol_msg_t, calls `PROTOCOL__serialize()`
-   - Plugs into send()/recv() syscalls
-   - Owns connection abstraction (fd, node_id, client_ip, port, etc.)
+2. **Skin Layer** (`skin.c/h`, `skins/skin_tcp_monocypher.c`): Pluggable transport vertical slice
+   - `skin_ops_t` vtable: `connect`, `listener_create`, `listener_accept`, `send_msg`, `recv_msg`, `on_readable`, `on_writable`, `enqueue_outbuf`, `transport_destroy`
+   - Each skin owns the full vertical slice: TCP connect/accept, encryption handshake, per-message framing, encrypt/decrypt, teardown
+   - Default skin: `tcp-monocypher` (SKIN_ID__TCP_MONOCYPHER = 1) - TCP + X25519 + XChaCha20-Poly1305
+   - Skin registry by name and wire-stable ID
+   - Network layer initializes listeners with their bound skin and dispatches all I/O through the vtable
 
-3. **Protocol Layer** (`protocol.c/h`): Byte order and validation
+3. **Transport Layer** (`transport.c/h`): Thin dispatch layer between Network/Skin and Protocol
+   - `TRANSPORT__recv_msg()` - dispatches to `t->skin->recv_msg()`, then calls `PROTOCOL__unserialize()`
+   - `TRANSPORT__send_msg()` - calls `PROTOCOL__serialize()`, then dispatches to `t->skin->send_msg()`
+   - `TRANSPORT__alloc_base()` / `TRANSPORT__free_base()` / `TRANSPORT__destroy()` - lifecycle management
+   - `TRANSPORT__send_to_node_id()` - convenience lookup + send
+   - Does NOT directly call send()/recv() anymore - all I/O goes through the skin vtable
+
+4. **Protocol Layer** (`protocol.c/h`): Byte order and validation
    - `PROTOCOL__unserialize()` - validates magic, converts network byte order to host
    - `PROTOCOL__serialize()` - converts host byte order to network, adds magic
    - Session works with host byte order protocol_msg_t
 
-4. **Session Layer** (`session.c/h`): Protocol-specific logic only
-   - Handles all message types (NODE_INIT, MSG__RREQ, MSG__RREP, RERR, CONNECTION_REJECTED)
+5. **Session Layer** (`session.c/h`): Protocol-specific logic only
+   - Handles all message types (NODE_INIT, MSG__RREQ, MSG__RREP, RERR, CONNECTION_REJECTED, EXEC_*, FILE_*, TUNNEL_*)
    - Does NOT handle broadcast/forward logic - this is in routing layer
    - Sends via `TRANSPORT__send_msg()` - never raw sockets
 
-5. **Routing Layer** (`routing.c/h`): Message routing
+6. **Routing Layer** (`routing.c/h`): Message routing
    - Implements reactive AODV (Ad-hoc On-Demand Distance Vector) algorithm
    - `ROUTING__on_message()` - handles all routing decisions, dynamically updating reverse paths via received message trace data.
    - Transparently broadcast `RREQ` (Route Requests) for unmapped destinations
    - Owns global `g_node_id` and `g_rt` (routing table pointer) singletons
    - `ROUTING__broadcast()` - iterates direct routes, sends to each via transport
 
-### Network Backends
+### Network Backend
 
-The network layer supports two I/O backends, selected at compile-time and runtime:
+The network layer uses a **thread-per-connection** model. Each TCP connection gets a dedicated thread that performs blocking `recv()` / `send()` via the skin vtable. This is simple, portable, and sufficient for the current mesh tunneler workload. All I/O goes through the skin's `send_msg`/`recv_msg` functions; the network layer itself never calls `send()`/`recv()` directly.
 
-1. **Thread-per-connection** (fallback): Each TCP connection gets a dedicated thread that performs blocking `recv()` / `send()`. Used when `USE_EPOLL` is undefined (non-Linux or manual override).
-
-2. **Epoll event loop** (default on Linux): A single epoll thread handles all sockets. After the encryption handshake completes, the socket is switched to non-blocking mode and registered with `epoll`. The event loop:
-   - Reads available data into a per-transport `recv_buf`, parsing complete encrypted frames
-   - Drains per-transport outbound queues via `EPOLLOUT`
-   - Signals a condition variable on disconnect so the per-connection stub thread can exit and the reconnect loop can proceed
-
-`transport_t->is_nonblocking` controls send behavior:
-- `0` (thread mode): `TRANSPORT__send_msg()` calls `send()` directly
-- `1` (epoll mode): `TRANSPORT__send_msg()` enqueues the encrypted frame; the event loop drains it
-
-Dynamic runtime detection (`network_caps.c`) probes the kernel via raw syscalls for `epoll`, `sendmmsg`, `recvmmsg`, `eventfd`, `signalfd`, and `timerfd`. If `epoll` is unavailable, the code falls back to the thread model automatically.
+An experimental **epoll event loop** was previously developed on the `feature/epoll` branch but has been removed from master to simplify the codebase and focus on stability.
 
 ### Key Design Principles
 
-- **Network knows nothing about node IDs or protocol** - it just manages sockets
-- **Session knows nothing about sockets** - it handles protocol logic only
-- **Transport is the ONLY place that calls send()/recv()** - all network I/O goes through transport
+- **Network knows nothing about node IDs or protocol** - it just manages sockets and listeners
+- **Skin owns the full vertical slice** - connect/accept, handshake, framing, encrypt/decrypt, teardown
+- **Transport is a thin dispatch layer** - it calls skin vtable and protocol serialize/unserialize
 - **All byte order conversion happens in protocol.c** - serialize/unserialize
 - **Routing handles broadcast/forward logic** - session only handles protocol-specific logic
 - **Global singletons**: `g_network` (network module), `g_node_id` (routing module), `g_rt` (routing module)
@@ -157,20 +162,32 @@ Arguments:
   LISTEN IP       Listen IP address (IPv4 format, default: 0.0.0.0)
 
 Options:
-  -p, --port N    Listen port number (1-65535, default: 5555)
-  -c, --connect   Comma-separated list of IP:port to connect (default port: 5555)
+  -p, --port N    Listen port number (1-65535, default: 5555). Shorthand for --listen tcp-monocypher:<ip>:<port>
+  -c, --connect   Comma-separated list of IP:port[:skin] to connect (default port: 5555)
   -i, --node-id N Node ID (0 or greater, mandatory)
   -w, --connect-timeout N  Connect timeout in seconds (default: 5)
   --reconnect-retries N    Reconnect retries on disconnect (default: 5, 0 to disable, max/always for unlimited)
   --reconnect-delay N       Delay between reconnect attempts (default: 5 seconds)
-  --lb-strategy STR         Load balancing strategy: 'round-robin' (default) or 'all-routes'
+  --lb-strategy STR         Load balancing strategy: 'round-robin' (default), 'all-routes', 'sticky'
+  --rr-count N              Routes per round-robin step (default: 1)
+  --reorder-timeout N       Out-of-order buffering timeout in ms (default: 100)
   --tcp-rcvbuf N            TCP receive buffer size in bytes for tunnel connections (0 = system default)
   --file-chunk-size N       File upload/download chunk size in bytes (default: 262144 = 256KB)
   --reorder                Enable packet reordering/buffering (default: disabled, packets processed immediately)
+  --skin NAME              Skin for -p/--port listener (default: tcp-monocypher)
+  --default-skin NAME      Skin for outbound --connect entries (default: tcp-monocypher)
+  --listen SKIN:IP:PORT    Add a listener (repeatable; if used, -p/--port is ignored)
   -h, --help                Show this help message
 
+Environment variables:
+  LISTEN_IP, LISTEN_PORT, CONNECT, NODE_ID, CONNECT_TIMEOUT,
+  RECONNECT_RETRIES, RECONNECT_DELAY, LB_STRATEGY, RR_COUNT,
+  REORDER_TIMEOUT, TCP_RCVBUF, REORDER, SKIN, DEFAULT_SKIN, LISTEN,
+  FILE_CHUNK_SIZE
+```
+
 Commands (via Python client):
-  c = GanonClient(ip, port, node_id, ..., reorder=False)  # reorder=False (default) = process packets immediately
+  c = GanonClient(ip, port, node_id, ..., reorder=False, skin=NetworkSkin.TCP_MONOCYPHER)
   c.connect()                       Connect to local ganon node (sync wrapper)
   await c.a_connect()               Async connect variant
   c.disconnect()                    Disconnect from the network
@@ -180,7 +197,7 @@ Commands (via Python client):
   c.disconnect_nodes(node_a, node_b) Disconnect node_a from node_b
   c.print_network_graph()            Print visual graph of network topology from this node's perspective
 
-  All public methods have both sync and `a_` prefixed async variants (e.g. `c.a_ping()`, `c.a_run_command()`).
+  All public methods have both sync and `a_` prefixed async variants (e.g., `c.a_ping()`, `c.a_run_command()`).
   The client manages its own asyncio event loop in a background thread; sync wrappers submit coroutines via
   `asyncio.run_coroutine_threadsafe()`.
 ```
@@ -207,9 +224,9 @@ Commands (via Python client):
 
 ```cmake
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
-    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c protocol.c loadbalancer.c)
+    set(LOGGING_SOURCES main.c logging.c args.c network.c session.c transport.c routing.c protocol.c loadbalancer.c tunnel.c monocypher.c skin.c skins/skin_tcp_monocypher.c)
 else()
-    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c protocol.c loadbalancer.c)
+    set(LOGGING_SOURCES main.c args.c network.c session.c transport.c routing.c protocol.c loadbalancer.c tunnel.c monocypher.c skin.c skins/skin_tcp_monocypher.c)
 endif()
 ```
 
@@ -351,7 +368,7 @@ Log levels (in order of severity):
 
 All multi-byte integers use network byte order (big-endian).
 
-#### protocol_msg_t (32 bytes header + data)
+#### protocol_msg_t (36 bytes header + data)
 
 ```
 +--------+--------+--------+--------+
@@ -370,6 +387,8 @@ All multi-byte integers use network byte order (big-endian).
 |       Data Length (4 bytes)      |
 +--------+--------+--------+--------+
 |       TTL (4 bytes)              |
++--------+--------+--------+--------+
+|       Channel ID (4 bytes)       |
 +--------+--------+--------+--------+
 |       Data (variable)            |
 +---------------------------------+
@@ -412,6 +431,7 @@ typedef enum {
 - **src_node_id**: Previous hop (the node that forwarded this message)
 - **dst_node_id**: Destination node (0 for broadcast)
 - **ttl**: Time-to-live for broadcast messages (decremented each hop)
+- **channel_id**: Used by load balancer for sticky routing (0 = global/default)
 
 #### Message Data
 
@@ -433,6 +453,7 @@ typedef struct __attribute__((packed)) {
     uint32_t request_id;    /* correlation id echoed back in response */
     char target_ip[64];     /* IP address to connect to */
     uint32_t target_port;   /* Port to connect to */
+    uint32_t skin_id;       /* 0 = use default skin on the receiving node */
 } connect_cmd_payload_t;
 ```
 Used to dynamically connect a node to a new peer. Sent to the node that should initiate the connection.
@@ -544,24 +565,42 @@ typedef struct {
 
 ```c
 struct network_t {
-    int listen_fd;
-    pthread_t accept_thread;
+    listener_t     *listeners;
+    int             listener_count;
+
     socket_entry_t *clients;
     pthread_mutex_t clients_mutex;
-    int running;
-    addr_t listen_addr;
-    addr_t *connect_addrs;
-    int connect_count;
-    pthread_t *connect_threads;
-    int connect_thread_count;
-    int connect_timeout;
-    int reconnect_retries;
-    int reconnect_delay;
-    int node_id;
-    network_message_cb_t message_cb;
+    int             running;
+
+    addr_t *connect_addrs;   /* legacy pointer into args; skin_id in connect_entries */
+    connect_entry_t *connect_entries;
+    int              connect_count;
+    pthread_t       *connect_threads;
+    int              connect_thread_count;
+    int              connect_timeout;
+    int              reconnect_retries;
+    int              reconnect_delay;
+    int              node_id;
+    uint32_t         default_skin_id;
+
+    network_message_cb_t     message_cb;
     network_disconnected_cb_t disconnected_cb;
-    network_connected_cb_t connected_cb;
+    network_connected_cb_t    connected_cb;
 };
+```
+
+### listener_t
+
+```c
+typedef struct {
+    const skin_ops_t *skin;
+    skin_listener_t  *skin_listener;
+    int               listen_fd;   /* -1 if skin manages its own I/O */
+    addr_t            addr;
+    pthread_t         accept_thread;
+    network_t        *net;
+    int               running;
+} listener_t;
 ```
 
 ### transport_t
@@ -573,50 +612,38 @@ struct transport {
     char client_ip[INET_ADDRSTRLEN];
     int client_port;
     uint32_t node_id;
-    void *ctx;
-    ssize_t (*recv)(int fd, uint8_t *buf, size_t len);
-    ssize_t (*send)(int fd, const uint8_t *buf, size_t len);
+    void *ctx;   /* generic back-pointer (e.g. network_t*); skin state is in skin_ctx */
 
-    /* Set to 1 when the socket is managed by an epoll event loop.
-     * In this mode TRANSPORT__send_msg() enqueues instead of calling
-     * send() directly, and the event loop drains the outbound queue. */
-    int is_nonblocking;
+    /* Pluggable skin vtable + per-connection opaque state. */
+    const skin_ops_t *skin;
+    void *skin_ctx;
+};
+```
 
-    /* Transport-layer encryption state */
-    enc_state_t enc_state;
-    uint8_t enc_ephemeral_priv[32];
-    uint8_t enc_ephemeral_pub[32];
-    uint8_t enc_send_key[32];
-    uint8_t enc_recv_key[32];
-    uint64_t enc_send_nonce;
-    uint64_t enc_recv_nonce;
-    uint8_t enc_session_id[8];
-    int enc_is_initiator;
+### skin_ops_t
 
-    /* Cached XChaCha20 subkeys for libsodium/Monocypher optimization */
-    uint8_t enc_send_subkey[32];
-    uint8_t enc_recv_subkey[32];
+```c
+struct skin_ops {
+    uint32_t    skin_id;   /* wire-stable, matches skin_id_t */
+    const char *name;      /* "tcp-monocypher", "tls13", etc. */
 
-    /* Outbound queue for epoll event-loop mode */
-    struct transport_outbuf {
-        uint8_t *data;
-        size_t len;
-        size_t sent;
-        struct transport_outbuf *next;
-    } *out_head, *out_tail;
-    pthread_mutex_t out_mutex;
-    int out_has_data;
+    err_t (*listener_create)(IN const addr_t *addr,
+                              OUT skin_listener_t **out_listener,
+                              OUT int *out_listen_fd);
+    err_t (*listener_accept)(IN skin_listener_t *l,
+                              OUT transport_t **out_transport);
+    void  (*listener_destroy)(IN skin_listener_t *l);
 
-    /* Epoll recv buffer: accumulates partial encrypted frames */
-    uint8_t *recv_buf;
-    size_t recv_buf_len;
-    size_t recv_buf_cap;
+    err_t (*connect)(IN const char *ip, IN int port,
+                      IN int connect_timeout_sec,
+                      OUT transport_t **out_transport);
 
-    /* Epoll synchronization */
-    pthread_cond_t epoll_cv;
-    pthread_mutex_t epoll_cv_mutex;
-    int epoll_disconnect_flag;
-    int disconnected_cb_called;
+    err_t (*send_msg)(IN transport_t *t, IN const protocol_msg_t *msg,
+                       IN const uint8_t *data);
+    err_t (*recv_msg)(IN transport_t *t, OUT protocol_msg_t *msg,
+                       OUT uint8_t **data);
+
+    void  (*transport_destroy)(IN transport_t *t);
 };
 ```
 
@@ -638,6 +665,23 @@ Sends message to all direct peers except one:
 - Decrements TTL and updates src_node_id before sending
 - Uses NETWORK__get_transport + TRANSPORT__send_msg internally
 
+## Load Balancing
+
+When multiple routes exist to the same destination, the load balancer (`loadbalancer.c`) selects which route(s) to use:
+
+- **round-robin** (default): Cycles through available routes. The `--rr-count N` flag (default 1) controls how many consecutive routes are used per message — e.g. with 3 routes and `--rr-count 2`, packet 1 -> routes [1,2], packet 2 -> routes [2,3], packet 3 -> routes [3,1].
+- **all-routes**: Sends to all available routes simultaneously.
+- **sticky**: Non-zero `channel_id` -> always uses route `(channel_id-1) % route_count` (sticky per channel). `channel_id=0` -> falls back to round-robin with rr_count. The `round-robin` and `all-routes` strategies always ignore `channel_id`.
+
+Set strategy via `--lb-strategy` CLI flag or `LB_STRATEGY` env; set rr-count via `--rr-count` or `RR_COUNT` env.
+
+**Channel ID** (`channel_id` in the message header):
+- Meaningful only in `sticky` strategy. Channel 0 = global (round-robin). Channel N -> route `(N-1) % route_count`.
+- PONG responses automatically mirror the channel_id of the incoming PING (C session and Python client both).
+- Python client: pass `channel_id=N` to `send_to_node()` or `ping()`.
+
+**Wire format note**: `channel_id` is the last field in `protocol_msg_t` (added after `ttl`). Header is 36 bytes. Old nodes (32-byte header) are incompatible.
+
 ## Error Codes
 
 Errors are defined in `include/err.h` as enum `err_t`:
@@ -649,189 +693,50 @@ Errors are defined in `include/err.h` as enum `err_t`:
   - network: 0x300-0x3FF
   - session: 0x401-0x4FF
   - routing: 0x501-0x5FF
+  - crypto: 0x601-0x6FF
 
-## TODO
+## Skin Abstraction
 
-- [x] Major refactor: separate network/session/transport layers
-- [x] Fix byte order conversion - session works in host order, transport serializes
-- [x] Move broadcast/forward logic to routing layer (ROUTING__on_message)
-- [x] Add IN/OUT/INOUT parameter direction macros
-- [x] NODE_DISCONNECT carries list of unreachable nodes
-- [x] Add ROUTING__get_via_nodes function
-- [x] Reconnection logic: connect_and_run_thread handles reconnect loop per peer
-- [x] Update Python client to match new architecture (encryption, protocol, routing)
-- [x] Test multi-node mesh topology
-- [x] Migrated routing to reactive AODV mesh logic
-- [ ] Implement AODV message structs into Python Client
-- [x] Implement multi-path Load Balancing (Round-Robin, All-Routes)
-- [x] Implement sequential msg_id tracking, deduplication, and reordering buffer (C & Python)
-- [x] Fix protocol mismatch between C and Python client
-- [x] Improve RERR logic for multi-path mesh reachability
-- [x] Created Docker test environment for multi-node testing
-- [x] Fix tunnel close race condition - set listen socket to non-blocking so accept() can be interrupted by close()
-- [x] Fix tunnel creation without existing AODV route - buffer messages and trigger RREQ in ROUTING__route_message when no route exists
-- [x] Implement tunnel soft close - `t.close()` stops accepting new connections but keeps existing ones alive; `t.close(force=True)` for immediate termination
-- [x] Fix tunnel multi-connection channel isolation - use unique channel_id per connection (conn_id) for proper load balancer sequencing, master channel (tunnel_id) for control messages
-- [x] Fix UDP tunnel support - create SOCK_DGRAM sockets for UDP, use recvfrom/sendto instead of accept/send/recv, track UDP clients by address
-- [x] Fix UDP tunnel destination-side forwarding - properly track UDP connections in dst_conn_t and use sendto() with correct remote address
-- [x] Implement tunnel connection persistence during route outages - TCP connections enter "stalled" state with backpressure when no route exists, resume when route is restored (UDP packets are lost as expected)
-- [x] Add --tcp-rcvbuf CLI option and TCP_RCVBUF env variable to configure TCP receive buffer size for tunnel connections
-- [x] Add dynamic connect/disconnect feature - `c.connect(ip, port, target_node)` to connect nodes, `c.disconnect(node_a, node_b)` to disconnect nodes, with proper error handling
-- [x] Add network graph visualization - `c.print_network_graph()` to display network topology from the client's perspective, properly handling loops and parallel routes
-- [x] Fix message ID generation - was using Unix timestamp which made message IDs look like node IDs (e.g., 1776634649), now uses sequential counter starting from 1
-- [x] Fix ping timeout when no route exists - C server: flush buffered messages when RREP establishes route; Python client: buffer messages and trigger RREQ when no route, flush when RREP arrives
-- [x] Add optional packet reordering/buffering - CLI flag `--reorder` and Python param `reorder=False` (default), packets processed immediately when disabled
-- [x] Fix multi-path routing deduplication - don't drop "duplicate" unicast messages at intermediate nodes, only drop broadcast duplicates
-- [x] Fix tunnel duplicate connection creation - check if connection already exists before creating new one (prevents duplicate connections with multi-path routing)
-- [x] Fix tunnel soft-close reuse - allow soft-closed tunnels to be recreated (check `is_soft_closed` flag in addition to `is_active`)
-- [x] Add encryption at the transport layer
-- [x] Switch Python client from `cryptography` to `monocypher-py` for Monocypher compatibility
-- [x] Revert C server from IETF ChaCha20 (12-byte nonce) to XChaCha20 (24-byte nonce) for Monocypher API compatibility
-- [x] Fix BLAKE2b key derivation in Python client - `monocypher-py` takes `crypto_blake2b(msg, key=...)` where C takes `crypto_blake2b_keyed(hash, hash_size, key, key_size, msg, msg_size)`; shared secret must be passed as `key=shared` and context byte as `msg`
-- [x] Integrate libsodium for high-performance XChaCha20-Poly1305 AEAD on x64 (~3.6× isolated crypto improvement: 8.97 Gbps vs 2.49 Gbps)
-- [x] Maintain Monocypher for X25519/BLAKE2b to preserve Python client wire compatibility
-- [x] Move libsodium source and build artifacts into `third_party/` for self-contained builds
-- [x] Add Makefile `libsodium` and `clean-libsodium` targets to rebuild from vendored source
-- [x] Update CMake auto-detection to use project-local `third_party/libsodium-install/`
-- [x] Add ARMv7 toolchain (`cmake/armv7-toolchain.cmake`) with NEON flags and Makefile targets `armv7r`/`armv7d`
-- [x] Increase TUNNEL_BUF_SIZE from 64K to 128K (+8% tunnel throughput, 128K chosen for embedded RAM constraints)
-- [x] Fix stack-allocated `buf[TUNNEL_BUF_SIZE + 8]` in `handle_tunnel_conn_ack` to use `MAX_PRE_ACK_DATA + 8`
-- [x] Increase encrypted frame size limit from 200KB to 300KB in both C server and Python client
-- [x] Implement stack-allocated frame buffer in `TRANSPORT__recv_msg` (avoids malloc on hot path for typical frames)
-- [x] Create `PERFORMANCE_PLAN.md` with ranked list of future optimizations (io_uring, kTLS, splice, batching, etc.)
-- [x] Add detailed Appendix A to `PERFORMANCE_PLAN.md` covering io_uring on legacy kernels (2.6.x, 3.3.x) and embedded architectures (ARM/MIPS)
-- [x] Add kernel-generation-specific optimization availability table (2.6.x vs 3.3.x vs 5.6+) with estimated impact per generation
-- [x] Implement runtime kernel capability probing (`network_caps.c/h`)
-- [x] Implement epoll event loop foundation (`network_epoll.c/h`) with per-transport recv buffers and outbound queues
-- [x] Refactor `TRANSPORT__recv_msg()` to extract `TRANSPORT__decrypt_frame()` for reuse by epoll loop
-- [x] Build and test epoll mode on localhost (two-node mesh)
-- [x] Build and test thread-per-connection fallback compilation
-- [ ] Phase 2: Implement `sendmmsg`/`recvmmsg` batching in epoll loop
-- [ ] Phase 3: Integrate `eventfd` for cross-thread wakeup (shutdown, outbound queue notify)
-- [ ] Phase 4: Integrate `signalfd`/`timerfd` to move signal and timer handling into epoll loop
-- [ ] Phase 5: Add `SO_BUSY_POLL` support for low-latency socket polling
-- [x] Add remote command execution - `c.run_command(node, "cmd")` returns dict with exit_code/stdout/stderr; `c.run(node, "cmd")` returns merged output
-- [x] Add remote file upload/download - `c.upload_file(node, local, remote)` and `c.download_file(node, remote, local)` with helpful error messages (no space, read-only fs, permission denied, not found)
-- [x] Add EXEC_CMD/EXEC_RESPONSE, FILE_UPLOAD/FILE_UPLOAD_RESPONSE, FILE_DOWNLOAD/FILE_DOWNLOAD_RESPONSE protocol messages
-- [x] Add NodeClient - `nc = c.node(30)` binds all commands to a specific node id so you can call `nc.run_command("cmd")`, `nc.upload_file(local, remote)`, `nc.ping()`, etc. without repeating the node id
-- [x] Make `connect_to_node()` synchronous - add `request_id` correlation to `CONNECT_CMD/RESPONSE`, defer `CONNECT_RESPONSE` in C server until peer `NODE_INIT` arrives so the peer node id is known, handle pending-connect cleanup on disconnect
-- [x] Make `connect_to_node()` return `NodeClient` (via `self.node()`) and raise `ConnectToNodeError` on remote failure
-- [x] Make `node()` verify reachability with a ping before returning (configurable via `verify=` and `timeout=`)
-- [x] Python client: convert silent failures to explicit exceptions - `connect()`, `reconnect()`, `_connect()`, `_send_protocol_message()`, `send_to_node()`, `disconnect_nodes()` all raise `ConnectionError` instead of returning `False`/`None`/dict; `run_command()`, `upload_file()`, `download_file()` no longer manually check send return values
-- [x] Refactor Python client to async-capable architecture - manages internal asyncio event loop in background thread, all I/O methods are async with `a_` prefixes, sync wrappers use `asyncio.run_coroutine_threadsafe()`, response correlation uses `asyncio.Future` instead of `threading.Event`
-- [x] Add pluggable network skins abstraction - `skin_ops_t` vtable for connect/accept/listen/send/recv/teardown, registry by name and ID, multi-listener support, `--skin`/`--default-skin`/`--listen` CLI flags, `ConnectCmdPayload` gains `skin_id` field
-- [x] Implement Python skin abstraction - `NetworkSkin` enum, `NetworkSkinImpl` ABC, `TcpMonocypherSkin` class, skin registry, `GanonClient(skin=NetworkSkin.TCP_MONOCYPHER)` parameter
-- [x] Add file chunking for uploads/downloads - `--file-chunk-size` CLI flag (default 256KB), `FILE_CHUNK_SIZE` env, `GanonClient(file_chunk_size=...)` parameter, chunked FILE_UPLOAD with chunk_index/total_chunks, chunked FILE_DOWNLOAD with offset/length, FILE_DOWNLOAD_RESPONSE includes total_size
-- [x] Replace `run_in_executor` socket connect with native asyncio `loop.sock_connect` in TcpMonocypherSkin
+Ganon uses a **pluggable skin system** to decouple the network layer from transport security and framing.
 
-## Known Bugs - Multi-Path Tunnel Race Conditions
+A **skin** is a vtable (`skin_ops_t`) that owns the full vertical slice for a given wire format:
+- **Listener lifecycle**: `listener_create`, `listener_accept`, `listener_destroy`
+- **Client dial**: `connect`
+- **Per-message I/O**: `send_msg`, `recv_msg`
+- **Teardown**: `transport_destroy`
 
-### Bug 1: Dedup logic collision between RREQ and TUNNEL_CONN_OPEN (PARTIALLY FIXED)
+The default skin is `tcp-monocypher` (ID 1): plain TCP sockets with an X25519 handshake followed by XChaCha20-Poly1305 encryption. All encryption state lives in the skin's opaque `skin_ctx` (not in `transport_t`).
 
-**Symptom**: In multi-path environments (`--rr-count 2`), TUNNEL_CONN_OPEN messages are dropped as duplicates when they're actually new messages.
-
-**Root cause**: The dedup key in `ROUTING__is_msg_seen()` uses only `orig_src + msg_id`, not the message type. When node 30 sends both RREQ (type=2) and CONN_OPEN (type=9) with the same `orig_src=30, msg_id=4`, they collide.
-
-**Why it happens**: 
-1. Node 30 sends RREQ for route discovery (msg_id=4, type=2)
-2. Node 30 sends CONN_OPEN for tunnel (msg_id=4, type=9)
-3. Both have same orig_src and msg_id but different types
-4. Node 11 sees RREQ first, marks (30, 4) as seen
-5. Node 11 receives CONN_OPEN, incorrectly drops it as duplicate
-
-**Log evidence**:
+The `tcp-plain` skin (ID 2) provides unencrypted TCP transport with length-prefixed raw protocol frames. It is useful for debugging, testing, or environments where encryption overhead is undesirable:
 ```
-Node 11: RECV msg: orig_src=30, msg_id=4, type=2 (RREQ) - marked as seen
-Node 11: RECV msg: orig_src=30, msg_id=4, type=9 (CONN_OPEN) 
-Node 11: Dropping unicast duplicate for us from 30 with ID 4 (type 9)
+[4 bytes]  Big-endian payload length
+[N bytes]  Plaintext serialized protocol_msg_t + data
 ```
 
-**Fix applied**: Added `type` field to `seen_msg_t` structure in `routing.c`. Updated `ROUTING__check_msg_seen_readonly()`, `ROUTING__mark_msg_seen()`, and `ROUTING__is_msg_seen()` to include type in comparison. Also updated dedup logic to only mark messages as seen when processing (broadcast or for us), not when forwarding.
-
-**Files modified**: `src/routing.c`
-
-**Status**: Code modified but NOT fully tested. Needs rebuild and testing without `-vv` flag.
-
-### Bug 2: Tunnel sends data before CONN_ACK is received (FIXED)
-
-**Symptom**: In multi-path environments, tunnel data is lost because TUNNEL_DATA arrives at destination before the connection is established.
-
-**Root cause**: The `fwd_thread_func` in `tunnel.c` starts reading from client socket and sending TUNNEL_DATA immediately after CONN_OPEN is sent, without waiting for CONN_ACK.
-
-**Why it happens**:
-1. Client connects to tunnel source (node 30)
-2. `handle_client_connection()` sends CONN_OPEN to destination (node 11)
-3. `fwd_thread_func()` starts immediately
-4. Thread reads data from client and sends TUNNEL_DATA
-5. CONN_OPEN and TUNNEL_DATA arrive at node 11 almost simultaneously
-6. Node 11 hasn't finished processing CONN_OPEN yet
-7. TUNNEL_DATA arrives, connection doesn't exist yet
-8. Node 11 drops data: "TUNNEL X conn Y: data for unknown connection, dropping"
-9. Node 11 finishes CONN_OPEN processing, connects to destination
-10. But data was already lost
-
-**Log evidence**:
+The `tcp-xor` skin (ID 3) uses the same X25519 handshake and BLAKE2b key derivation as `tcp-monocypher`, but applies a repeating-key XOR with the derived 32-byte directional key instead of XChaCha20-Poly1305. This provides per-connection obfuscation (traffic looks different from the source plaintext and different on every link) but **not** cryptographic security. It is useful when you only need lightweight obfuscation:
 ```
-Node 30: SEND CONN_OPEN (msg_id=4, type=9)
-Node 30: SEND TUNNEL_DATA (msg_id=5, type=11)  <- 25 microseconds later!
-Node 11: RECV TUNNEL_DATA, "data for unknown connection, dropping"
-Node 11: connected to 127.0.0.1:9000  <- too late
+[4 bytes]  Big-endian payload length
+[N bytes]  XOR-obfuscated serialized protocol_msg_t + data
 ```
 
-**Why `-vv` masks it**: Extra logging I/O adds delays, so CONN_ACK/data timing changes enough that it works by luck.
-
-**Fix implemented** (`src/tunnel.c`):
-- Added `volatile int ack_received` to `src_conn_t`; zeroed when slot is allocated.
-- Added `volatile int *p_ack_received` to `fwd_ctx_t`; set to `&conn->ack_received` for src-side fwd threads, `NULL` for dst-side threads.
-- Added module-level `pthread_cond_t g_ack_cond` (shared with `g_tunnel_mutex`).
-- `fwd_thread_func`: if `p_ack_received != NULL`, waits up to 10 s on `g_ack_cond` for the flag to be set before entering the read/forward loop. On timeout or early shutdown, tears down the connection cleanly (with `p_slot_conn_id` re-check).
-- `handle_tunnel_conn_ack`: now locks `g_tunnel_mutex`, finds the matching `src_conn_t`, sets `ack_received = 1`, and broadcasts on `g_ack_cond`.
-- `handle_tunnel_conn_close`, `TUNNEL__handle_disconnect`, `TUNNEL__destroy`: each broadcasts on `g_ack_cond` so a waiting fwd thread wakes immediately instead of timing out.
-
-### Bug 4: UDP tunnel return-path broken (FIXED)
-
-**Symptom**: UDP tunnels forward data src→dst correctly, but replies from the remote UDP server never make it back to the client. TCP tunnels work end-to-end.
-
-**Root cause**: The destination-side UDP socket was created but never bound to a local port before the return-path reader (`fwd_thread_func`) started calling `recvfrom()`. The socket only got an ephemeral port later, when `handle_tunnel_data` called the first `sendto()`. Until that first outbound datagram, the kernel had no port to deliver inbound replies to, so return-path datagrams were dropped.
-
-**Why it happens**:
-1. `dst_connect_thread` creates a UDP socket (`socket(AF_INET, SOCK_DGRAM, 0)`)
-2. For UDP, the `connect()` call was skipped entirely (it was guarded by `if (TUNNEL_PROTO_UDP != protocol)`)
-3. `fwd_thread_func` is spawned and immediately enters `recvfrom()` on a socket with no local port
-4. The first `sendto()` from `handle_tunnel_data` auto-binds an ephemeral port, but replies that arrived before this are already lost
-5. Even after auto-bind, replies are only delivered if the source address exactly matches; without `connect()`, there is no peer filter
-
-**Fix implemented** (`src/tunnel.c`):
-- Removed the `TUNNEL_PROTO_UDP != protocol` guard around `connect()` in `dst_connect_thread` (line ~832). For UDP, `connect()` sends no packets — it only installs the remote peer address in the kernel and binds a local ephemeral port up-front.
-- Changed the UDP branch in `fwd_thread_func` to use plain `recv()` instead of `recvfrom()`, since the socket is now connected and the peer is fixed.
-- This ensures replies from the remote server are matched to this fd from the moment the thread starts, and ICMP errors are surfaced for debugging.
-
-**Files modified**: `src/tunnel.c`
-
-### Bug 3: Multi-path duplicate CONN_OPEN handling (ALREADY FIXED)
-
-**Symptom**: With `--rr-count 2`, CONN_OPEN arrives via both paths, creating duplicate connections.
-
-**Root cause**: `handle_tunnel_conn_open()` didn't check if connection already exists before creating new one.
-
-**Fix**: Already fixed in previous session - added `tunnel_find_conn_by_id()` check before creating connection.
-
-### Test Setup for Reproducing
-
+The `tcp-chacha20` skin (ID 4) uses the same X25519 handshake and BLAKE2b key derivation, but applies ChaCha20 as a raw stream cipher (no Poly1305 MAC). This eliminates the authentication overhead while still providing strong per-connection obfuscation. On x64 with libsodium it achieves ~1.5x the tunnel throughput of `tcp-monocypher`:
 ```
-Node 30: ./ganon 0.0.0.0 -p 11131 -i 30 --reconnect-retries always --rr-count 2 -vv
-Node 22: ./ganon 0.0.0.0 -p 11122 -c 127.0.0.1:11131 -i 22 --reconnect-retries always -vv
-Node 21: ./ganon 0.0.0.0 -p 11121 -c 127.0.0.1:11131 -i 21 --reconnect-retries always -vv
-Node 11: ./ganon 0.0.0.0 -p 11111 -c 127.0.0.1:11121,127.0.0.1:11122 -i 11 --reconnect-retries always --rr-count 2 -vv
-
-Python: c = GanonClient("127.0.0.1", 11111, 3); c.connect()
-        t = c.create_tunnel(30, 11, "127.0.0.1", 8000, "127.0.0.1", 9000, "tcp")
-        # Then: iperf3 -s -p 9000 & iperf3 -c 127.0.0.1 -p 8000 -t 10
+[4 bytes]  Big-endian payload length
+[8 bytes]  Nonce (little-endian message counter)
+[N bytes]  ChaCha20-obfuscated serialized protocol_msg_t + data
 ```
+
+Network layer multi-listener support:
+- Each `listener_t` is bound to exactly one skin
+- `--listen SKIN:IP:PORT` adds a listener (repeatable, up to `ARGS_MAX_LISTENERS`)
+- `-p/--port PORT` is shorthand for `--listen tcp-monocypher:0.0.0.0:PORT`
+- `--skin NAME` sets the skin for the `-p/--port` shorthand
+- `--default-skin NAME` sets the skin for outbound `--connect` entries
+- `connect_cmd_payload_t.skin_id` allows a Python client to request a specific skin for dynamic connects
 
 ## Transport-Layer Encryption
 
-All TCP connections between ganon nodes are encrypted using **X25519 + XChaCha20-Poly1305**. Encryption is mandatory and transparent to all layers above transport.
+All TCP connections between ganon nodes are encrypted using **X25519 + XChaCha20-Poly1305**. Encryption lives entirely inside the active skin (default: `skin_tcp_monocypher.c`) and is transparent to all layers above transport.
 
 ### Cryptography
 - **Key exchange:** Ephemeral X25519 per TCP connection (Monocypher)
@@ -848,7 +753,7 @@ Monocypher is a compact, auditable, single-file reference implementation written
 **Technical differences:**
 - **ChaCha20:** libsodium uses 4-way or 8-way parallel block processing via AVX2/SSE4.1 SIMD instructions. It encrypts multiple 64-byte blocks simultaneously in a single round, whereas Monocypher processes one block at a time in portable C.
 - **Poly1305:** libsodium uses SIMD (SSE2/AVX2) to process multiple message blocks in parallel for the universal hash computation. Monocypher uses a portable 32-bit limb implementation.
-- **Result:** libsodium achieves ~3.6× higher throughput in isolated crypto benchmarks.
+- **Result:** libsodium achieves ~3.6x higher throughput in isolated crypto benchmarks.
 
 **Isolated benchmark** (65 KB frames, tight loop, `-O3`, same x64 machine):
 
@@ -857,13 +762,13 @@ Monocypher is a compact, auditable, single-file reference implementation written
 | Monocypher (reference C) | **2.49 Gbps** |
 | libsodium (AVX2/SSE4.1 assembly) | **8.97 Gbps** |
 
-**Tunnel benchmark** (1 GB over local TCP tunnel) shows high variance (~2.5–4.5 Gbps for both builds) because the end-to-end path is bottlenecked by syscall overhead, thread context switches, and Python client/protocol framing — not by raw crypto speed. libsodium removes crypto from the critical path; further tunnel throughput gains require optimizing the non-crypto pipeline.
+**Tunnel benchmark** (1 GB over local TCP tunnel) shows high variance (~2.5-4.5 Gbps for both builds) because the end-to-end path is bottlenecked by syscall overhead, thread context switches, and Python client/protocol framing -- not by raw crypto speed. libsodium removes crypto from the critical path; further tunnel throughput gains require optimizing the non-crypto pipeline.
 
 ### Self-Contained Build
 
 libsodium is vendored in `third_party/`:
-- `third_party/libsodium/` — libsodium 1.0.20 source tree (rebuildable)
-- `third_party/libsodium-install/` — prebuilt static library and headers for x64
+- `third_party/libsodium/` -- libsodium 1.0.20 source tree (rebuildable)
+- `third_party/libsodium-install/` -- prebuilt static library and headers for x64
 
 The ganon `Makefile` has a `libsodium` target that builds from source:
 ```
@@ -896,43 +801,45 @@ After TCP connect, before any ganon protocol traffic:
 - **Overhead:** 44 bytes per frame
 
 ### Integration (C Server)
-- `TRANSPORT__do_handshake()` called in `socket_thread_func()` before message loop
-- `TRANSPORT__send_msg()` encrypts via `crypto_aead_xchacha20poly1305_ietf_encrypt_detached()` (libsodium) or `crypto_aead_lock()` (Monocypher) into length-prefixed frame
-- `TRANSPORT__recv_msg()` reads length-prefixed frame, verifies nonce, decrypts via `crypto_aead_xchacha20poly1305_ietf_decrypt_detached()` (libsodium) or `crypto_aead_unlock()` (Monocypher), then unserializes
+- `skin_tcp_monocypher.c` performs handshake in `connect()` and `listener_accept()` before returning a ready `transport_t`
+- `skin->send_msg()` encrypts via `crypto_aead_xchacha20poly1305_ietf_encrypt_detached()` (libsodium) or `crypto_aead_lock()` (Monocypher) into length-prefixed frame
+- `skin->recv_msg()` reads length-prefixed frame, verifies nonce, decrypts via `crypto_aead_xchacha20poly1305_ietf_decrypt_detached()` (libsodium) or `crypto_aead_unlock()` (Monocypher), then unserializes
 - Session, routing, and tunnel layers are completely unaware of encryption
 
 ### Integration (Python Client)
-- `ganon_client/transport.py` wraps the socket with `monocypher-py` bindings
-- `Transport.do_handshake()` performs X25519 exchange and key derivation
-- `Transport.send_encrypted()` calls `monocypher.bindings.crypto_lock()`
-- `Transport.recv_decrypted()` calls `monocypher.bindings.crypto_unlock()`
+- `ganon_client/skins/tcp_monocypher.py` implements `NetworkSkinImpl` ABC
+- `TcpMonocypherSkin.open()` performs X25519 exchange and key derivation
+- `TcpMonocypherSkin.send()` calls `monocypher.bindings.crypto_lock()`
+- `TcpMonocypherSkin.recv()` calls `monocypher.bindings.crypto_unlock()`
 - Both C and Python use the same Monocypher primitives for handshake/key derivation, ensuring full compatibility
 
 **Important API difference:** `monocypher-py`'s `crypto_blake2b(msg, key=...)` takes the *message* as the first argument and the *key* as the keyword argument. The C `crypto_blake2b_keyed(hash, hash_size, key, key_size, message, message_size)` takes the *key* as the 3rd argument and the *message* as the 5th. When deriving directional keys in Python, the shared secret must be passed as `key=shared` and the single-byte context (`b"S"`/`b"R"`) as the message.
 
 ### Files
-- `src/monocypher.c` + `include/monocypher.h` — vendored Monocypher library (X25519, BLAKE2b, AEAD fallback)
-- `src/transport.c` — handshake, encrypt, decrypt (conditionally uses libsodium AEAD)
-- `src/network.c` — handshake trigger in socket thread (C server)
-- `src/CMakeLists.txt` — auto-detects and links local libsodium (`USE_LIBSODIUM`)
-- `src/main.c` — calls `sodium_init()` when `USE_LIBSODIUM` is defined
-- `include/transport.h` — encryption state in `struct transport`
-- `include/err.h` — crypto error codes (`E__CRYPTO__*`)
-- `third_party/libsodium/` — libsodium 1.0.20 source
-- `third_party/libsodium-install/` — prebuilt x64 static library and headers
-- `ganon_client/transport.py` — Python transport encryption layer
-- `ganon_client/pyproject.toml` — `monocypher-py` dependency
+- `src/monocypher.c` + `include/monocypher.h` -- vendored Monocypher library (X25519, BLAKE2b, AEAD fallback)
+- `src/skins/skin_tcp_monocypher.c` -- default skin: handshake, encrypt, decrypt (conditionally uses libsodium AEAD)
+- `src/network.c` -- multi-listener accept loop, dynamic connect/disconnect
+- `src/CMakeLists.txt` -- auto-detects and links local libsodium (`USE_LIBSODIUM`)
+- `src/main.c` -- calls `sodium_init()` when `USE_LIBSODIUM` is defined
+- `include/skin.h` -- skin vtable and registry
+- `include/transport.h` -- transport_t with skin pointer
+- `include/err.h` -- crypto error codes (`E__CRYPTO__*`)
+- `third_party/libsodium/` -- libsodium 1.0.20 source
+- `third_party/libsodium-install/` -- prebuilt x64 static library and headers
+- `ganon_client/skins/tcp_monocypher.py` -- Python skin implementation
+- `ganon_client/skin.py` -- Python skin ABC and registry
+- `ganon_client/pyproject.toml` -- `monocypher-py` dependency
 
 ### Performance on ARM and MIPS
 
 **ARM:**
-- libsodium includes NEON-optimized assembly for ARMv7+ and AArch64. On those platforms, expect a **2–4×** isolated-crypto improvement over Monocypher.
-- Our ARMv5 target (`arm-linux-gnueabihf`) does **not** have NEON. On ARMv5, libsodium falls back to its reference C implementation, which is only marginally faster than Monocypher (maybe **1.2–1.5×**). For ARMv5, Monocypher remains a perfectly viable choice.
+- libsodium includes NEON-optimized assembly for ARMv7+ and AArch64. On those platforms, expect a **2-4x** isolated-crypto improvement over Monocypher.
+- Our ARMv5 target (`arm-linux-gnueabihf`) does **not** have NEON. On ARMv5, libsodium falls back to its reference C implementation, which is only marginally faster than Monocypher (maybe **1.2-1.5x**). For ARMv5, Monocypher remains a perfectly viable choice.
 - **Recommendation:** If you ever move to ARMv7+ or AArch64, cross-compile libsodium with `--host=arm-linux-gnueabihf` (or `aarch64-linux-gnu`) and link it; the NEON paths will unlock significant gains.
 
 **MIPS (big-endian, o32 ABI):**
 - libsodium has limited MIPS-specific assembly. Most primitives fall back to reference C.
-- Expected improvement over Monocypher on MIPS: **1.0–1.3×** (often negligible).
+- Expected improvement over Monocypher on MIPS: **1.0-1.3x** (often negligible).
 - Monocypher is competitive on MIPS because it is already well-optimized portable C.
 
 ### How to Improve Performance on ARM/MIPS
@@ -940,7 +847,7 @@ After TCP connect, before any ganon protocol traffic:
 Since raw crypto speed is not the main bottleneck on these platforms (and libsodium offers limited gains), focus on **non-crypto optimizations**:
 
 1. **Increase tunnel buffer size** (`TUNNEL_BUF_SIZE` in `include/tunnel.h`). Larger buffers mean fewer encrypt/decrypt calls per gigabyte transferred, amortizing function-call and nonce-construction overhead.
-2. **Batch small reads** in `fwd_thread_func()` (`src/tunnel.c`). Instead of `recv()` → encrypt → send for every small chunk, read as much as possible before encrypting. This reduces the number of `TRANSPORT__send_msg()` calls.
+2. **Batch small reads** in `fwd_thread_func()` (`src/tunnel.c`). Instead of `recv()` -> encrypt -> send for every small chunk, read as much as possible before encrypting. This reduces the number of `TRANSPORT__send_msg()` calls.
 3. **Zero-copy optimizations:**
    - Use `sendfile()` or `splice()` for tunnel forwarding when both source and destination are local sockets, bypassing userspace entirely.
    - Avoid the `malloc()`/`free()` in `TRANSPORT__recv_msg()` by using a stack-allocated frame buffer up to a reasonable size (e.g., 68 KB).
@@ -960,13 +867,22 @@ The current design is hop-to-hop (protects the link). End-to-end encryption can 
 
 ## Python Client API
 
+### Setup
+
+Use the project-local virtual environment:
+```bash
+source venv/bin/activate
+```
+
+Dependencies (e.g., `monocypher-py`) are installed into this venv.
+
 ### Async Architecture
 
 The Python client (`ganon_client/client.py`) is built on an **async-native core** with **sync wrappers**. All network I/O runs on an internal `asyncio` event loop in a background daemon thread. Response correlation uses `asyncio.Future` instead of `threading.Event`.
 
 **Internal async methods** (no `a_` prefix because they're internal):
-- `_protocol_loop()` — reads encrypted frames from the socket
-- `_send_protocol_message()` — sends encrypted frames
+- `_protocol_loop()` -- reads encrypted frames from the socket
+- `_send_protocol_message()` -- sends encrypted frames
 - `_send_rreq()`, `_flush_pending_messages()`, `_send_node_init()`
 
 **Public async methods** (`a_` prefix) return `_AsyncBridge` objects that can be `await`-ed from any event loop:
@@ -1028,7 +944,7 @@ nc.run_command("uptime")           # sync
 await nc.a_run_command("uptime")   # async
 ```
 
-### `node()` — Reachability Verification
+### `node()` -- Reachability Verification
 
 `GanonClient.node(node_id, verify=True, timeout=5.0)` returns a `NodeClient` bound to the specified node id. By default it sends a ping to verify the node is reachable before returning.
 
@@ -1040,12 +956,28 @@ nc = c.node(10, timeout=2.0)       # custom ping timeout
 
 Raises `TimeoutError` if `verify=True` and the node does not respond within `timeout` seconds.
 
+### Skin Selection
+
+The Python client supports pluggable skins via the `skin` parameter:
+```python
+from ganon_client.skin import NetworkSkin
+
+c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.TCP_MONOCYPHER)
+```
+
+The default is `NetworkSkin.TCP_MONOCYPHER`. Skin implementations live in `ganon_client/skins/` and register themselves via `register_skin()`.
+
+```python
+# Use the unencrypted plain TCP skin (useful for debugging)
+c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.TCP_PLAIN)
+```
+
 ### Exception Policy
 
 All methods raise exceptions on failure instead of returning `False`/`None`/dict:
-- `ConnectionError` — not connected, send failure, TCP error, handshake failure, reconnect failure
-- `TimeoutError` — no response within timeout (ping, command execution, file transfer, connect_to_node)
-- `ConnectToNodeError` — remote node reports connection failure (has `.status` and `.error_code` attributes)
+- `ConnectionError` -- not connected, send failure, TCP error, handshake failure, reconnect failure
+- `TimeoutError` -- no response within timeout (ping, command execution, file transfer, connect_to_node)
+- `ConnectToNodeError` -- remote node reports connection failure (has `.status` and `.error_code` attributes)
 
 ### Usage Examples
 
@@ -1079,3 +1011,169 @@ nc = c.node(10)
 await nc.a_ping()
 await nc.a_run_command("cat /etc/os-release")
 ```
+
+## TODO
+
+- [x] Major refactor: separate network/session/transport layers
+- [x] Fix byte order conversion - session works in host order, transport serializes
+- [x] Move broadcast/forward logic to routing layer (ROUTING__on_message)
+- [x] Add IN/OUT/INOUT parameter direction macros
+- [x] NODE_DISCONNECT carries list of unreachable nodes
+- [x] Add ROUTING__get_via_nodes function
+- [x] Reconnection logic: connect_and_run_thread handles reconnect loop per peer
+- [x] Update Python client to match new architecture (encryption, protocol, routing)
+- [x] Test multi-node mesh topology
+- [x] Migrated routing to reactive AODV mesh logic
+- [ ] Implement AODV message structs into Python Client
+- [x] Implement multi-path Load Balancing (Round-Robin, All-Routes, Sticky)
+- [x] Implement sequential msg_id tracking, deduplication, and reordering buffer (C & Python)
+- [x] Fix protocol mismatch between C and Python client
+- [x] Improve RERR logic for multi-path mesh reachability
+- [x] Created Docker test environment for multi-node testing
+- [x] Fix tunnel close race condition - set listen socket to non-blocking so accept() can be interrupted by close()
+- [x] Fix tunnel creation without existing AODV route - buffer messages and trigger RREQ in ROUTING__route_message when no route exists
+- [x] Implement tunnel soft close - `t.close()` stops accepting new connections but keeps existing ones alive; `t.close(force=True)` for immediate termination
+- [x] Fix tunnel multi-connection channel isolation - use unique channel_id per connection (conn_id) for proper load balancer sequencing, master channel (tunnel_id) for control messages
+- [x] Fix UDP tunnel support - create SOCK_DGRAM sockets for UDP, use recvfrom/sendto instead of accept/send/recv, track UDP clients by address
+- [x] Fix UDP tunnel destination-side forwarding - properly track UDP connections in dst_conn_t and use sendto() with correct remote address
+- [x] Implement tunnel connection persistence during route outages - TCP connections enter "stalled" state with backpressure when no route exists, resume when route is restored (UDP packets are lost as expected)
+- [x] Add --tcp-rcvbuf CLI option and TCP_RCVBUF env variable to configure TCP receive buffer size for tunnel connections
+- [x] Add dynamic connect/disconnect feature - `c.connect(ip, port, target_node)` to connect nodes, `c.disconnect(node_a, node_b)` to disconnect nodes, with proper error handling
+- [x] Add network graph visualization - `c.print_network_graph()` to display network topology from the client's perspective, properly handling loops and parallel routes
+- [x] Fix message ID generation - was using Unix timestamp which made message IDs look like node IDs (e.g., 1776634649), now uses sequential counter starting from 1
+- [x] Fix ping timeout when no route exists - C server: flush buffered messages when RREP establishes route; Python client: buffer messages and trigger RREQ when no route, flush when RREP arrives
+- [x] Add optional packet reordering/buffering - CLI flag `--reorder` and Python param `reorder=False` (default), packets processed immediately when disabled
+- [x] Fix multi-path routing deduplication - don't drop "duplicate" unicast messages at intermediate nodes, only drop broadcast duplicates
+- [x] Fix tunnel duplicate connection creation - check if connection already exists before creating new one (prevents duplicate connections with multi-path routing)
+- [x] Fix tunnel soft-close reuse - allow soft-closed tunnels to be recreated (check `is_soft_closed` flag in addition to `is_active`)
+- [x] Add encryption at the transport layer
+- [x] Switch Python client from `cryptography` to `monocypher-py` for Monocypher compatibility
+- [x] Revert C server from IETF ChaCha20 (12-byte nonce) to XChaCha20 (24-byte nonce) for Monocypher API compatibility
+- [x] Fix BLAKE2b key derivation in Python client - `monocypher-py` takes `crypto_blake2b(msg, key=...)` where C takes `crypto_blake2b_keyed(hash, hash_size, key, key_size, msg, msg_size)`; shared secret must be passed as `key=shared` and context byte as `msg`
+- [x] Integrate libsodium for high-performance XChaCha20-Poly1305 AEAD on x64 (~3.6x isolated crypto improvement: 8.97 Gbps vs 2.49 Gbps)
+- [x] Maintain Monocypher for X25519/BLAKE2b to preserve Python client wire compatibility
+- [x] Move libsodium source and build artifacts into `third_party/` for self-contained builds
+- [x] Add Makefile `libsodium` and `clean-libsodium` targets to rebuild from vendored source
+- [x] Update CMake auto-detection to use project-local `third_party/libsodium-install/`
+- [x] Add ARMv7 toolchain (`cmake/armv7-toolchain.cmake`) with NEON flags and Makefile targets `armv7r`/`armv7d`
+- [x] Increase TUNNEL_BUF_SIZE from 64K to 128K (+8% tunnel throughput, 128K chosen for embedded RAM constraints)
+- [x] Fix stack-allocated `buf[TUNNEL_BUF_SIZE + 8]` in `handle_tunnel_conn_ack` to use `MAX_PRE_ACK_DATA + 8`
+- [x] Increase encrypted frame size limit from 200KB to 300KB in both C server and Python client
+- [x] Implement stack-allocated frame buffer in `TRANSPORT__recv_msg` (avoids malloc on hot path for typical frames)
+- [x] Create `PERFORMANCE_PLAN.md` with ranked list of future optimizations (io_uring, kTLS, splice, batching, etc.)
+- [x] Add detailed Appendix A to `PERFORMANCE_PLAN.md` covering io_uring on legacy kernels (2.6.x, 3.3.x) and embedded architectures (ARM/MIPS)
+- [x] Add kernel-generation-specific optimization availability table (2.6.x vs 3.3.x vs 5.6+) with estimated impact per generation
+- [x] Implement runtime kernel capability probing (`network_caps.c/h`) — **removed from master, preserved on `feature/epoll` branch**
+- [x] Implement epoll event loop foundation (`network_epoll.c/h`) with per-transport recv buffers and outbound queues — **removed from master, preserved on `feature/epoll` branch**
+- [x] Refactor `TRANSPORT__recv_msg()` to extract `TRANSPORT__decrypt_frame()` for reuse by epoll loop — **reverted on master**
+- [x] Build and test epoll mode on localhost (two-node mesh) — **reverted on master**
+- [x] Build and test thread-per-connection fallback compilation
+- [x] Fix SIGINT shutdown hang — `NETWORK__shutdown` now closes client fds before joining threads; `connect_and_run_thread` and `socket_thread_func` have clean ownership boundaries; fixed use-after-free in `socket_thread_func`
+- [x] Add remote command execution - `c.run_command(node, "cmd")` returns dict with exit_code/stdout/stderr; `c.run(node, "cmd")` returns merged output
+- [x] Add remote file upload/download - `c.upload_file(node, local, remote)` and `c.download_file(node, remote, local)` with helpful error messages (no space, read-only fs, permission denied, not found)
+- [x] Add EXEC_CMD/EXEC_RESPONSE, FILE_UPLOAD/FILE_UPLOAD_RESPONSE, FILE_DOWNLOAD/FILE_DOWNLOAD_RESPONSE protocol messages
+- [x] Add NodeClient - `nc = c.node(30)` binds all commands to a specific node id so you can call `nc.run_command("cmd")`, `nc.upload_file(local, remote)`, `nc.ping()`, etc. without repeating the node id
+- [x] Make `connect_to_node()` synchronous - add `request_id` correlation to `CONNECT_CMD/RESPONSE`, defer `CONNECT_RESPONSE` in C server until peer `NODE_INIT` arrives so the peer node id is known, handle pending-connect cleanup on disconnect
+- [x] Make `connect_to_node()` return `NodeClient` (via `self.node()`) and raise `ConnectToNodeError` on remote failure
+- [x] Make `node()` verify reachability with a ping before returning (configurable via `verify=` and `timeout=`)
+- [x] Python client: convert silent failures to explicit exceptions - `connect()`, `reconnect()`, `_connect()`, `_send_protocol_message()`, `send_to_node()`, `disconnect_nodes()` all raise `ConnectionError` instead of returning `False`/`None`/dict; `run_command()`, `upload_file()`, `download_file()` no longer manually check send return values
+- [x] Refactor Python client to async-capable architecture - manages internal asyncio event loop in background thread, all I/O methods are async with `a_` prefixes, sync wrappers use `asyncio.run_coroutine_threadsafe()`, response correlation uses `asyncio.Future` instead of `threading.Event`
+- [x] Add pluggable network skins abstraction - `skin_ops_t` vtable for connect/accept/listen/send/recv/teardown, registry by name and ID, multi-listener support, `--skin`/`--default-skin`/`--listen` CLI flags, `ConnectCmdPayload` gains `skin_id` field
+- [x] Implement Python skin abstraction - `NetworkSkin` enum, `NetworkSkinImpl` ABC, `TcpMonocypherSkin` class, skin registry, `GanonClient(skin=NetworkSkin.TCP_MONOCYPHER)` parameter
+- [x] Add file chunking for uploads/downloads - `--file-chunk-size` CLI flag (default 256KB), `FILE_CHUNK_SIZE` env, `GanonClient(file_chunk_size=...)` parameter, chunked FILE_UPLOAD with chunk_index/total_chunks, chunked FILE_DOWNLOAD with offset/length, FILE_DOWNLOAD_RESPONSE includes total_size
+- [x] Replace `run_in_executor` socket connect with native asyncio `loop.sock_connect` in TcpMonocypherSkin
+- [x] Add plain TCP skin (`tcp-plain`) for debugging/testing without encryption (C + Python)
+- [x] Add XOR-obfuscated TCP skin (`tcp-xor`): X25519 handshake + repeating-key XOR for lightweight per-connection obfuscation (C + Python)
+- [x] Add ChaCha20 stream-cipher TCP skin (`tcp-chacha20`): X25519 handshake + ChaCha20 (no MAC, ~1.5x throughput of monocypher) (C + Python)
+- [ ] Add TLS 1.3 skin (`tls13`) as alternative to `tcp-monocypher`
+- [ ] Add QUIC skin (`quic`) for UDP-based transport
+- [ ] Test multi-path tunnel race conditions without `-vv` flag (Bug 1 fix verification)
+
+## Known Bugs - Multi-Path Tunnel Race Conditions
+
+### Bug 1: Dedup logic collision between RREQ and TUNNEL_CONN_OPEN (FIXED)
+
+**Symptom**: In multi-path environments (`--rr-count 2`), TUNNEL_CONN_OPEN messages are dropped as duplicates when they're actually new messages.
+
+**Root cause**: The dedup key in `ROUTING__is_msg_seen()` used only `orig_src + msg_id`, not the message type. When node 30 sent both RREQ (type=2) and CONN_OPEN (type=9) with the same `orig_src=30, msg_id=4`, they collided.
+
+**Fix applied**: Added `type` field to `seen_msg_t` structure in `routing.c`. Updated `ROUTING__check_msg_seen_readonly()`, `ROUTING__mark_msg_seen()`, and `ROUTING__is_msg_seen()` to include type in comparison. Also updated dedup logic to only mark messages as seen when processing (broadcast or for us), not when forwarding.
+
+**Files modified**: `src/routing.c`
+
+**Status**: Code modified. Needs rebuild and testing without `-vv` flag to fully verify.
+
+### Bug 2: Tunnel sends data before CONN_ACK is received (FIXED)
+
+**Symptom**: In multi-path environments, tunnel data is lost because TUNNEL_DATA arrives at destination before the connection is established.
+
+**Root cause**: The `fwd_thread_func` in `tunnel.c` started reading from client socket and sending TUNNEL_DATA immediately after CONN_OPEN was sent, without waiting for CONN_ACK.
+
+**Fix implemented** (`src/tunnel.c`):
+- Added `volatile int ack_received` to `src_conn_t`; zeroed when slot is allocated.
+- Added `volatile int *p_ack_received` to `fwd_ctx_t`; set to `&conn->ack_received` for src-side fwd threads, `NULL` for dst-side threads.
+- Added module-level `pthread_cond_t g_ack_cond` (shared with `g_tunnel_mutex`).
+- `fwd_thread_func`: if `p_ack_received != NULL`, waits up to 10 s on `g_ack_cond` for the flag to be set before entering the read/forward loop.
+- `handle_tunnel_conn_ack`: now locks `g_tunnel_mutex`, finds the matching `src_conn_t`, sets `ack_received = 1`, and broadcasts on `g_ack_cond`.
+- `handle_tunnel_conn_close`, `TUNNEL__handle_disconnect`, `TUNNEL__destroy`: each broadcasts on `g_ack_cond` so a waiting fwd thread wakes immediately instead of timing out.
+
+### Bug 3: Multi-path duplicate CONN_OPEN handling (FIXED)
+
+**Symptom**: With `--rr-count 2`, CONN_OPEN arrived via both paths, creating duplicate connections.
+
+**Root cause**: `handle_tunnel_conn_open()` didn't check if connection already exists before creating new one.
+
+**Fix**: Added `tunnel_find_conn_by_id()` check before creating connection.
+
+### Bug 4: UDP tunnel return-path broken (FIXED)
+
+**Symptom**: UDP tunnels forwarded data src->dst correctly, but replies from the remote UDP server never made it back to the client. TCP tunnels worked end-to-end.
+
+**Root cause**: The destination-side UDP socket was created but never bound to a local port before the return-path reader (`fwd_thread_func`) started calling `recvfrom()`. The socket only got an ephemeral port later, when `handle_tunnel_data` called the first `sendto()`.
+
+**Fix implemented** (`src/tunnel.c`):
+- Removed the `TUNNEL_PROTO_UDP != protocol` guard around `connect()` in `dst_connect_thread`. For UDP, `connect()` sends no packets -- it only installs the remote peer address in the kernel and binds a local ephemeral port up-front.
+- Changed the UDP branch in `fwd_thread_func` to use plain `recv()` instead of `recvfrom()`, since the socket is now connected and the peer is fixed.
+
+### Test Setup for Reproducing
+
+```
+Node 30: ./ganon 0.0.0.0 -p 11131 -i 30 --reconnect-retries always --rr-count 2 -vv
+Node 22: ./ganon 0.0.0.0 -p 11122 -c 127.0.0.1:11131 -i 22 --reconnect-retries always -vv
+Node 21: ./ganon 0.0.0.0 -p 11121 -c 127.0.0.1:11131 -i 21 --reconnect-retries always -vv
+Node 11: ./ganon 0.0.0.0 -p 11111 -c 127.0.0.1:11121,127.0.0.1:11122 -i 11 --reconnect-retries always --rr-count 2 -vv
+
+Python: c = GanonClient("127.0.0.1", 11111, 3); c.connect()
+        t = c.create_tunnel(30, 11, "127.0.0.1", 8000, "127.0.0.1", 9000, "tcp")
+        # Then: iperf3 -s -p 9000 & iperf3 -c 127.0.0.1 -p 8000 -t 10
+```
+
+### Bug 5: UDP-QUIC tunnel data corruption, decryption failures, and extreme slowness (FIXED)
+
+**Symptom**: The `udp-quic` tunnel experienced frequent "Payload decryption failed" errors, "INVALID SIGNATURE" errors in the C server, and extreme slowness/memory exhaustion (crashing the computer) during high-throughput tests like `iperf3`.
+
+**Root cause 1 (O(N^2) Memory Explosion)**: `quic_write_stream` was re-allocating a stable copy of the *entire remaining message* for every single QUIC packet sent. For large transfers, this led to massive redundant memory usage and astronomical overhead.
+
+**Root cause 2 (Handshake Data Corruption)**: Handshake messages were passed to `ngtcp2` from temporary buffers that were destroyed immediately. If `ngtcp2` needed to retransmit handshake data, it used corrupted memory, leading to incorrect key derivation and subsequent AEAD decryption failures.
+
+**Root cause 3 (Memory Leaks)**: Neither `pending_data` (stream buffers) nor `crypto_data` (handshake buffers) were being freed when the connection was closed.
+
+**Fix implemented**:
+- **Optimized Stream Writing**: `quic_write_stream` now allocates a stable copy of the message ONCE and uses slices for `ngtcp2` calls, fixing the O(N^2) slowness.
+- **Stable Crypto Storage**: Added `quic_crypto_data_t` linked list to `skin_quic_ctx_t` to store all handshake data until connection teardown.
+- **Robust Cleanup**: Updated `quic_free_ctx` to properly free all pending stream and crypto data.
+- **Non-blocking I/O**: Transitioned internal pipes to non-blocking mode with an updated I/O thread poll loop to prevent stalls when the application is busy.
+
+**Status**: Verified stable, high-performance end-to-end communication. O(N^2) allocation bug eliminated.
+
+### Bug 6: Outbound QUIC connection segfaults on connect_to_node (FIXED)
+
+**Symptom**: When a node is instructed to connect to another node using the `udp-quic` skin (via `CONNECT_CMD`), it immediately segmentation faults.
+
+**Root cause**: `quic_connect` was calling `ngtcp2_crypto_picotls_configure_client_session` too early, before the `ngtcp2_conn` object was created. This function calls `ngtcp2_conn_encode_local_transport_params`, which dereferences the (null) connection pointer.
+
+**Fix implemented** (`src/skins/skin_udp_quic.c`):
+- Removed the redundant and premature call to `ngtcp2_crypto_picotls_configure_client_session` from `quic_connect`.
+- The session is correctly configured later in the same function, after the connection object has been successfully initialized.
+
+**Status**: Verified stable outbound connections with Node 11 connecting to Node 21 via QUIC.

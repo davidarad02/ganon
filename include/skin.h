@@ -21,8 +21,11 @@ typedef void (*network_message_cb_t)(transport_t *t, const protocol_msg_t *msg,
 /* Wire-stable skin identifiers. */
 typedef enum {
     SKIN_ID__TCP_MONOCYPHER = 1,
-    /* SKIN_ID__TLS13 = 2, */
-    /* SKIN_ID__QUIC  = 3, */
+    SKIN_ID__TCP_PLAIN    = 2,
+    SKIN_ID__TCP_XOR      = 3,
+    SKIN_ID__TCP_CHACHA20 = 4,
+    SKIN_ID__SSH          = 5,
+    SKIN_ID__QUIC         = 6,
 } skin_id_t;
 
 /* Vtable: every skin implements these. */
@@ -55,15 +58,6 @@ struct skin_ops {
                       IN const uint8_t *data);
     err_t (*recv_msg)(IN transport_t *t, OUT protocol_msg_t *msg,
                       OUT uint8_t **data);
-
-    /* ---- Epoll integration (optional; set to NULL for non-fd skins) ---- */
-    /* Drain all decodable frames from the readable fd; call cb per message. */
-    err_t (*on_readable)(IN transport_t *t, IN network_message_cb_t cb);
-    /* Drain the outbound queue; mirrors TRANSPORT__drain_outbuf. */
-    err_t (*on_writable)(IN transport_t *t, OUT int *would_block);
-    /* Enqueue a message for async send via epoll EPOLLOUT. */
-    err_t (*enqueue_outbuf)(IN transport_t *t, IN const protocol_msg_t *msg,
-                            IN const uint8_t *data);
 
     /* ---- Teardown ---- */
     /* Close fd, wipe keys, free skin_ctx (but NOT the transport_t itself). */

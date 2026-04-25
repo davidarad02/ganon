@@ -23,19 +23,9 @@ struct transport {
     uint32_t node_id;
     void *ctx;   /* generic back-pointer (e.g. network_t*); skin state is in skin_ctx */
 
-    /* Set to 1 when the socket is managed by an epoll event loop. */
-    int is_nonblocking;
-
     /* Pluggable skin vtable + per-connection opaque state. */
     const skin_ops_t *skin;
     void *skin_ctx;
-
-    /* Epoll synchronization: socket_thread_func waits on this CV after
-     * registering with epoll.  The epoll loop signals it on disconnect. */
-    pthread_cond_t  epoll_cv;
-    pthread_mutex_t epoll_cv_mutex;
-    int epoll_disconnect_flag;
-    int disconnected_cb_called;
 };
 
 /* Allocate a bare transport_t with generic fields initialised.

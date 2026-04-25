@@ -71,7 +71,7 @@ void LOGGING__message(const char *level, const char *file, int line, const char 
 
     pthread_mutex_lock(&g_log_mutex);
     printf(COLOR_BOLD);
-    printf("%s.%06ld ", timestamp, tv.tv_usec);
+    printf("%s.%06lld ", timestamp, (long long)tv.tv_usec);
     printf(COLOR_RESET "[");
     printf(COLOR_BOLD "%s", color);
     printf("%s%s", level, pad);

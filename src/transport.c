@@ -24,14 +24,8 @@ transport_t *TRANSPORT__alloc_base(int fd, const skin_ops_t *skin) {
     t->client_port = 0;
     t->node_id     = 0;
     t->ctx         = NULL;
-    t->is_nonblocking      = 0;
     t->skin                = skin;
     t->skin_ctx            = NULL;
-    t->epoll_disconnect_flag  = 0;
-    t->disconnected_cb_called = 0;
-
-    pthread_cond_init(&t->epoll_cv, NULL);
-    pthread_mutex_init(&t->epoll_cv_mutex, NULL);
 
     return t;
 }
@@ -40,8 +34,6 @@ void TRANSPORT__free_base(transport_t *t) {
     if (NULL == t) {
         return;
     }
-    pthread_cond_destroy(&t->epoll_cv);
-    pthread_mutex_destroy(&t->epoll_cv_mutex);
     free(t);
 }
 

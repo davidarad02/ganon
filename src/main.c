@@ -16,7 +16,25 @@
 #include "transport.h"
 #include "loadbalancer.h"
 #include "tunnel.h"
+#include "skins_config.h"
+#if SKIN_ENABLE_MONOCYPHER
 #include "skins/skin_tcp_monocypher.h"
+#endif
+#if SKIN_ENABLE_PLAIN
+#include "skins/skin_tcp_plain.h"
+#endif
+#if SKIN_ENABLE_XOR
+#include "skins/skin_tcp_xor.h"
+#endif
+#if SKIN_ENABLE_CHACHA20
+#include "skins/skin_tcp_chacha20.h"
+#endif
+#if SKIN_ENABLE_SSH
+#include "skins/skin_tcp_ssh.h"
+#endif
+#if SKIN_ENABLE_QUIC
+#include "skins/skin_udp_quic.h"
+#endif
 
 static volatile sig_atomic_t g_shutdown_requested = 0;
 
@@ -29,7 +47,24 @@ int main(int argc, char *argv[]) {
     err_t rc = E__SUCCESS;
     args_t args;
 
+#if SKIN_ENABLE_MONOCYPHER
     SKIN_TCPM__register();
+#endif
+#if SKIN_ENABLE_PLAIN
+    SKIN_TCP_PLAIN__register();
+#endif
+#if SKIN_ENABLE_XOR
+    SKIN_TCP_XOR__register();
+#endif
+#if SKIN_ENABLE_CHACHA20
+    SKIN_TCP_CHACHA20__register();
+#endif
+#if SKIN_ENABLE_SSH
+    SKIN_TCP_SSH__register();
+#endif
+#if SKIN_ENABLE_QUIC
+    SKIN_UDP_QUIC__register();
+#endif
 
     rc = ARGS__parse(&args, argc, argv);
     FAIL_IF(E__SUCCESS != rc, rc);

@@ -24,23 +24,46 @@ This keeps CLAUDE.md in sync with the actual state of the codebase so future age
 ## Build Commands
 
 ```bash
-# Build all targets (x64, ARM, MIPS32 release & debug)
+# Build all targets (x64, ARMv5, ARMv7, MIPS32BE — release & debug)
 make
 
 # Build x64 only (both release and debug)
 make x64
 
 # Build specific target
-make x64r    # x64 release
-make x64d    # x64 debug
-make arm     # ARM v5 (hard-float)
-make mips32be # MIPS 32-bit big-endian
+make x64r      # x64 release
+make x64d      # x64 debug
+make arm       # ARMv5 (hard-float, musl)
+make armv7     # ARMv7 with NEON (musl)
+make mips32be  # MIPS 32-bit big-endian (musl)
 
-# Clean all build artifacts
+# Build/rebuild third-party libraries
+make libssh         # x64 libssh (OpenSSL backend)
+make libssh-arm     # ARM libssh (mbedTLS backend)
+make libssh-mips32be
+make mbedtls-arm
+make mbedtls-mips32be
+make musl-arm        # musl libc for ARM
+make musl-mips32be
+
+# Clean all build artifacts (does NOT clean third-party libs)
 make clean
+# Clean specific third-party installs
+make clean-cross-libs   # removes ARM+MIPS mbedTLS and libssh installs
+make clean-musl         # removes musl installs
 ```
 
 After build, binaries are in `bin/`. A convenience symlink `ganon` points to `ganon_<version>_x64_debug` for local dev.
+
+**Binary sizes (approximate, all skins):**
+- x64 release: ~5.7 MB (glibc + OpenSSL + ngtcp2 + picotls for QUIC)
+- ARM release: ~630 KB (musl + mbedTLS + dead-stripping; no QUIC)
+- ARMv7 release: ~635 KB
+- MIPS32BE release: ~965 KB
+
+**Third-party rebuild note**: `make clean` only removes ganon binaries. To force rebuild of libssh or mbedTLS, remove the install directory (e.g., `rm -rf third_party/libssh-install-arm`) and run `make arm`.
+
+**Cross-compile flags**: ARM/MIPS cross-compiled libraries use `CROSS_SIZE_FLAGS = -Os -ffunction-sections -fdata-sections -D_FORTIFY_SOURCE=0`. The `-D_FORTIFY_SOURCE=0` is required because libssh compiled with glibc headers references `__snprintf_chk`/`__strncat_chk` which musl does not provide.
 
 ## Running Ganon
 
@@ -67,7 +90,27 @@ See binary with `./ganon -h` for all options (load balancing strategy, timeouts,
 4. **Session** (`session.c/h`) - Protocol-specific logic (NODE_INIT, PEER_INFO, CONNECTION_REJECTED, etc.)
 5. **Routing** (`routing.c/h`) - AODV route discovery (RREQ/RREP), broadcast/forward logic, RERR handling
 
-**Key Design Rule**: Each layer must not know about the layers above it. E.g., Network knows nothing about node IDs; Session knows nothing about sockets. Transport is the ONLY place calling send()/recv().
+**Key Design Rule**: Each layer must not know about the layers above it. E.g., Network knows nothing about node IDs; Session knows nothing about sockets. Transport dispatches all I/O through the skin vtable.
+
+**Skins** (`skin.c/h`, `skins/skin_tcp_*.c`) - Pluggable transport vertical slice:
+- `tcp-monocypher` (default): TCP + X25519 + XChaCha20-Poly1305 encryption
+- `tcp-plain`: Unencrypted TCP with length-prefixed raw protocol frames (useful for debugging)
+- `tcp-xor`: X25519 handshake + repeating-key XOR obfuscation (not secure, but per-connection obfuscation)
+- `tcp-ssh`: TCP + libssh (server-side ephemeral Ed25519 host key, "none" auth, "ganon" subsystem channel)
+- `udp-quic`: UDP + QUIC (ngtcp2 v1.12.0 + picotls with OpenSSL crypto backend, TLS 1.3, self-signed ECDSA P-256 cert, "ganon" ALPN)
+
+Skins are controlled by `include/skins_config.h` — each macro is guarded by `#ifndef` so CMake can override via `-D` flags on the command line. CMake reads these macros at configure time via `file(STRINGS ...)`.
+
+TCP-SSH skin availability by architecture:
+- x64: libssh with OpenSSL backend (from `third_party/libssh-install`)
+- ARM/ARMv7: libssh with mbedTLS backend (from `third_party/libssh-install-arm`)
+- MIPS32BE: libssh with mbedTLS backend (from `third_party/libssh-install-mips32be`)
+
+UDP-QUIC skin availability:
+- **x64 only** — requires ngtcp2 + picotls-openssl + system OpenSSL. Automatically disabled on cross-compile targets via `-DSKIN_ENABLE_QUIC=0` compile definition.
+- Third-party libraries: `third_party/ngtcp2-install` + `third_party/picotls-install`
+- Build: `make ngtcp2` (depends on `make picotls` which depends on system OpenSSL 1.1.1+)
+- Clean: `make clean-quic`
 
 ## Critical Conventions
 
@@ -159,14 +202,6 @@ Logging is **completely compiled out in Release builds** (`CMAKE_BUILD_TYPE=Rele
 
 **Note**: `tunnel.c` uses LOG_* macros and is added to both Debug and Release sources in `src/CMakeLists.txt` (the macros are no-ops in Release).
 
-### Epoll Event Loop (`network_epoll.c/h`, `network_caps.c/h`)
-
-When available (Linux), the network layer uses a single epoll thread instead of one blocking recv-thread per connection. Key invariants:
-
-- **EPOLLOUT enable/disable is always done inside `out_mutex`** in `TRANSPORT__enqueue_outbuf` and `TRANSPORT__drain_outbuf`. Never call `epoll_ctl` to modify EPOLLIN/EPOLLOUT outside that mutex — the enable and disable operations must be mutually exclusive or data gets stuck in the queue with EPOLLOUT disabled (memory leak + CPU spin).
-- `socket_thread_func` in epoll mode blocks on `epoll_cv` after adding to epoll. When the epoll thread detects a disconnect it sets `epoll_disconnect_flag` and broadcasts; the socket thread then runs its own cleanup (`TRANSPORT__destroy` + `FREE(entry)`). **Do NOT call `TRANSPORT__destroy`/`FREE(entry)` again in `NETWORK__shutdown`** — the threads already did it.
-- `g_epoll_fd` is set to -1 at shutdown. `TRANSPORT__drain_outbuf` and `TRANSPORT__enqueue_outbuf` guard every `epoll_ctl` call with `g_epoll_fd >= 0`.
-
 ### TCP/UDP Tunneling (`tunnel.c/h`)
 
 Ganon supports transparent port-forwarding tunnels through the mesh. A tunnel has a **src node** (listener) and a **dst node** (connector to remote).
@@ -207,10 +242,27 @@ tunnel.close()  # Send TUNNEL_CLOSE to src_node, mark tunnel down
 Quick setup:
 ```bash
 source venv/bin/activate
-pip install -e ganon_client/
+# Dependencies (e.g., monocypher-py) are already installed in the venv
 ```
 
 The Python client mirrors C message types and protocol. See ganon_client/README.md for usage. **Note**: Python client may need updates when C protocol changes (e.g., new msg_type_t values).
+
+**Skin selection:**
+```python
+from ganon_client.skin import NetworkSkin
+
+# Default encrypted skin
+c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.TCP_MONOCYPHER)
+
+# Plain unencrypted skin (useful for debugging)
+c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.TCP_PLAIN)
+
+# XOR-obfuscated skin (per-connection obfuscation, not secure)
+c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.TCP_XOR)
+
+# QUIC (UDP + TLS 1.3) — requires aioquic; server must have udp-quic skin enabled
+c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.UDP_QUIC)
+```
 
 Key methods: `connect()`, `disconnect()`, `send_to_node()`, `ping()`, `create_tunnel()`. The `Tunnel` object returned by `create_tunnel()` has `is_up` property and `close()` method.
 
@@ -242,7 +294,7 @@ make x64r
 ./bin/ganon_0.1.0_x64_release -i 1
 ```
 
-Use debug builds for development. Release builds are ~90% smaller (static link + strip).
+Use debug builds for development. Release builds are ~90% smaller (static link + strip + musl for cross targets).
 
 ### Logging in Debug
 
@@ -301,7 +353,7 @@ See docker-compose.yml for containerized multi-node setup.
 
 3. **Protocol version compatibility**: The wire format magic is "GNN\0". If you change the protocol structure, consider version negotiation in NODE_INIT.
 
-4. **Threading model**: Network layer spawns threads (accept thread + reconnect threads per peer). Session and Routing must be thread-safe. Check mutex usage in routing_table_t.
+4. **Threading model**: Network layer uses thread-per-connection: one accept thread per listener, one connect/reconnect thread per outbound peer, and one socket thread per TCP connection. Session and Routing must be thread-safe. Check mutex usage in routing_table_t. Shutdown closes all client fds first, then joins connect threads (which have already joined their socket threads), then joins any remaining incoming socket threads, then frees entries.
 
 5. **Static linking**: All binaries are statically linked (`CMAKE_EXE_LINKER_FLAGS="-static"`). This affects how dependencies are resolved during build.
 
