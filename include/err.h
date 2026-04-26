@@ -51,14 +51,14 @@ typedef enum {
     E__CRYPTO__DECRYPT_FAILED,
     E__CRYPTO__REPLAY_DETECTED,
 
-    /* quic2 */
-    E__QUIC2__HANDSHAKE_FAILED = 0x700,
-    E__QUIC2__INIT_FAILED,
-    E__QUIC2__RECV_FAILED,
-    E__QUIC2__SEND_FAILED,
-    E__QUIC2__CONN_CLOSED,
-    E__QUIC2__ALLOC_FAILED,
-    E__QUIC2__BAD_FRAME_LEN,
+    /* quic (udp-quic skin) */
+    E__QUIC__HANDSHAKE_FAILED = 0x700,
+    E__QUIC__INIT_FAILED,
+    E__QUIC__RECV_FAILED,
+    E__QUIC__SEND_FAILED,
+    E__QUIC__CONN_CLOSED,
+    E__QUIC__ALLOC_FAILED,
+    E__QUIC__BAD_FRAME_LEN,
 } err_t;
 
 #endif /* #ifndef GANON_ERR_H */

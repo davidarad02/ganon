@@ -1,10 +1,10 @@
-#ifndef GANON_SKIN_UDP_QUIC_H
-#define GANON_SKIN_UDP_QUIC_H
+#ifndef GANON_SKINS_SKIN_UDP_QUIC_H
+#define GANON_SKINS_SKIN_UDP_QUIC_H
 
-#include "err.h"
 #include "skin.h"
 
+/* Public functions to get the skin operations and register the skin. */
 const skin_ops_t *SKIN_UDP_QUIC__ops(void);
-err_t             SKIN_UDP_QUIC__register(void);
+err_t SKIN_UDP_QUIC__register(void);
 
-#endif /* GANON_SKIN_UDP_QUIC_H */
+#endif /* #ifndef GANON_SKINS_SKIN_UDP_QUIC_H */

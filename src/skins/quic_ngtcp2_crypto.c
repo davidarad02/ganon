@@ -1,16 +1,16 @@
 /*
- * ngtcp2 picotls crypto backend — mbedTLS variant (quic2 fork).
+ * ngtcp2 picotls crypto backend — mbedTLS variant (quic fork).
  *
  * Forked from ngtcp2_crypto_picotls_mbedtls.c so that both the old
- * udp-quic skin and the new udp-quic2 skin can coexist in the same binary
- * without duplicate-symbol errors.  When udp-quic2 is compiled this file
+ * udp-quic skin and the new udp-quic skin can coexist in the same binary
+ * without duplicate-symbol errors.  When udp-quic is compiled this file
  * replaces ngtcp2_crypto_picotls_mbedtls.c; the old udp-quic skin continues
  * to work because the public symbol names are identical.
  *
  * The only functional change versus the original: stable crypto-data buffers
  * are stored in a process-wide linked list keyed by ngtcp2_conn* rather than
  * inside the per-skin-context struct.  This avoids any dependency on which
- * skin context struct is in use.  Call quic2_crypto_free_conn_data(conn) from
+ * skin context struct is in use.  Call quic_crypto_free_conn_data(conn) from
  * transport_destroy to release them.
  *
  * Combined with ngtcp2/crypto/shared.c (compiled separately) this fully
@@ -28,7 +28,7 @@
 #include <picotls.h>
 #include <picotls/mbedtls.h>
 #include "logging.h"
-#include "quic2_ngtcp2_crypto.h"
+#include "quic_ngtcp2_crypto.h"
 
 /* ── Constants ─────────────────────────────────────────────────────────── */
 
@@ -45,21 +45,21 @@ ngtcp2_crypto_aead *ngtcp2_crypto_aead_init(ngtcp2_crypto_aead *aead,
 
 /* ── Process-wide stable crypto-buffer list ────────────────────────────── */
 
-typedef struct quic2_cbuf {
+typedef struct quic_cbuf {
     ngtcp2_conn       *conn;
     uint8_t           *buf;
-    struct quic2_cbuf *next;
-} quic2_cbuf_t;
+    struct quic_cbuf *next;
+} quic_cbuf_t;
 
-static quic2_cbuf_t      *g_cbuf_head = NULL;
+static quic_cbuf_t      *g_cbuf_head = NULL;
 static pthread_mutex_t    g_cbuf_lock = PTHREAD_MUTEX_INITIALIZER;
 
-void quic2_crypto_free_conn_data(ngtcp2_conn *conn) {
+void quic_crypto_free_conn_data(ngtcp2_conn *conn) {
     pthread_mutex_lock(&g_cbuf_lock);
-    quic2_cbuf_t **curr = &g_cbuf_head;
+    quic_cbuf_t **curr = &g_cbuf_head;
     while (*curr) {
         if ((*curr)->conn == conn) {
-            quic2_cbuf_t *e = *curr;
+            quic_cbuf_t *e = *curr;
             *curr = e->next;
             free(e->buf);
             free(e);
@@ -329,8 +329,8 @@ int ngtcp2_crypto_read_write_crypto_data(
 
     assert(i != 1);
 
-    /* Allocate stable storage; freed by quic2_crypto_free_conn_data(conn). */
-    quic2_cbuf_t *stable = malloc(sizeof(*stable));
+    /* Allocate stable storage; freed by quic_crypto_free_conn_data(conn). */
+    quic_cbuf_t *stable = malloc(sizeof(*stable));
     if (stable == NULL) { rv = -1; goto fin; }
     stable->buf = malloc(epoch_datalen);
     if (stable->buf == NULL) { free(stable); rv = -1; goto fin; }

@@ -4,13 +4,15 @@ udp-quic skin (Python client side).
 Uses aioquic for the QUIC transport.  Mirrors the C skin's framing:
   [4 bytes big-endian frame length][frame bytes]
 
-TLS: self-signed certificate for the server is NOT verified (ganon
-authentication is handled at the protocol layer via node IDs).
+ALPN: "ganon" (matches the C skin).
+TLS: server certificate is NOT verified — ganon authentication is at the
+protocol layer via node IDs.
 
-Requires: aioquic  (`pip install aioquic`)
+Requires: aioquic  (pip install aioquic)
 """
 
 import asyncio
+import contextlib
 import ssl
 import struct
 from typing import Optional
@@ -18,16 +20,14 @@ from typing import Optional
 from aioquic.asyncio import connect as quic_connect
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.quic.configuration import QuicConfiguration
-from aioquic.quic.events import HandshakeCompleted, StreamDataReceived
+from aioquic.quic.events import HandshakeCompleted, StreamDataReceived, ConnectionTerminated
 
 from ganon_client.skin import NetworkSkin, NetworkSkinImpl, register_skin
 
 
-# ── Protocol implementation ────────────────────────────────────────────────── #
+# ── Protocol implementation ─────────────────────────────────────────────── #
 
 class _GanonQuicProtocol(QuicConnectionProtocol):
-    """Per-connection QUIC protocol handler for ganon."""
-
     ALPN = "ganon"
 
     def __init__(self, *args, **kwargs):
@@ -36,33 +36,34 @@ class _GanonQuicProtocol(QuicConnectionProtocol):
         self._rx_buf = bytearray()
         self._rx_ready: asyncio.Queue = asyncio.Queue()
         self._handshake_done: asyncio.Event = asyncio.Event()
+        self._closed = False
 
     def quic_event_received(self, event):
         if isinstance(event, HandshakeCompleted):
             self._stream_id = self._quic.get_next_available_stream_id()
-            print(f"[QUIC CLIENT] Handshake Completed, assigned stream {self._stream_id}")
             self._handshake_done.set()
 
         elif isinstance(event, StreamDataReceived):
-            print(f"[QUIC CLIENT] StreamDataReceived({event.stream_id}): {len(event.data)} bytes")
             self._rx_buf += event.data
             self._drain_frames()
+
+        elif isinstance(event, ConnectionTerminated):
+            self._closed = True
+            # Wake any waiting recv so it can return None
+            self._rx_ready.put_nowait(None)
 
     def _drain_frames(self):
         while len(self._rx_buf) >= 4:
             frame_len = struct.unpack_from(">I", self._rx_buf)[0]
-            print(f"[QUIC CLIENT] drain: buf_len={len(self._rx_buf)}, frame_len={frame_len}, hex={self._rx_buf[:16].hex()}")
             if frame_len < 36 or frame_len > 300_000:
-                print(f"[QUIC CLIENT] drain: closing due to invalid frame_len={frame_len}")
                 self._rx_buf.clear()
+                self._rx_ready.put_nowait(None)
                 return
             total = 4 + frame_len
             if len(self._rx_buf) < total:
-                print(f"[QUIC CLIENT] drain: need {total} bytes, have {len(self._rx_buf)}")
                 break
             frame = bytes(self._rx_buf[4:total])
             del self._rx_buf[:total]
-            print(f"[QUIC CLIENT] drain: delivering frame of {len(frame)} bytes")
             self._rx_ready.put_nowait(frame)
 
     async def wait_connected(self, timeout: Optional[float] = None) -> None:
@@ -72,8 +73,11 @@ class _GanonQuicProtocol(QuicConnectionProtocol):
             await self._handshake_done.wait()
 
     def send_frame(self, plaintext: bytes) -> None:
-        header = struct.pack(">I", len(plaintext))
-        self._quic.send_stream_data(self._stream_id, header + plaintext)
+        if self._stream_id is None or self._closed:
+            raise ConnectionError("QUIC connection not ready")
+        self._quic.send_stream_data(
+            self._stream_id, struct.pack(">I", len(plaintext)) + plaintext
+        )
         self.transmit()
 
     async def recv_frame(self) -> Optional[bytes]:
@@ -83,13 +87,14 @@ class _GanonQuicProtocol(QuicConnectionProtocol):
             return None
 
 
-# ── Skin implementation ────────────────────────────────────────────────────── #
+# ── Skin implementation ─────────────────────────────────────────────────── #
 
 class UdpQuicSkin(NetworkSkinImpl):
-    """QUIC transport skin — UDP with TLS 1.3, no server cert verification."""
+    """QUIC transport skin using ngtcp2-compatible ALPN 'ganon'."""
 
-    def __init__(self, protocol: _GanonQuicProtocol):
+    def __init__(self, protocol: _GanonQuicProtocol, exit_stack):
         self._proto = protocol
+        self._exit_stack = exit_stack
 
     @classmethod
     async def open(cls, ip: str, port: int, timeout: float) -> "UdpQuicSkin":
@@ -100,6 +105,7 @@ class UdpQuicSkin(NetworkSkinImpl):
             server_name=ip,
         )
 
+        exit_stack = contextlib.AsyncExitStack()
         try:
             ctx = quic_connect(
                 ip,
@@ -107,16 +113,16 @@ class UdpQuicSkin(NetworkSkinImpl):
                 configuration=config,
                 create_protocol=_GanonQuicProtocol,
             )
-            protocol = await ctx.__aenter__()
+            protocol = await exit_stack.enter_async_context(ctx)
             await protocol.wait_connected(timeout=timeout)
-            skin = cls(protocol)
-            skin._ctx = ctx
-            return skin
+            return cls(protocol, exit_stack)
         except asyncio.TimeoutError:
+            await exit_stack.aclose()
             raise ConnectionError(
                 f"QUIC connect to {ip}:{port} timed out after {timeout}s"
             )
         except Exception as e:
+            await exit_stack.aclose()
             raise ConnectionError(
                 f"QUIC connect to {ip}:{port} failed: {e}"
             ) from e
@@ -134,16 +140,12 @@ class UdpQuicSkin(NetworkSkinImpl):
             return None
 
     def shutdown(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self._proto.close()
-        except Exception:
-            pass
 
     def close(self) -> None:
-        try:
+        with contextlib.suppress(Exception):
             self._proto.close()
-        except Exception:
-            pass
 
 
 register_skin(NetworkSkin.UDP_QUIC, UdpQuicSkin)

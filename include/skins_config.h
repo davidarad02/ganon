@@ -29,10 +29,6 @@
 #define SKIN_ENABLE_SSH         1   /* tcp-ssh: SSH transport via libssh                       */
 #endif
 #ifndef SKIN_ENABLE_QUIC
-#define SKIN_ENABLE_QUIC        0   /* udp-quic: QUIC (ngtcp2+picotls) — x64 native only       */
+#define SKIN_ENABLE_QUIC        1   /* udp-quic: QUIC (ngtcp2+picotls-mbedtls) — all architectures */
 #endif
-#ifndef SKIN_ENABLE_QUIC2
-#define SKIN_ENABLE_QUIC2       1   /* udp-quic2: QUIC (ngtcp2+picotls-mbedtls) — all arches   */
-#endif
-
 #endif /* GANON_SKINS_CONFIG_H */

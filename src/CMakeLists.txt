@@ -20,7 +20,6 @@ skin_enabled(SKIN_ENABLE_XOR        SKIN_XOR)
 skin_enabled(SKIN_ENABLE_CHACHA20   SKIN_CHACHA20)
 skin_enabled(SKIN_ENABLE_SSH        SKIN_SSH)
 skin_enabled(SKIN_ENABLE_QUIC       SKIN_QUIC)
-skin_enabled(SKIN_ENABLE_QUIC2     SKIN_QUIC2)
 
 # ── Base sources ───────────────────────────────────────────────────────────
 
@@ -81,68 +80,32 @@ else()
     set(LIB_SUFFIX "-arm")
 endif()
 
-# ── QUIC skins (ngtcp2 + picotls-mbedtls backend) ────────────────────────
+# ── QUIC skin (ngtcp2 + picotls-mbedtls backend, all architectures) ──────
 
 set(NGTCP2_ROOT "${CMAKE_SOURCE_DIR}/third_party/ngtcp2-install")
 set(PICOTLS_ROOT "${CMAKE_SOURCE_DIR}/third_party/picotls-install")
 set(USE_QUIC_SKIN FALSE)
-set(USE_QUIC2_SKIN FALSE)
 
-if(SKIN_QUIC OR SKIN_QUIC2)
+if(SKIN_QUIC)
     if(EXISTS "${NGTCP2_ROOT}/lib/libngtcp2${LIB_SUFFIX}.a" AND
        EXISTS "${PICOTLS_ROOT}/lib/libpicotls-mbedtls${LIB_SUFFIX}.a")
 
-        # ngtcp2 shared crypto helpers — compiled once regardless of which skins
         list(APPEND SOURCES
+            skins/skin_udp_quic.c
+            skins/quic_tls.c
+            skins/quic_ngtcp2_crypto.c
             "${CMAKE_SOURCE_DIR}/third_party/ngtcp2/crypto/shared.c"
         )
-
-        if(SKIN_QUIC)
-            list(APPEND SOURCES skins/skin_udp_quic.c)
-            set(USE_QUIC_SKIN TRUE)
-            add_compile_definitions(SKIN_QUIC_USE_MBEDTLS=1)
-            message(STATUS "Skin enabled: udp-quic (ngtcp2+picotls-mbedtls${LIB_SUFFIX})")
-        else()
-            message(STATUS "Skin disabled: udp-quic")
-        endif()
-
-        if(SKIN_QUIC2)
-            list(APPEND SOURCES
-                skins/skin_udp_quic2.c
-                skins/quic2_tls.c
-            )
-            set(USE_QUIC2_SKIN TRUE)
-            message(STATUS "Skin enabled: udp-quic2 (ngtcp2+picotls-mbedtls${LIB_SUFFIX})")
-        else()
-            message(STATUS "Skin disabled: udp-quic2")
-        endif()
-
-        # picotls↔ngtcp2 adapter — use the quic2 fork whenever quic2 is present,
-        # otherwise use the original.  Never compile both (duplicate symbols).
-        if(SKIN_QUIC2)
-            list(APPEND SOURCES skins/quic2_ngtcp2_crypto.c)
-        else()
-            list(APPEND SOURCES skins/ngtcp2_crypto_picotls_mbedtls.c)
-        endif()
+        set(USE_QUIC_SKIN TRUE)
+        message(STATUS "Skin enabled: udp-quic (ngtcp2+picotls-mbedtls${LIB_SUFFIX})")
 
     else()
-        if(SKIN_QUIC)
-            message(WARNING "Skin udp-quic enabled but ngtcp2/picotls-mbedtls${LIB_SUFFIX} not built — skipped. Run 'make ngtcp2'.")
-        endif()
-        if(SKIN_QUIC2)
-            message(WARNING "Skin udp-quic2 enabled but ngtcp2/picotls-mbedtls${LIB_SUFFIX} not built — skipped. Run 'make ngtcp2'.")
-            # Stub so SKIN_UDP_QUIC2__register / __ops symbols are present
-            list(APPEND SOURCES skins/skin_udp_quic2_stub.c)
-        endif()
+        message(WARNING "Skin udp-quic enabled but ngtcp2/picotls-mbedtls${LIB_SUFFIX} not built — skipped. Run 'make ngtcp2'.")
+        list(APPEND SOURCES skins/skin_udp_quic_stub.c)
     endif()
 else()
     message(STATUS "Skin disabled: udp-quic")
-    message(STATUS "Skin disabled: udp-quic2")
-endif()
-
-# Stub for quic2 when the skin was disabled entirely (not just missing libs)
-if(NOT SKIN_QUIC2 AND NOT USE_QUIC2_SKIN)
-    list(APPEND SOURCES skins/skin_udp_quic2_stub.c)
+    list(APPEND SOURCES skins/skin_udp_quic_stub.c)
 endif()
 
 if(SKIN_SSH)
@@ -204,7 +167,7 @@ endif()
 
 # ── Optional ngtcp2 + picotls-mbedtls (any QUIC skin) ─────────────────────
 
-if(USE_QUIC_SKIN OR USE_QUIC2_SKIN)
+if(USE_QUIC_SKIN)
     target_include_directories(${TARGET_NAME} PRIVATE
         ${NGTCP2_ROOT}/include
         ${PICOTLS_ROOT}/include

@@ -694,7 +694,7 @@ Errors are defined in `include/err.h` as enum `err_t`:
   - session: 0x401-0x4FF
   - routing: 0x501-0x5FF
   - crypto: 0x601-0x6FF
-  - udp-quic2 skin: 0x700-0x7FF
+  - udp-quic skin: 0x700-0x7FF
 
 ## Skin Abstraction
 
@@ -974,15 +974,14 @@ Available skins:
 - `NetworkSkin.TCP_XOR` (id=3) — TCP + X25519 + repeating-key XOR
 - `NetworkSkin.TCP_CHACHA20` (id=4) — TCP + X25519 + ChaCha20 stream
 - `NetworkSkin.TCP_SSH` (id=5) — TCP + libssh
-- `NetworkSkin.UDP_QUIC` (id=6) — broken, kept for reference
-- `NetworkSkin.UDP_QUIC2` (id=7) — UDP + QUIC (ngtcp2 + picotls/mbedTLS), ALPN "ganon-q2", working
+- `NetworkSkin.UDP_QUIC` (id=6) — UDP + QUIC (ngtcp2 + picotls/mbedTLS), ALPN "ganon", working on all architectures
 
 ```python
 # Use the unencrypted plain TCP skin (useful for debugging)
 c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.TCP_PLAIN)
 
-# Use the working QUIC skin (requires aioquic + cryptography packages)
-c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.UDP_QUIC2)
+# Use the QUIC skin (requires aioquic + cryptography packages)
+c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.UDP_QUIC)
 ```
 
 ### Exception Policy

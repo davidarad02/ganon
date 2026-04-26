@@ -1,11 +1,11 @@
 /*
- * quic2 TLS helper — generates a self-signed ECDSA P-256 certificate in
+ * quic TLS helper — generates a self-signed ECDSA P-256 certificate in
  * memory using mbedTLS and wires it into a picotls server context.
  *
- * Called once from quic2 listener_create; never on the hot path.
+ * Called once from quic listener_create; never on the hot path.
  */
 
-#include "quic2_tls.h"
+#include "quic_tls.h"
 
 #include <mbedtls/ecp.h>
 #include <mbedtls/x509_crt.h>
@@ -14,12 +14,12 @@
 
 /* ── Signing callback for picotls ─────────────────────────────────────── */
 
-static int quic2_sign_cb(ptls_sign_certificate_t *_self,
+static int quic_sign_cb(ptls_sign_certificate_t *_self,
                           ptls_t *tls, ptls_async_job_t **async,
                           uint16_t *selected_algo,
                           ptls_buffer_t *outbuf, ptls_iovec_t input,
                           const uint16_t *algorithms, size_t num_algorithms) {
-    quic2_sign_cert_t *self = (quic2_sign_cert_t *)_self;
+    quic_sign_cert_t *self = (quic_sign_cert_t *)_self;
     size_t i;
     int ret;
     int found = 0;
@@ -75,8 +75,8 @@ done:
 
 /* ── Public entry point ────────────────────────────────────────────────── */
 
-int quic2_tls_listener_init(ptls_context_t          *tls_ctx,
-                             quic2_sign_cert_t       *sign_cert,
+int quic_tls_listener_init(ptls_context_t          *tls_ctx,
+                             quic_sign_cert_t       *sign_cert,
                              mbedtls_pk_context      *pkey,
                              ptls_key_exchange_algorithm_t **key_ex,
                              ptls_cipher_suite_t           **ciphers,
@@ -87,7 +87,7 @@ int quic2_tls_listener_init(ptls_context_t          *tls_ctx,
     mbedtls_x509write_cert   crt;
     mbedtls_entropy_context  entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
-    const char *pers = "ganon_quic2_gen_cert";
+    const char *pers = "ganon_quic_gen_cert";
     unsigned char cert_buf[4096];
     int cert_len;
 
@@ -116,8 +116,8 @@ int quic2_tls_listener_init(ptls_context_t          *tls_ctx,
         mbedtls_x509write_crt_set_serial_raw(&crt, serial, sizeof(serial));
     }
     mbedtls_x509write_crt_set_validity(&crt, "20200101000000", "20501231235959");
-    mbedtls_x509write_crt_set_subject_name(&crt, "CN=ganon-q2");
-    mbedtls_x509write_crt_set_issuer_name(&crt,  "CN=ganon-q2");
+    mbedtls_x509write_crt_set_subject_name(&crt, "CN=ganon");
+    mbedtls_x509write_crt_set_issuer_name(&crt,  "CN=ganon");
     mbedtls_x509write_crt_set_subject_key(&crt, pkey);
     mbedtls_x509write_crt_set_issuer_key(&crt,  pkey);
 
@@ -136,7 +136,7 @@ int quic2_tls_listener_init(ptls_context_t          *tls_ctx,
     cert_iov->len  = *cert_der_len;
 
     /* Wire up signing callback */
-    sign_cert->super.cb = quic2_sign_cb;
+    sign_cert->super.cb = quic_sign_cb;
     sign_cert->key      = pkey;
 
     /* picotls TLS context */
