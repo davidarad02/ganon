@@ -132,6 +132,34 @@ class Tunnel:
     def is_up(self) -> bool:
         return self._up and self._client.is_connected()
 
+    @property
+    def src_node_id(self) -> int:
+        return self._src_node_id
+
+    @property
+    def dst_node_id(self) -> int:
+        return self._dst_node_id
+
+    @property
+    def src_host(self) -> str:
+        return self._src_host
+
+    @property
+    def src_port(self) -> int:
+        return self._src_port
+
+    @property
+    def remote_host(self) -> str:
+        return self._remote_host
+
+    @property
+    def remote_port(self) -> int:
+        return self._remote_port
+
+    @property
+    def protocol(self) -> str:
+        return "udp" if self._protocol == TUNNEL_PROTO_UDP else "tcp"
+
     def close(self, force: bool = False):
         """Close the tunnel.
         
@@ -261,6 +289,21 @@ class NodeClient:
     def __getattr__(self, name):
         """Proxy everything else to the underlying client."""
         return getattr(self._client, name)
+
+    @property
+    def tunnels(self) -> list:
+        """List of all tunnels where this node is either the source or destination."""
+        return self._client.get_tunnels_for_node(self.node_id)
+
+    @property
+    def ingresses(self) -> list:
+        """List of tunnels where this node is listening on a port (src side)."""
+        return self._client.get_ingresses_for_node(self.node_id)
+
+    @property
+    def egresses(self) -> list:
+        """List of tunnels where this node connects to a remote addr:port (dst side)."""
+        return self._client.get_egresses_for_node(self.node_id)
 
     def __repr__(self) -> str:
         return f"NodeClient(node_id={self.node_id}, client={self._client!r})"
@@ -889,6 +932,35 @@ class GanonClient:
         if verify:
             self.ping(node_id, timeout=timeout)
         return NodeClient(self, node_id)
+
+    @property
+    def tunnels(self) -> list:
+        """List of all tunnels created via this client."""
+        with self._tunnel_lock:
+            return list(self._tunnels.values())
+
+    def get_tunnels_for_node(self, node_id: int) -> list:
+        """List of all tunnels where this node is either the source or destination."""
+        with self._tunnel_lock:
+            return [t for t in self._tunnels.values() if t._src_node_id == node_id or t._dst_node_id == node_id]
+
+    def get_ingresses_for_node(self, node_id: int) -> list:
+        """List of tunnels where this node is listening on a port (src side).
+        
+        The src_node_id is the node that listens on src_host:src_port and forwards
+        traffic to the remote node.
+        """
+        with self._tunnel_lock:
+            return [t for t in self._tunnels.values() if t._src_node_id == node_id]
+
+    def get_egresses_for_node(self, node_id: int) -> list:
+        """List of tunnels where this node connects to a remote addr:port (dst side).
+        
+        The dst_node_id is the node that connects to remote_host:remote_port and
+        receives traffic from the source node.
+        """
+        with self._tunnel_lock:
+            return [t for t in self._tunnels.values() if t._dst_node_id == node_id]
 
     def is_connected(self) -> bool:
         with self._lock:

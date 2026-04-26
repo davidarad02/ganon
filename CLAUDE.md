@@ -55,11 +55,11 @@ make clean-musl         # removes musl installs
 
 After build, binaries are in `bin/`. A convenience symlink `ganon` points to `ganon_<version>_x64_debug` for local dev.
 
-**Binary sizes (approximate, all skins):**
-- x64 release: ~5.7 MB (glibc + OpenSSL + ngtcp2 + picotls for QUIC)
-- ARM release: ~630 KB (musl + mbedTLS + dead-stripping; no QUIC)
-- ARMv7 release: ~635 KB
-- MIPS32BE release: ~965 KB
+**Binary sizes (approximate, all skins including udp-quic2):**
+- x64 release: ~6.1 MB (glibc + OpenSSL + ngtcp2 + picotls)
+- ARM release: ~957 KB (musl + mbedTLS + ngtcp2 + picotls for QUIC2)
+- ARMv7 release: ~957 KB
+- MIPS32BE release: ~1.5 MB
 
 **Third-party rebuild note**: `make clean` only removes ganon binaries. To force rebuild of libssh or mbedTLS, remove the install directory (e.g., `rm -rf third_party/libssh-install-arm`) and run `make arm`.
 
@@ -97,7 +97,8 @@ See binary with `./ganon -h` for all options (load balancing strategy, timeouts,
 - `tcp-plain`: Unencrypted TCP with length-prefixed raw protocol frames (useful for debugging)
 - `tcp-xor`: X25519 handshake + repeating-key XOR obfuscation (not secure, but per-connection obfuscation)
 - `tcp-ssh`: TCP + libssh (server-side ephemeral Ed25519 host key, "none" auth, "ganon" subsystem channel)
-- `udp-quic`: UDP + QUIC (ngtcp2 v1.12.0 + picotls with OpenSSL crypto backend, TLS 1.3, self-signed ECDSA P-256 cert, "ganon" ALPN)
+- `udp-quic`: UDP + QUIC (ngtcp2 v1.12.0 + picotls with OpenSSL crypto backend, TLS 1.3, self-signed ECDSA P-256 cert, "ganon" ALPN) — **broken/reference only**
+- `udp-quic2`: UDP + QUIC (ngtcp2 v1.12.0 + picotls with mbedTLS backend, TLS 1.3, in-memory self-signed ECDSA P-256 cert, "ganon-q2" ALPN, skin id=7) — **working, all architectures**
 
 Skins are controlled by `include/skins_config.h` — each macro is guarded by `#ifndef` so CMake can override via `-D` flags on the command line. CMake reads these macros at configure time via `file(STRINGS ...)`.
 
@@ -107,10 +108,16 @@ TCP-SSH skin availability by architecture:
 - MIPS32BE: libssh with mbedTLS backend (from `third_party/libssh-install-mips32be`)
 
 UDP-QUIC skin availability:
-- **x64 only** — requires ngtcp2 + picotls-openssl + system OpenSSL. Automatically disabled on cross-compile targets via `-DSKIN_ENABLE_QUIC=0` compile definition.
-- Third-party libraries: `third_party/ngtcp2-install` + `third_party/picotls-install`
+- **x64 only** — broken, kept for reference. Requires ngtcp2 + picotls-openssl + system OpenSSL. Automatically disabled on cross-compile targets.
 - Build: `make ngtcp2` (depends on `make picotls` which depends on system OpenSSL 1.1.1+)
 - Clean: `make clean-quic`
+
+UDP-QUIC2 skin availability:
+- **All architectures** (x64, ARMv5, ARMv7, MIPS32BE)
+- Uses mbedTLS backend for picotls; cross-compile builds ngtcp2 core only (`ENABLE_PICOTLS=OFF`) since the ganon-side crypto adapter is in-tree (`quic2_ngtcp2_crypto.c`)
+- Third-party libraries: `third_party/ngtcp2-install` + `third_party/picotls-install` (shared with udp-quic)
+- Build cross-compile libs: `make picotls-arm ngtcp2-arm picotls-mips32be ngtcp2-mips32be`
+- Error range: `0x700–0x7FF`
 
 ## Critical Conventions
 
@@ -260,8 +267,11 @@ c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.TCP_PLAIN)
 # XOR-obfuscated skin (per-connection obfuscation, not secure)
 c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.TCP_XOR)
 
-# QUIC (UDP + TLS 1.3) — requires aioquic; server must have udp-quic skin enabled
+# QUIC v1 (UDP + TLS 1.3) — broken, kept for reference
 c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.UDP_QUIC)
+
+# QUIC v2 (UDP + TLS 1.3, mbedTLS) — working; requires aioquic + cryptography; server must have udp-quic2 skin enabled
+c = GanonClient("127.0.0.1", 5555, 99, skin=NetworkSkin.UDP_QUIC2)
 ```
 
 Key methods: `connect()`, `disconnect()`, `send_to_node()`, `ping()`, `create_tunnel()`. The `Tunnel` object returned by `create_tunnel()` has `is_up` property and `close()` method.

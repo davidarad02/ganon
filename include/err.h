@@ -50,6 +50,15 @@ typedef enum {
     E__CRYPTO__HANDSHAKE_FAILED = 0x601,
     E__CRYPTO__DECRYPT_FAILED,
     E__CRYPTO__REPLAY_DETECTED,
+
+    /* quic2 */
+    E__QUIC2__HANDSHAKE_FAILED = 0x700,
+    E__QUIC2__INIT_FAILED,
+    E__QUIC2__RECV_FAILED,
+    E__QUIC2__SEND_FAILED,
+    E__QUIC2__CONN_CLOSED,
+    E__QUIC2__ALLOC_FAILED,
+    E__QUIC2__BAD_FRAME_LEN,
 } err_t;
 
 #endif /* #ifndef GANON_ERR_H */

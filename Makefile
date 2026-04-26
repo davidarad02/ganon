@@ -324,7 +324,7 @@ libssh-mips32be: mbedtls-mips32be
 picotls-arm: mbedtls-arm
 	@if [ ! -f "$(PICOTLS_INSTALL)/lib/libpicotls-mbedtls-arm.a" ]; then \
 		echo "Building picotls for ARM..."; \
-		cmake -B build-arm \
+		cd $(PICOTLS_SRC) && cmake -B build-arm \
 			-S . \
 			-DCMAKE_SYSTEM_NAME=Linux \
 			-DCMAKE_SYSTEM_PROCESSOR=arm \
@@ -337,12 +337,13 @@ picotls-arm: mbedtls-arm
 			-DWITH_OPENSSL=OFF \
 			-DWITH_MBEDTLS=ON \
 			-DMBEDTLS_INCLUDE_DIRS=$(PWD)/$(MBEDTLS_INSTALL_ARM)/include \
-			"-DMBEDTLS_LIBRARIES=$(PWD)/$(MBEDTLS_INSTALL_ARM)/lib/libmbedtls.a;$(PWD)/$(MBEDTLS_INSTALL_ARM)/lib/libmbedcrypto.a;$(PWD)/$(MBEDTLS_INSTALL_ARM)/lib/libmbedx509.a" && \
-
-		cmake --build $(PICOTLS_SRC)/build-arm --target picotls-core picotls-mbedtls -j$$(nproc) && \
-		mkdir -p $(PICOTLS_INSTALL)/lib && \
-		cp $(PICOTLS_SRC)/build-arm/libpicotls-core.a $(PICOTLS_INSTALL)/lib/libpicotls-core-arm.a && \
-		cp $(PICOTLS_SRC)/build-arm/libpicotls-mbedtls.a $(PICOTLS_INSTALL)/lib/libpicotls-mbedtls-arm.a; \
+			-DMBEDTLS_LIBRARY=$(PWD)/$(MBEDTLS_INSTALL_ARM)/lib/libmbedtls.a \
+			-DMBEDTLS_CRYPTO=$(PWD)/$(MBEDTLS_INSTALL_ARM)/lib/libmbedcrypto.a \
+			-DMBEDTLS_X509=$(PWD)/$(MBEDTLS_INSTALL_ARM)/lib/libmbedx509.a && \
+		cmake --build build-arm --target picotls-core picotls-mbedtls -j$$(nproc) && \
+		mkdir -p $(PWD)/$(PICOTLS_INSTALL)/lib && \
+		cp build-arm/libpicotls-core.a $(PWD)/$(PICOTLS_INSTALL)/lib/libpicotls-core-arm.a && \
+		cp build-arm/libpicotls-mbedtls.a $(PWD)/$(PICOTLS_INSTALL)/lib/libpicotls-mbedtls-arm.a; \
 	else \
 		echo "picotls (arm) already built."; \
 	fi
@@ -363,13 +364,12 @@ ngtcp2-arm: picotls-arm
 			-DENABLE_SHARED_LIB=OFF \
 			-DENABLE_STATIC_LIB=ON \
 			-DBUILD_TESTING=OFF \
-			-DENABLE_PICOTLS=ON \
-			-DPICOTLS_INCLUDE_DIR=$(PWD)/$(PICOTLS_INSTALL)/include \
-			"-DPICOTLS_LIBRARIES=$(PWD)/$(PICOTLS_INSTALL)/lib/libpicotls-mbedtls-arm.a;$(PWD)/$(PICOTLS_INSTALL)/lib/libpicotls-core-arm.a;$(PWD)/$(MBEDTLS_INSTALL_ARM)/lib/libmbedcrypto.a" \
+			-DENABLE_PICOTLS=OFF \
 			-DENABLE_GNUTLS=OFF \
 			-DENABLE_OPENSSL=OFF \
-			-DENABLE_WOLFSSL=OFF && \
-		cmake --build $(NGTCP2_SRC)/build-arm -j$$(nproc) && \
+			-DENABLE_WOLFSSL=OFF \
+			-DENABLE_LIB_ONLY=ON && \
+		cmake --build $(NGTCP2_SRC)/build-arm --target ngtcp2_static -j$$(nproc) && \
 		cp $(NGTCP2_SRC)/build-arm/lib/libngtcp2.a $(NGTCP2_INSTALL)/lib/libngtcp2-arm.a; \
 	else \
 		echo "ngtcp2 (arm) already built."; \
@@ -378,7 +378,7 @@ ngtcp2-arm: picotls-arm
 picotls-mips32be: mbedtls-mips32be
 	@if [ ! -f "$(PICOTLS_INSTALL)/lib/libpicotls-mbedtls-mips32be.a" ]; then \
 		echo "Building picotls for MIPS32BE..."; \
-		cmake -B build-mips32be \
+		cd $(PICOTLS_SRC) && cmake -B build-mips32be \
 			-S . \
 			-DCMAKE_SYSTEM_NAME=Linux \
 			-DCMAKE_SYSTEM_PROCESSOR=mips \
@@ -391,12 +391,13 @@ picotls-mips32be: mbedtls-mips32be
 			-DWITH_OPENSSL=OFF \
 			-DWITH_MBEDTLS=ON \
 			-DMBEDTLS_INCLUDE_DIRS=$(PWD)/$(MBEDTLS_INSTALL_MIPS)/include \
-			"-DMBEDTLS_LIBRARIES=$(PWD)/$(MBEDTLS_INSTALL_MIPS)/lib/libmbedtls.a;$(PWD)/$(MBEDTLS_INSTALL_MIPS)/lib/libmbedcrypto.a;$(PWD)/$(MBEDTLS_INSTALL_MIPS)/lib/libmbedx509.a" && \
-
-		cmake --build $(PICOTLS_SRC)/build-mips32be --target picotls-core picotls-mbedtls -j$$(nproc) && \
-		mkdir -p $(PICOTLS_INSTALL)/lib && \
-		cp $(PICOTLS_SRC)/build-mips32be/libpicotls-core.a $(PICOTLS_INSTALL)/lib/libpicotls-core-mips32be.a && \
-		cp $(PICOTLS_SRC)/build-mips32be/libpicotls-mbedtls.a $(PICOTLS_INSTALL)/lib/libpicotls-mbedtls-mips32be.a; \
+			-DMBEDTLS_LIBRARY=$(PWD)/$(MBEDTLS_INSTALL_MIPS)/lib/libmbedtls.a \
+			-DMBEDTLS_CRYPTO=$(PWD)/$(MBEDTLS_INSTALL_MIPS)/lib/libmbedcrypto.a \
+			-DMBEDTLS_X509=$(PWD)/$(MBEDTLS_INSTALL_MIPS)/lib/libmbedx509.a && \
+		cmake --build build-mips32be --target picotls-core picotls-mbedtls -j$$(nproc) && \
+		mkdir -p $(PWD)/$(PICOTLS_INSTALL)/lib && \
+		cp build-mips32be/libpicotls-core.a $(PWD)/$(PICOTLS_INSTALL)/lib/libpicotls-core-mips32be.a && \
+		cp build-mips32be/libpicotls-mbedtls.a $(PWD)/$(PICOTLS_INSTALL)/lib/libpicotls-mbedtls-mips32be.a; \
 	else \
 		echo "picotls (mips32be) already built."; \
 	fi
@@ -417,13 +418,12 @@ ngtcp2-mips32be: picotls-mips32be
 			-DENABLE_SHARED_LIB=OFF \
 			-DENABLE_STATIC_LIB=ON \
 			-DBUILD_TESTING=OFF \
-			-DENABLE_PICOTLS=ON \
-			-DPICOTLS_INCLUDE_DIR=$(PWD)/$(PICOTLS_INSTALL)/include \
-			"-DPICOTLS_LIBRARIES=$(PWD)/$(PICOTLS_INSTALL)/lib/libpicotls-mbedtls-mips32be.a;$(PWD)/$(PICOTLS_INSTALL)/lib/libpicotls-core-mips32be.a;$(PWD)/$(MBEDTLS_INSTALL_MIPS)/lib/libmbedcrypto.a" \
+			-DENABLE_PICOTLS=OFF \
 			-DENABLE_GNUTLS=OFF \
 			-DENABLE_OPENSSL=OFF \
-			-DENABLE_WOLFSSL=OFF && \
-		cmake --build $(NGTCP2_SRC)/build-mips32be -j$$(nproc) && \
+			-DENABLE_WOLFSSL=OFF \
+			-DENABLE_LIB_ONLY=ON && \
+		cmake --build $(NGTCP2_SRC)/build-mips32be --target ngtcp2_static -j$$(nproc) && \
 		cp $(NGTCP2_SRC)/build-mips32be/lib/libngtcp2.a $(NGTCP2_INSTALL)/lib/libngtcp2-mips32be.a; \
 	else \
 		echo "ngtcp2 (mips32be) already built."; \

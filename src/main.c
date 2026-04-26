@@ -33,7 +33,10 @@
 #include "skins/skin_tcp_ssh.h"
 #endif
 #if SKIN_ENABLE_QUIC
-#include "skins/skin_udp_quic.h"
+    #include "skins/skin_udp_quic.h"
+#endif
+#if SKIN_ENABLE_QUIC2
+    #include "skins/skin_udp_quic2.h"
 #endif
 
 static volatile sig_atomic_t g_shutdown_requested = 0;
@@ -64,6 +67,9 @@ int main(int argc, char *argv[]) {
 #endif
 #if SKIN_ENABLE_QUIC
     SKIN_UDP_QUIC__register();
+#endif
+#if SKIN_ENABLE_QUIC2
+    SKIN_UDP_QUIC2__register();
 #endif
 
     rc = ARGS__parse(&args, argc, argv);
