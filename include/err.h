@@ -59,6 +59,15 @@ typedef enum {
     E__QUIC__CONN_CLOSED,
     E__QUIC__ALLOC_FAILED,
     E__QUIC__BAD_FRAME_LEN,
+
+    /* tls (tcp-tls12/13 skins) */
+    E__TLS__HANDSHAKE_FAILED = 0x800,
+    E__TLS__INIT_FAILED,
+    E__TLS__RECV_FAILED,
+    E__TLS__SEND_FAILED,
+    E__TLS__CONN_CLOSED,
+    E__TLS__ALLOC_FAILED,
+    E__TLS__BAD_FRAME_LEN,
 } err_t;
 
 #endif /* #ifndef GANON_ERR_H */

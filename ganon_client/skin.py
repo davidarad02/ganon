@@ -10,6 +10,8 @@ class NetworkSkin(IntEnum):
     TCP_CHACHA20 = 4
     SSH = 5
     UDP_QUIC = 6
+    TCP_TLS13 = 8
+    TCP_TLS12 = 9
 
 
 class NetworkSkinImpl(ABC):

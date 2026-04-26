@@ -26,6 +26,8 @@ typedef enum {
     SKIN_ID__TCP_CHACHA20 = 4,
     SKIN_ID__SSH          = 5,
     SKIN_ID__QUIC         = 6,
+    SKIN_ID__TLS13        = 8,
+    SKIN_ID__TLS12        = 9,
 } skin_id_t;
 
 /* Vtable: every skin implements these. */

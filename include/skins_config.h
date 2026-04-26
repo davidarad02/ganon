@@ -31,4 +31,10 @@
 #ifndef SKIN_ENABLE_QUIC
 #define SKIN_ENABLE_QUIC        1   /* udp-quic: QUIC (ngtcp2+picotls-mbedtls) — all architectures */
 #endif
+#ifndef SKIN_ENABLE_TLS13
+#define SKIN_ENABLE_TLS13       1   /* tcp-tls13: TCP + TLS 1.3 via mbedTLS (ALPN "tls13-ganon")  */
+#endif
+#ifndef SKIN_ENABLE_TLS12
+#define SKIN_ENABLE_TLS12       1   /* tcp-tls12: TCP + TLS 1.2 via mbedTLS (no ALPN)              */
+#endif
 #endif /* GANON_SKINS_CONFIG_H */

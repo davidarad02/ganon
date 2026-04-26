@@ -20,6 +20,8 @@ skin_enabled(SKIN_ENABLE_XOR        SKIN_XOR)
 skin_enabled(SKIN_ENABLE_CHACHA20   SKIN_CHACHA20)
 skin_enabled(SKIN_ENABLE_SSH        SKIN_SSH)
 skin_enabled(SKIN_ENABLE_QUIC       SKIN_QUIC)
+skin_enabled(SKIN_ENABLE_TLS13     SKIN_TLS13)
+skin_enabled(SKIN_ENABLE_TLS12     SKIN_TLS12)
 
 # ── Base sources ───────────────────────────────────────────────────────────
 
@@ -108,6 +110,34 @@ else()
     list(APPEND SOURCES skins/skin_udp_quic_stub.c)
 endif()
 
+# ── TLS skins (tcp-tls13, tcp-tls12) — shared tls_common.c ───────────────
+
+set(USE_MBEDTLS_TLS_SKIN FALSE)
+
+if(SKIN_TLS13 OR SKIN_TLS12)
+    if(EXISTS "${MBEDTLS_ROOT}/lib/libmbedtls.a")
+        if(SKIN_TLS13)
+            list(APPEND SOURCES skins/skin_tcp_tls13.c)
+            message(STATUS "Skin enabled: tcp-tls13")
+        else()
+            message(STATUS "Skin disabled: tcp-tls13")
+        endif()
+        if(SKIN_TLS12)
+            list(APPEND SOURCES skins/skin_tcp_tls12.c)
+            message(STATUS "Skin enabled: tcp-tls12")
+        else()
+            message(STATUS "Skin disabled: tcp-tls12")
+        endif()
+        list(APPEND SOURCES skins/tls_common.c)
+        set(USE_MBEDTLS_TLS_SKIN TRUE)
+    else()
+        message(WARNING "TLS skins enabled but mbedTLS not built at ${MBEDTLS_ROOT} — skipped. Run 'make mbedtls-arm' or equivalent.")
+    endif()
+else()
+    message(STATUS "Skin disabled: tcp-tls13")
+    message(STATUS "Skin disabled: tcp-tls12")
+endif()
+
 if(SKIN_SSH)
     if(EXISTS "${LIBSSH_ROOT}/lib/libssh.a")
         list(APPEND SOURCES skins/skin_tcp_ssh.c)
@@ -184,6 +214,23 @@ if(USE_QUIC_SKIN)
         "${MBEDTLS_ROOT}/lib/libmbedcrypto.a"
         dl
     )
+endif()
+
+# ── Optional mbedTLS for TLS skins (only when not already linked by QUIC/SSH) ──
+
+if(USE_MBEDTLS_TLS_SKIN AND NOT USE_QUIC_SKIN)
+    # SSH with mbedTLS backend also links mbedTLS; avoid double-linking.
+    if(NOT (USE_LIBSSH_SKIN AND LIBSSH_CRYPTO_BACKEND STREQUAL "mbedtls"))
+        target_include_directories(${TARGET_NAME} PRIVATE ${MBEDTLS_ROOT}/include)
+        target_link_libraries(${TARGET_NAME}
+            "${MBEDTLS_ROOT}/lib/libmbedtls.a"
+            "${MBEDTLS_ROOT}/lib/libmbedx509.a"
+            "${MBEDTLS_ROOT}/lib/libmbedcrypto.a"
+        )
+    endif()
+elseif(USE_MBEDTLS_TLS_SKIN)
+    # mbedTLS include dir may not be set yet if QUIC handled it first; ensure it is.
+    target_include_directories(${TARGET_NAME} PRIVATE ${MBEDTLS_ROOT}/include)
 endif()
 
 if(DEFINED OUTPUT_DIR)

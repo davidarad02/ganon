@@ -35,6 +35,12 @@
 #if SKIN_ENABLE_QUIC
     #include "skins/skin_udp_quic.h"
 #endif
+#if SKIN_ENABLE_TLS13
+#include "skins/skin_tcp_tls13.h"
+#endif
+#if SKIN_ENABLE_TLS12
+#include "skins/skin_tcp_tls12.h"
+#endif
 
 static volatile sig_atomic_t g_shutdown_requested = 0;
 
@@ -64,6 +70,12 @@ int main(int argc, char *argv[]) {
 #endif
 #if SKIN_ENABLE_QUIC
     SKIN_UDP_QUIC__register();
+#endif
+#if SKIN_ENABLE_TLS13
+    SKIN_TCP_TLS13__register();
+#endif
+#if SKIN_ENABLE_TLS12
+    SKIN_TCP_TLS12__register();
 #endif
 
     rc = ARGS__parse(&args, argc, argv);
