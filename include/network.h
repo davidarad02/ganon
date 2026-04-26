@@ -44,6 +44,7 @@ struct network_t {
     socket_entry_t *clients;
     pthread_mutex_t clients_mutex;
     int             running;
+    int             pending_connects;
 
     addr_t *connect_addrs;   /* legacy pointer into args; skin_id in connect_entries */
     connect_entry_t *connect_entries;

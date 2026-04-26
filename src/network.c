@@ -168,6 +168,12 @@ static void *connect_and_run_thread(void *arg) {
             }
             if (retries_remaining == 0) {
                 LOG_WARNING("Failed to connect to %s:%d, giving up", ip, port);
+                pthread_mutex_lock(&net->clients_mutex);
+                net->pending_connects--;
+                pthread_mutex_unlock(&net->clients_mutex);
+                pthread_mutex_lock(&net->clients_mutex);
+                net->pending_connects--;
+                pthread_mutex_unlock(&net->clients_mutex);
                 FREE(arg);
                 return NULL;
             }
@@ -177,6 +183,15 @@ static void *connect_and_run_thread(void *arg) {
             continue;
         }
 
+        /* Successfully connected for the first time in this thread's lifecycle */
+        pthread_mutex_lock(&net->clients_mutex);
+        net->pending_connects--;
+        pthread_mutex_unlock(&net->clients_mutex);
+
+        /* Successfully connected for the first time in this thread's lifecycle */
+        pthread_mutex_lock(&net->clients_mutex);
+        net->pending_connects--;
+        pthread_mutex_unlock(&net->clients_mutex);
         socket_entry_t *entry = malloc(sizeof(socket_entry_t));
         if (NULL == entry) {
             LOG_ERROR("Failed to allocate socket entry");
@@ -264,6 +279,7 @@ err_t NETWORK__init(network_t *net, const args_t *args, int node_id,
     net->message_cb       = msg_cb;
     net->disconnected_cb  = disc_cb;
     net->connected_cb     = conn_cb;
+    net->pending_connects = args->connect_count;
 
     if (0 != pthread_mutex_init(&net->clients_mutex, NULL)) {
         LOG_ERROR("Failed to initialize mutex");

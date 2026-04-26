@@ -73,7 +73,6 @@ int main(int argc, char *argv[]) {
     if (sodium_init() < 0) {
         LOG_ERROR("libsodium initialization failed");
         FAIL(E__CRYPTO__HANDSHAKE_FAILED);
-    }
 #endif
 
     g_node_id = args.node_id;
@@ -103,27 +102,38 @@ int main(int argc, char *argv[]) {
     FAIL_IF(E__SUCCESS != rc, rc);
 
     LOG_INFO("Network initialized");
-    LOG_INFO("Node ID: %d", g_node_id);
+
+
+
+
+
+
+
     for (int i = 0; i < args.listener_count; i++) {
         LOG_INFO("Listen[%d]: %s:%d (skin_id=%u)", i,
                  args.listeners[i].addr.ip, args.listeners[i].addr.port,
                  args.listeners[i].skin_id);
-    }
     if (args.tcp_rcvbuf > 0) {
         LOG_INFO("TCP receive buffer: %d bytes", args.tcp_rcvbuf);
-    }
     if (args.file_chunk_size > 0) {
         LOG_INFO("File chunk size: %d bytes", args.file_chunk_size);
-    }
     for (int i = 0; i < args.connect_count; i++) {
         LOG_INFO("Connect[%d]: %s:%d (skin_id=%u)", i,
                  args.connect_addrs[i].addr.ip, args.connect_addrs[i].addr.port,
                  args.connect_addrs[i].skin_id);
-    }
 
     while (!g_shutdown_requested) {
+            pthread_mutex_lock(&g_network.clients_mutex);
+            int pending = g_network.pending_connects;
+            socket_entry_t *clients = g_network.clients;
+            pthread_mutex_unlock(&g_network.clients_mutex);
+
+            if (pending == 0 && clients == NULL) {
+                LOG_ERROR("All connection attempts failed and no listeners are configured. Exiting.");
+                g_shutdown_requested = 1;
+                break;
         sleep(1);
-    }
+        sleep(1);
 
     LOG_INFO("Shutdown requested, stopping network...");
     rc = NETWORK__shutdown(&g_network);

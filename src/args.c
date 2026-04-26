@@ -735,7 +735,7 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
     }
 
     /* If no explicit --listen entries, synthesise one from -p/--port */
-    if (!explicit_listen) {
+    if (!explicit_listen && port_set) {
         if (args_out->listener_count == 0) {
             args_out->listeners[0].addr.ip   = listen_ip;
             args_out->listeners[0].addr.port  = listen_port;
@@ -744,6 +744,11 @@ err_t ARGS__parse(args_t *args_out, int argc, char *argv[]) {
         }
     }
 
+
+    if (args_out->listener_count == 0 && args_out->connect_count == 0) {
+        LOG_ERROR("No listen port or connection addresses specified");
+        FAIL(E__ARGS__MISSING_REQUIRED_ARGUMENT);
+    }
     args_out->node_id          = node_id;
     args_out->connect_timeout  = connect_timeout;
     args_out->reconnect_retries = reconnect_retries;
