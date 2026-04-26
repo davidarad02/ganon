@@ -459,7 +459,7 @@ static void *quic_io_thread(void *arg) {
 
         struct pollfd fds[3];
         fds[0].fd     = ctx->udp_fd;
-        fds[0].events = POLLIN;
+        fds[0].events = POLLIN | POLLERR | POLLHUP;
         fds[1].fd     = ctx->tx_pipe[0];
         fds[1].events = POLLIN;
         fds[2].fd     = ctx->rx_pipe[1];
@@ -468,6 +468,14 @@ static void *quic_io_thread(void *arg) {
         poll(fds, 3, timeout_ms);
 
         now = quic_now();
+
+        if (fds[0].revents & (POLLERR | POLLHUP)) {
+            LOG_WARN("QUIC: udp_fd hangup or error detected");
+            ctx->io_running = 0;
+            if (ctx->rx_pipe[1] >= 0) close(ctx->rx_pipe[1]);
+            if (ctx->tx_pipe[0] >= 0) close(ctx->tx_pipe[0]);
+            continue;
+        }
 
         if (fds[2].revents & POLLOUT)
             quic_drain_stream_buf(ctx);
@@ -508,6 +516,13 @@ static void *quic_io_thread(void *arg) {
                         }
                     }
                     quic_flush_send(ctx);
+                } else if (n < 0) {
+                    if (EAGAIN == errno || EWOULDBLOCK == errno) break;
+                    LOG_WARN("QUIC: recvfrom fatal error: %s", strerror(errno));
+                    ctx->io_running = 0;
+                    if (ctx->rx_pipe[1] >= 0) close(ctx->rx_pipe[1]);
+                    if (ctx->tx_pipe[0] >= 0) close(ctx->tx_pipe[0]);
+                    break;
                 } else {
                     break;
                 }
